@@ -1,6 +1,6 @@
 __version__ = "1.3.0"
 
-from .config import SaeConfig, SparseCoderConfig, TrainConfig, TranscoderConfig
+from .config import SaeConfig, SparseCoderConfig, TrainConfig
 from .sparse_coder import Sae, SparseCoder
 from .trainer import SaeTrainer, Trainer
 
@@ -12,5 +12,4 @@ __all__ = [
     "SparseCoderConfig",
     "Trainer",
     "TrainConfig",
-    "TranscoderConfig",
 ]

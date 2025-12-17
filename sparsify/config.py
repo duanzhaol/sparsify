@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from functools import partial
 from typing import Literal
 
 from simple_parsing import Serializable, list_field
@@ -32,13 +31,9 @@ class SparseCoderConfig(Serializable):
     skip_connection: bool = False
     """Include a linear skip connection."""
 
-    transcode: bool = False
-    """Whether we want to predict the output of a module given its input."""
-
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
-TranscoderConfig = partial(SparseCoderConfig, transcode=True)
 
 
 @dataclass
@@ -87,6 +82,13 @@ class TrainConfig(Serializable):
 
     hookpoints: list[str] = list_field()
     """List of hookpoints to train sparse coders on."""
+
+    hook_mode: Literal["output", "input", "transcode"] = "output"
+    """Activation hook mode:
+    - output: autoencoder on module outputs (default)
+    - input: autoencoder on module inputs
+    - transcode: predict module outputs from inputs
+    """
 
     init_seeds: list[int] = list_field(0)
     """List of random seeds to use for initialization. If more than one, train a sparse

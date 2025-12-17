@@ -83,7 +83,11 @@ class Trainer:
                 # Add suffix to the name to disambiguate multiple seeds
                 name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
                 self.saes[name] = SparseCoder(
-                    input_widths[hook], cfg.sae, device, dtype=torch.float32
+                    input_widths[hook],
+                    cfg.sae,
+                    device,
+                    dtype=torch.float32,
+                    transcoder=(cfg.hook_mode == "transcode"),
                 )
 
         assert isinstance(dataset, Sized)
@@ -326,7 +330,7 @@ class Trainer:
 
             # If doing end-to-end transcoders, then we don't actually want to run the
             # modules that we're replacing
-            if self.cfg.sae.transcode:
+            if self.cfg.hook_mode == "transcode":
                 for point in self.cfg.hookpoints:
                     set_submodule(self.model.base_model, point, nn.Identity())
 
@@ -363,7 +367,8 @@ class Trainer:
                 outputs = world_outputs
 
                 # Don't bother with the communication overhead if we're autoencoding
-                if self.cfg.sae.transcode:
+                # on outputs (the default mode)
+                if self.cfg.hook_mode in ("input", "transcode"):
                     world_inputs = inputs.new_empty(
                         inputs.shape[0] * dist.get_world_size(), *inputs.shape[1:]
                     )
@@ -381,7 +386,14 @@ class Trainer:
 
             # Flatten the batch and sequence dimensions
             outputs = outputs.flatten(0, 1)
-            inputs = inputs.flatten(0, 1) if self.cfg.sae.transcode else outputs
+            inputs = inputs.flatten(0, 1)
+            match self.cfg.hook_mode:
+                case "output":
+                    inputs = outputs
+                case "input":
+                    outputs = inputs
+                case "transcode":
+                    pass
             mask = mask.flatten(0, 1)
 
             # Remove tokens not used for training
@@ -395,7 +407,7 @@ class Trainer:
                 # Ensure the preactivations are centered at initialization
                 # This is mathematically equivalent to Anthropic's proposal of
                 # subtracting the decoder bias
-                if self.cfg.sae.transcode:
+                if self.cfg.hook_mode == "transcode":
                     mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
                     mean_image = -mean @ raw.encoder.weight.data.T
                     raw.encoder.bias.data = mean_image
@@ -404,7 +416,7 @@ class Trainer:
                 raw.b_dec.data = mean.to(raw.dtype)
 
             # Make sure the W_dec is still unit-norm if we're autoencoding
-            if raw.cfg.normalize_decoder and not self.cfg.sae.transcode:
+            if raw.cfg.normalize_decoder and self.cfg.hook_mode != "transcode":
                 raw.set_decoder_norm_to_unit_norm()
 
             wrapped = maybe_wrapped[name]
@@ -510,7 +522,7 @@ class Trainer:
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
-                if self.cfg.sae.normalize_decoder and not self.cfg.sae.transcode:
+                if self.cfg.sae.normalize_decoder and self.cfg.hook_mode != "transcode":
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 

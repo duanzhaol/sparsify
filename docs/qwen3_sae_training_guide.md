@@ -72,7 +72,7 @@ output hidden_states (4096)
 
 **推荐 hookpoint**: `layers.X.post_attention_layernorm`
 - 原因：`post_attention_layernorm` 的输出就是 MLP 的输入
-- 模式：Autoencoder (`transcode=False`)
+- 模式：`--hook_mode output`（默认）
 - 输入维度：4096
 
 ### 2.2 o 矩阵乘输入
@@ -81,11 +81,10 @@ output hidden_states (4096)
 
 **推荐 hookpoint**: `layers.X.self_attn.o_proj`
 - 原因：直接 hook 到 o_proj，可以获取其输入
-- 模式：**Transcoder** (`transcode=True`)
-- 注意：Transcoder 模式下，SAE 学习从输入预测输出的映射
+- 模式：`--hook_mode input`
 - 输入维度：4096
 
-**重要说明**：由于 `o_proj` 的输入是 attention 内部的中间激活，不是任何模块的直接输出，所以需要使用 transcoder 模式来捕获其输入。
+**重要说明**：使用 `--hook_mode input` 可以在模块输入上训练 autoencoder。
 
 ---
 
@@ -128,7 +127,6 @@ python -m sparsify --help
 | `sae.k` | int | `32` | TopK 的 k 值（激活的 latent 数量）|
 | `sae.multi_topk` | bool | `False` | 是否使用 Multi-TopK 损失 |
 | `sae.skip_connection` | bool | `False` | 是否添加线性跳跃连接 |
-| `sae.transcode` | bool | `False` | 是否为 transcoder 模式 |
 
 #### 训练参数
 
@@ -151,6 +149,7 @@ python -m sparsify --help
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `hookpoints` | list | `[]` | hookpoint 列表（支持 glob 模式）|
+| `hook_mode` | str | `output` | hook 模式：`output`（默认）, `input`, `transcode` |
 | `layers` | list | `[]` | 层索引列表 |
 | `layer_stride` | int | `1` | 层间隔 |
 | `init_seeds` | list | `[0]` | 初始化种子列表 |
@@ -199,9 +198,9 @@ python -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode False \
     \
     --hookpoints "layers.16.post_attention_layernorm" \
+    --hook_mode output \
     --init_seeds 0 \
     \
     --batch_size 8 \
@@ -221,12 +220,12 @@ python -m sparsify \
     --wandb_log_frequency 1
 ```
 
-### 4.2 训练 o_proj 输入的 Transcoder (单层示例：第 16 层)
+### 4.2 训练 o_proj 输入的 SAE (单层示例：第 16 层)
 
 ```bash
 python -m sparsify \
-    Qwen/Qwen3-8B \
-    HuggingFaceFW/fineweb \
+    /model-weights/Qwen3-8BB \
+    /mnt/data/fineweb-edu/sample/10BT \
     \
     --split "train" \
     --ctx_len 2048 \
@@ -234,7 +233,6 @@ python -m sparsify \
     --text_column "text" \
     --shuffle_seed 42 \
     --data_preprocessing_num_proc 8 \
-    --data_args "name=sample-10BT" \
     \
     --sae.activation "topk" \
     --sae.expansion_factor 32 \
@@ -243,9 +241,9 @@ python -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode True \
     \
     --hookpoints "layers.16.self_attn.o_proj" \
+    --hook_mode input \
     --init_seeds 0 \
     \
     --batch_size 8 \
@@ -260,7 +258,7 @@ python -m sparsify \
     --save_every 1000 \
     --save_best True \
     --save_dir "checkpoints" \
-    --run_name "qwen3-8b-layer16-o-proj-input-transcoder" \
+    --run_name "qwen3-8b-layer16-o-proj-input-sae" \
     --log_to_wandb True \
     --wandb_log_frequency 1
 ```
@@ -287,9 +285,9 @@ python -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode False \
     \
     --hookpoints "layers.16.post_attention_layernorm" "layers.16.self_attn" \
+    --hook_mode output \
     --init_seeds 0 \
     \
     --batch_size 8 \
@@ -332,9 +330,9 @@ python -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode False \
     \
     --hookpoints "layers.*.post_attention_layernorm" \
+    --hook_mode output \
     --layer_stride 4 \
     --init_seeds 0 \
     \
@@ -381,9 +379,9 @@ torchrun --nproc_per_node 8 -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode False \
     \
     --hookpoints "layers.16.post_attention_layernorm" \
+    --hook_mode output \
     --init_seeds 0 \
     \
     --batch_size 4 \
@@ -428,9 +426,9 @@ torchrun --nproc_per_node 8 -m sparsify \
     --sae.k 32 \
     --sae.multi_topk False \
     --sae.skip_connection False \
-    --sae.transcode False \
     \
     --hookpoints "layers.*.post_attention_layernorm" \
+    --hook_mode output \
     --layer_stride 1 \
     --init_seeds 0 \
     \
@@ -482,7 +480,6 @@ sae_config = SaeConfig(
     k=32,                        # TopK 的 k 值
     multi_topk=False,            # Multi-TopK 损失
     skip_connection=False,       # 跳跃连接
-    transcode=False,             # Transcoder 模式
 )
 
 # 训练配置
@@ -508,6 +505,7 @@ train_config = TrainConfig(
 
     # Hookpoints
     hookpoints=["layers.16.post_attention_layernorm"],
+    hook_mode="output",  # "output", "input", 或 "transcode"
     layers=[],
     layer_stride=1,
     init_seeds=[0],
@@ -563,15 +561,15 @@ trainer.fit()
 
 ### 7.1 常用 Hookpoint 对照表
 
-| 你想要的位置 | Hookpoint | 模式 | 说明 |
-|-------------|-----------|------|------|
-| 层输入 (残差流) | `layers.X` | autoencoder | 层的完整输出 |
-| Attention 输入 | `layers.X.input_layernorm` | autoencoder | LayerNorm 后 |
-| Attention 输出 | `layers.X.self_attn` | autoencoder | 含 o_proj |
-| **o_proj 输入** | `layers.X.self_attn.o_proj` | **transcoder** | Attention 内部 |
-| **MLP/gate_up 输入** | `layers.X.post_attention_layernorm` | **autoencoder** | LayerNorm 后 |
-| MLP 输出 | `layers.X.mlp` | autoencoder | 含 down_proj |
-| down_proj 输入 | `layers.X.mlp.down_proj` | transcoder | MLP 内部 |
+| 你想要的位置 | Hookpoint | hook_mode | 说明 |
+|-------------|-----------|-----------|------|
+| 层输入 (残差流) | `layers.X` | `output` | 层的完整输出 |
+| Attention 输入 | `layers.X.input_layernorm` | `output` | LayerNorm 后 |
+| Attention 输出 | `layers.X.self_attn` | `output` | 含 o_proj |
+| **o_proj 输入** | `layers.X.self_attn.o_proj` | **`input`** | Attention 内部 |
+| **MLP/gate_up 输入** | `layers.X.post_attention_layernorm` | **`output`** | LayerNorm 后 |
+| MLP 输出 | `layers.X.mlp` | `output` | 含 down_proj |
+| down_proj 输入 | `layers.X.mlp.down_proj` | `input` | MLP 内部 |
 
 ### 7.2 Glob 模式示例
 
@@ -621,14 +619,19 @@ trainer.fit()
 
 ## 9. 常见问题
 
-### Q1: 为什么 o_proj 输入需要用 transcoder 模式？
+### Q1: hook_mode 的三种模式有什么区别？
 
-因为 sparsify 的 hook 机制在 autoencoder 模式下使用模块的**输出**作为训练目标。而 `o_proj` 的输入是 attention 计算的中间结果，不是任何模块的直接输出。使用 transcoder 模式时，hook 会捕获模块的**输入**。
+| hook_mode | SAE 输入 | SAE 目标 | 用途 |
+|-----------|----------|----------|------|
+| `output` | 模块输出 | 模块输出 | 默认，在模块输出上训练 autoencoder |
+| `input` | 模块输入 | 模块输入 | 在模块输入上训练 autoencoder |
+| `transcode` | 模块输入 | 模块输出 | 从输入预测输出的 transcoder |
 
-### Q2: transcode=True 和 transcode=False 的区别？
+### Q2: 什么时候使用 hook_mode=input？
 
-- `transcode=False` (Autoencoder): 学习重建输入 `x → z → x̂`
-- `transcode=True` (Transcoder): 学习从输入预测输出 `x_in → z → x_out`
+当你想要训练的激活是某个模块的**输入**而不是输出时使用。例如：
+- `o_proj` 的输入（attention 计算后、投影前的激活）
+- `down_proj` 的输入（MLP 中间激活）
 
 ### Q3: 如何选择 k 值和 expansion_factor？
 

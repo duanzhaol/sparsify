@@ -44,10 +44,12 @@ class SparseCoder(nn.Module):
         dtype: torch.dtype | None = None,
         *,
         decoder: bool = True,
+        transcoder: bool = False,
     ):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
+        self.transcoder = transcoder
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
         self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
@@ -55,7 +57,7 @@ class SparseCoder(nn.Module):
 
         if decoder:
             # Transcoder initialization: use zeros
-            if cfg.transcode:
+            if transcoder:
                 self.W_dec = nn.Parameter(torch.zeros_like(self.encoder.weight.data))
 
             # Sparse autoencoder initialization: use the transpose of encoder weights
@@ -188,7 +190,7 @@ class SparseCoder(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
-        if not self.cfg.transcode:
+        if not self.transcoder:
             x = x - self.b_dec
 
         return fused_encoder(
