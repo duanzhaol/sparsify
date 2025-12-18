@@ -224,43 +224,43 @@ python -m sparsify \
 
 ```bash
 python -m sparsify \
-    /model-weights/Qwen3-8BB \
-    /mnt/data/fineweb-edu/sample/10BT \
-    \
-    --split "train" \
-    --ctx_len 2048 \
-    --max_examples 1000000 \
-    --text_column "text" \
-    --shuffle_seed 42 \
-    --data_preprocessing_num_proc 8 \
-    \
-    --sae.activation "topk" \
-    --sae.expansion_factor 32 \
-    --sae.normalize_decoder True \
-    --sae.num_latents 0 \
-    --sae.k 32 \
-    --sae.multi_topk False \
-    --sae.skip_connection False \
-    \
-    --hookpoints "layers.16.self_attn.o_proj" \
-    --hook_mode input \
-    --init_seeds 0 \
-    \
-    --batch_size 8 \
-    --grad_acc_steps 4 \
-    --micro_acc_steps 2 \
-    --loss_fn "fvu" \
-    --optimizer "signum" \
-    --lr 5e-3 \
-    --auxk_alpha 0.03125 \
-    --dead_feature_threshold 10000000 \
-    \
-    --save_every 1000 \
-    --save_best True \
-    --save_dir "checkpoints" \
-    --run_name "qwen3-8b-layer16-o-proj-input-sae" \
-    --log_to_wandb True \
-    --wandb_log_frequency 1
+    ~/models/Qwen3-8B/ \
+    ~/fineweb-edu/sample/10BT \
+      \
+      --split "train" \
+      --ctx_len 2048 \
+      --max_examples 1000000 \
+      --text_column "text" \
+      --shuffle_seed 42 \
+      --data_preprocessing_num_proc 8 \
+      \
+      --activation "topk" \
+      --expansion_factor 32 \
+      --normalize_decoder True \
+      --num_latents 0 \
+      -k 32 \
+      --multi_topk False \
+      --skip_connection False \
+      \
+      --hookpoints "layers.16.self_attn.o_proj" \
+      --hook_mode input \
+      --init_seeds 0 \
+      \
+      --batch_size 2 \
+      --grad_acc_steps 8 \
+      --micro_acc_steps 1 \
+      --loss_fn "fvu" \
+      --optimizer "signum" \
+      --lr 5e-3 \
+      --auxk_alpha 0.03125 \
+      --dead_feature_threshold 10000000 \
+      \
+      --save_every 1000 \
+      --save_best True \
+      --save_dir "checkpoints" \
+      --run_name "qwen3-8b-layer16-o-proj-input-sae" \
+      --log_to_wandb True \
+      --wandb_log_frequency 1
 ```
 
 ### 4.3 同时训练两个位置 (多 hookpoints)

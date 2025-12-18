@@ -2,6 +2,7 @@ import os
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
+from glob import glob
 from multiprocessing import cpu_count
 
 import torch
@@ -182,9 +183,30 @@ def run():
         print(f"Training on '{args.dataset}' (split '{args.split}')")
         print(f"Storing model weights in {model.dtype}")
 
-        trainer = Trainer(args, dataset, model)
+        # Determine the checkpoint path for resume
+        resume_path = None
         if args.resume:
-            trainer.load_state(f"checkpoints/{args.run_name}" or "checkpoints/unnamed")
+            base_path = f"checkpoints/{args.run_name}" if args.run_name else "checkpoints/unnamed"
+
+            # If exact path exists, use it
+            if os.path.exists(base_path):
+                resume_path = base_path
+            else:
+                # Try to find the latest checkpoint matching the pattern
+                pattern = f"{base_path}_dp*_bs*_ga*_ef*_k*_*"
+                matching_paths = sorted(glob(pattern))
+                if matching_paths:
+                    resume_path = matching_paths[-1]  # Use the latest (sorted by name, which includes timestamp)
+                    print(f"Found checkpoint to resume from: {resume_path}")
+                else:
+                    raise FileNotFoundError(
+                        f"No checkpoint found matching pattern: {pattern}\n"
+                        f"If resuming, make sure the checkpoint exists or specify the full path."
+                    )
+
+        trainer = Trainer(args, dataset, model, resume_from=resume_path)
+        if args.resume:
+            trainer.load_state(resume_path)
         elif args.finetune:
             for name, sae in trainer.saes.items():
                 load_model(

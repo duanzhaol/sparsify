@@ -1,4 +1,6 @@
 import os
+import json
+import time
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -31,6 +33,7 @@ class Trainer:
         cfg: TrainConfig,
         dataset: HfDataset | MemmapDataset,
         model: PreTrainedModel,
+        resume_from: str | None = None,
     ):
         # Store the whole model, including any potential causal LM wrapper
         self.model = model
@@ -60,6 +63,7 @@ class Trainer:
 
         self.cfg = cfg
         self.dataset = dataset
+        self.resume_from = resume_from  # Store resume path for later use
         self.distribute_modules()
 
         device = model.device
@@ -169,6 +173,7 @@ class Trainer:
 
         print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
         self.global_step = 0
+        self.total_tokens = 0  # Total tokens processed (for wandb x-axis)
         self.num_tokens_since_fired = {
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
             for name, sae in self.saes.items()
@@ -176,6 +181,11 @@ class Trainer:
         self.exclude_tokens = torch.tensor(
             self.cfg.exclude_tokens, device=device, dtype=torch.long
         )
+
+        # Load elbow thresholds if provided
+        self.elbow_thresholds: dict[str, float] = {}
+        if cfg.elbow_threshold_path:
+            self._load_elbow_thresholds(cfg.elbow_threshold_path)
 
         num_latents = list(self.saes.values())[0].num_latents
         self.initial_k = min(num_latents, round(list(input_widths.values())[0] * 10))
@@ -187,6 +197,58 @@ class Trainer:
             else float("inf")
         )
 
+    def _load_elbow_thresholds(self, path: str):
+        """Load elbow thresholds from JSON file and match to hookpoints.
+
+        JSON format: {"layer_10/mlp_down_proj": {"elbow_p": 0.95, "elbow_value": 1.234}}
+        Hookpoint format: "layers.10.mlp.down_proj" or "h.10.attn.o_proj"
+
+        Supports both underscore and dot separators in component names.
+        """
+        with open(path, 'r') as f:
+            elbow_data = json.load(f)
+
+        for hookpoint in self.cfg.hookpoints:
+            matched = False
+
+            # Strategy 1: Direct match
+            if hookpoint in elbow_data:
+                self.elbow_thresholds[hookpoint] = elbow_data[hookpoint]["elbow_value"]
+                matched = True
+                continue
+
+            # Strategy 2: Extract layer number and component
+            # From "layers.10.mlp.down_proj" -> try "layer_10/mlp.down_proj", "layer_10/mlp_down_proj", etc.
+            parts = hookpoint.split('.')
+            if len(parts) >= 2 and parts[0] in ('layers', 'h', 'model.layers'):
+                layer_num = parts[1]
+                component = '.'.join(parts[2:]) if len(parts) > 2 else ''
+
+                # Generate search patterns with both dot and underscore formats
+                search_patterns = []
+                if component:
+                    # Try both dot and underscore versions
+                    component_underscore = component.replace('.', '_')
+                    search_patterns.extend([
+                        f"layer_{layer_num}/{component}",
+                        f"layer_{layer_num}/{component_underscore}",
+                    ])
+                search_patterns.append(f"layer_{layer_num}")
+
+                for pattern in search_patterns:
+                    for json_key, value in elbow_data.items():
+                        if pattern in json_key or json_key in hookpoint:
+                            self.elbow_thresholds[hookpoint] = value["elbow_value"]
+                            matched = True
+                            break
+                    if matched:
+                        break
+
+            if not matched:
+                print(f"⚠️  No elbow threshold found for hookpoint '{hookpoint}'")
+
+        print(f"✓ Loaded elbow thresholds for {len(self.elbow_thresholds)}/{len(self.cfg.hookpoints)} hookpoints")
+
     def load_state(self, path: str):
         """Load the trainer state from disk."""
         device = self.model.device
@@ -196,6 +258,8 @@ class Trainer:
             f"{path}/state.pt", map_location=device, weights_only=True
         )
         self.global_step = train_state["global_step"]
+        # Backward compatibility: older checkpoints don't have total_tokens
+        self.total_tokens = train_state.get("total_tokens", 0)
 
         for file in glob(f"{path}/rank_*_state.pt"):
             rank_state = torch.load(file, map_location=device, weights_only=True)
@@ -248,6 +312,27 @@ class Trainer:
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
 
+        # Generate full run name with hyperparameters and timestamp
+        # This is used for both wandb and checkpoint paths
+        if self.resume_from:
+            # Extract the run name from the resume path (remove save_dir prefix)
+            # e.g., "checkpoints/my_run_dp8_bs1_ga8_ef8_k32_20231218_120000" -> "my_run_dp8_bs1_ga8_ef8_k32_20231218_120000"
+            self.full_run_name = self.resume_from.split("/")[-1]
+        else:
+            # Generate new run name with timestamp for new training
+            from datetime import datetime
+
+            world_size = dist.get_world_size() if dist.is_initialized() else 1
+            base_name = self.cfg.run_name or "unnamed"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Format: {base_name}_dp{world_size}_bs{batch_size}_ga{grad_acc}_ef{expansion}_k{k}_{timestamp}
+            self.full_run_name = (
+                f"{base_name}_dp{world_size}_bs{self.cfg.batch_size}"
+                f"_ga{self.cfg.grad_acc_steps}_ef{self.cfg.sae.expansion_factor}_k{self.cfg.sae.k}"
+                f"_{timestamp}"
+            )
+
         wandb = None
         if self.cfg.log_to_wandb and rank_zero:
             try:
@@ -255,7 +340,7 @@ class Trainer:
 
                 wandb.init(
                     entity=os.environ.get("WANDB_ENTITY", None),
-                    name=self.cfg.run_name,
+                    name=self.full_run_name,
                     project=os.environ.get("WANDB_PROJECT", "sparsify"),
                     config=asdict(self.cfg),
                     save_code=True,
@@ -307,17 +392,38 @@ class Trainer:
         denom = acc_steps * self.cfg.wandb_log_frequency
         num_tokens_in_step = 0
 
+        # Timing metrics (accumulated over wandb_log_frequency steps)
+        total_forward_time = 0.0
+        total_backward_time = 0.0
+        total_metrics_time = 0.0
+        timing_step_count = 0
+
         # For logging purposes
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
         avg_ce = 0.0
         avg_kl = 0.0
+        # Exceed metrics (per hookpoint, per alpha)
+        avg_exceed: dict[str, dict[float, float]] = defaultdict(lambda: defaultdict(float))
         avg_losses = (
             {name: float("inf") for name in self.local_hookpoints()}
             if self.cfg.loss_fn == "fvu"
             else float("inf")
         )
+
+        # CUDA events for accurate GPU timing
+        if device.type == "cuda":
+            forward_start = torch.cuda.Event(enable_timing=True)
+            forward_end = torch.cuda.Event(enable_timing=True)
+            backward_start = torch.cuda.Event(enable_timing=True)
+            backward_end = torch.cuda.Event(enable_timing=True)
+            metrics_start = torch.cuda.Event(enable_timing=True)
+            metrics_end = torch.cuda.Event(enable_timing=True)
+        else:
+            forward_start = forward_end = None
+            backward_start = backward_end = None
+            metrics_start = metrics_end = None
 
         if self.cfg.loss_fn == "ce":
             batch = next(iter(dl))
@@ -342,6 +448,7 @@ class Trainer:
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         def hook(module: nn.Module, inputs, outputs):
+            nonlocal total_forward_time, total_backward_time, total_metrics_time, timing_step_count
             aux_out = None
 
             # Maybe unpack tuple inputs and outputs
@@ -452,6 +559,47 @@ class Trainer:
                     self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
                 )
 
+            # Compute exceed metrics if elbow thresholds available
+            if name in self.elbow_thresholds and self.cfg.exceed_alphas:
+                # Start metrics timing
+                if device.type == "cuda":
+                    metrics_start.record()
+                else:
+                    metrics_time_start = time.perf_counter()
+
+                # CRITICAL: Compute in ORIGINAL space
+                # Both outputs and out.sae_out are already in original space
+                # (SAE decoder adds b_dec back at sparse_coder.py:204)
+                original_target = outputs
+                original_recon = out.sae_out
+
+                # Compute absolute reconstruction error
+                error_magnitude = torch.abs(original_target - original_recon)
+
+                # Get elbow threshold for this hookpoint
+                elbow_value = self.elbow_thresholds[name]
+
+                # Count exceedances for each alpha
+                num_elements = error_magnitude.numel()
+                for alpha in self.cfg.exceed_alphas:
+                    threshold = alpha * elbow_value
+                    exceed_count = (error_magnitude > threshold).sum().float()
+                    exceed_ratio = exceed_count / num_elements
+
+                    # Accumulate (average over steps)
+                    avg_exceed[name][alpha] += float(
+                        self.maybe_all_reduce(exceed_ratio.detach()) / denom
+                    )
+
+                # End metrics timing
+                if device.type == "cuda":
+                    metrics_end.record()
+                    torch.cuda.synchronize()
+                    total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
+                else:
+                    metrics_time_end = time.perf_counter()
+                    total_metrics_time += metrics_time_end - metrics_time_start
+
             # Do a "local" backward pass if we're not training end-to-end
             loss = (
                 out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
@@ -490,6 +638,13 @@ class Trainer:
                 else None
             )
 
+            # Start timing forward pass
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+                forward_start.record()
+            else:
+                forward_time_start = time.perf_counter()
+
             # Forward pass on the model to get the next batch of activations
             handles = [
                 mod.register_forward_hook(hook) for mod in name_to_module.values()
@@ -498,23 +653,83 @@ class Trainer:
                 match self.cfg.loss_fn:
                     case "ce":
                         ce = self.model(x, labels=x).loss
+
+                        # End forward, start backward timing
+                        if device.type == "cuda":
+                            forward_end.record()
+                            torch.cuda.synchronize()
+                            backward_start.record()
+                        else:
+                            forward_time_end = time.perf_counter()
+                            backward_time_start = time.perf_counter()
+
                         ce.div(acc_steps).backward()
 
-                        avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
+                        # End backward timing
+                        if device.type == "cuda":
+                            backward_end.record()
+                            torch.cuda.synchronize()
+                        else:
+                            backward_time_end = time.perf_counter()
 
+                        avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
                         avg_losses = avg_ce
+
                     case "kl":
                         dirty_lps = self.model(x).logits.log_softmax(dim=-1)
                         kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
+
+                        # End forward, start backward timing
+                        if device.type == "cuda":
+                            forward_end.record()
+                            torch.cuda.synchronize()
+                            backward_start.record()
+                        else:
+                            forward_time_end = time.perf_counter()
+                            backward_time_start = time.perf_counter()
+
                         kl.div(acc_steps).backward()
+
+                        # End backward timing
+                        if device.type == "cuda":
+                            backward_end.record()
+                            torch.cuda.synchronize()
+                        else:
+                            backward_time_end = time.perf_counter()
 
                         avg_kl += float(self.maybe_all_reduce(kl) / denom)
                         avg_losses = avg_kl
+
                     case "fvu":
                         self.model(x)
+
+                        # For FVU, backward happens in hook, so end both timings here
+                        if device.type == "cuda":
+                            forward_end.record()
+                            # Record backward events even though there's no separate backward pass
+                            # This ensures elapsed_time() calls don't fail
+                            backward_start.record()
+                            backward_end.record()
+                            torch.cuda.synchronize()
+                        else:
+                            forward_time_end = time.perf_counter()
+                            backward_time_start = forward_time_end
+                            backward_time_end = forward_time_end
+
                         avg_losses = dict(avg_fvu)
+
                     case other:
                         raise ValueError(f"Unknown loss function '{other}'")
+
+                # Accumulate timing metrics
+                if device.type == "cuda":
+                    total_forward_time += forward_start.elapsed_time(forward_end) / 1000.0  # ms to s
+                    total_backward_time += backward_start.elapsed_time(backward_end) / 1000.0
+                else:
+                    total_forward_time += forward_time_end - forward_time_start
+                    total_backward_time += backward_time_end - backward_time_start
+                timing_step_count += 1
+
             finally:
                 for handle in handles:
                     handle.remove()
@@ -544,6 +759,17 @@ class Trainer:
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
 
+                    # Accumulate total tokens for wandb x-axis
+                    # In DDP mode, we need to sum across all ranks since each rank processes different data
+                    if dist.is_initialized() and not self.cfg.distribute_modules:
+                        # Sum tokens across all ranks
+                        num_tokens_tensor = torch.tensor(num_tokens_in_step, device=device, dtype=torch.long)
+                        dist.all_reduce(num_tokens_tensor, op=dist.ReduceOp.SUM)
+                        self.total_tokens += num_tokens_tensor.item()
+                    else:
+                        # Single GPU or distribute_modules mode (each rank already sees all data)
+                        self.total_tokens += num_tokens_in_step
+
                     # Reset stats for this step
                     num_tokens_in_step = 0
                     for mask in did_fire.values():
@@ -565,6 +791,29 @@ class Trainer:
                     elif self.cfg.loss_fn == "kl":
                         info["kl_loss"] = avg_kl
 
+                    # Timing metrics (averaged across all ranks in DDP mode)
+                    if timing_step_count > 0:
+                        avg_forward_time = total_forward_time / timing_step_count
+                        avg_backward_time = total_backward_time / timing_step_count
+
+                        # All-reduce timing metrics across ranks
+                        forward_time_tensor = torch.tensor(avg_forward_time, device=device)
+                        backward_time_tensor = torch.tensor(avg_backward_time, device=device)
+
+                        info["timing/forward_time"] = float(
+                            self.maybe_all_reduce(forward_time_tensor)
+                        )
+                        info["timing/backward_time"] = float(
+                            self.maybe_all_reduce(backward_time_tensor)
+                        )
+
+                        if total_metrics_time > 0:
+                            avg_metrics_time = total_metrics_time / timing_step_count
+                            metrics_time_tensor = torch.tensor(avg_metrics_time, device=device)
+                            info["timing/metrics_time"] = float(
+                                self.maybe_all_reduce(metrics_time_tensor)
+                            )
+
                     for name in self.saes:
                         mask = (
                             self.num_tokens_since_fired[name]
@@ -572,14 +821,19 @@ class Trainer:
                         )
 
                         ratio = mask.mean(dtype=torch.float32).item()
-                        info.update({f"dead_pct/{name}": ratio})
+                        info.update({f"{name}/dead_pct": ratio})
                         if self.cfg.loss_fn == "fvu":
-                            info[f"fvu/{name}"] = avg_fvu[name]
+                            info[f"{name}/fvu"] = avg_fvu[name]
 
                         if self.cfg.auxk_alpha > 0:
-                            info[f"auxk/{name}"] = avg_auxk_loss[name]
+                            info[f"{name}/auxk"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
-                            info[f"multi_topk_fvu/{name}"] = avg_multi_topk_fvu[name]
+                            info[f"{name}/multi_topk_fvu"] = avg_multi_topk_fvu[name]
+
+                        # Exceed metrics
+                        if name in avg_exceed:
+                            for alpha, exceed_val in avg_exceed[name].items():
+                                info[f"{name}/exceed_alpha_{alpha:.2f}"] = exceed_val
 
                     if self.cfg.distribute_modules:
                         outputs = [{} for _ in range(dist.get_world_size())]
@@ -588,15 +842,22 @@ class Trainer:
 
                     if rank_zero:
                         info["k"] = k
+                        info["_step"] = step  # Keep gradient step count for reference
 
                         if wandb is not None:
-                            wandb.log(info, step=step)
+                            # Use total tokens as x-axis for fair comparison across configs
+                            wandb.log(info, step=self.total_tokens)
 
                 avg_auxk_loss.clear()
                 avg_fvu.clear()
                 avg_multi_topk_fvu.clear()
+                avg_exceed.clear()  # NEW
                 avg_ce = 0.0
                 avg_kl = 0.0
+                total_forward_time = 0.0  # NEW
+                total_backward_time = 0.0  # NEW
+                total_metrics_time = 0.0  # NEW
+                timing_step_count = 0  # NEW
 
             self.global_step += 1
             pbar.update()
@@ -678,7 +939,10 @@ class Trainer:
                 torch.save(optimizer.state_dict(), f"{path}/optimizer_{i}.pt")
 
             torch.save(
-                {"global_step": self.global_step},
+                {
+                    "global_step": self.global_step,
+                    "total_tokens": self.total_tokens,
+                },
                 f"{path}/state.pt",
             )
 
@@ -699,7 +963,7 @@ class Trainer:
 
     def save(self):
         """Save the SAEs and training state to disk."""
-        path = f'{self.cfg.save_dir}/{self.cfg.run_name or "unnamed"}'
+        path = f'{self.cfg.save_dir}/{self.full_run_name}'
 
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
 
@@ -712,7 +976,7 @@ class Trainer:
 
     def save_best(self, avg_loss: float | dict[str, float]):
         """Save individual sparse coders to disk if they have the lowest loss."""
-        base_path = f'{self.cfg.save_dir}/{self.cfg.run_name or "unnamed"}/best'
+        base_path = f'{self.cfg.save_dir}/{self.full_run_name}/best'
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
 
         if isinstance(avg_loss, dict):

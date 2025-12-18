@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from simple_parsing import Serializable, list_field
@@ -80,6 +81,12 @@ class TrainConfig(Serializable):
     exclude_tokens: list[int] = list_field()
     """List of tokens to ignore during sparse coders training."""
 
+    exceed_alphas: list[float] = list_field(0.05, 0.10, 0.25, 0.50)
+    """List of alpha coefficients for exceed metrics (error > alpha * elbow_value)."""
+
+    elbow_threshold_path: str | None = None
+    """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
+
     hookpoints: list[str] = list_field()
     """List of hookpoints to train sparse coders on."""
 
@@ -131,3 +138,10 @@ class TrainConfig(Serializable):
 
         if not self.init_seeds:
             raise ValueError("Must specify at least one random seed.")
+
+        # Validate exceed configuration
+        if self.exceed_alphas and not all(alpha > 0 for alpha in self.exceed_alphas):
+            raise ValueError("All exceed_alphas must be positive.")
+
+        if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
+            raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
