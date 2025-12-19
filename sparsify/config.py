@@ -50,6 +50,9 @@ class TrainConfig(Serializable):
     micro_acc_steps: int = 1
     """Chunk the activations into this number of microbatches for training."""
 
+    max_tokens: int | None = None
+    """Maximum number of tokens to train on. Training stops when this limit is reached."""
+
     loss_fn: Literal["ce", "fvu", "kl"] = "fvu"
     """Loss function to use for training the sparse coders.
 

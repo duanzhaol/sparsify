@@ -781,6 +781,14 @@ class Trainer:
                         # Single GPU or distribute_modules mode (each rank already sees all data)
                         self.total_tokens += num_tokens_in_step
 
+                    # Check if we've reached the target token count
+                    if self.cfg.max_tokens and self.total_tokens >= self.cfg.max_tokens:
+                        if not dist.is_initialized() or dist.get_rank() == 0:
+                            print(f"\n✓ Reached target token count: {self.total_tokens:,} / {self.cfg.max_tokens:,}")
+                        # Save checkpoint before stopping
+                        self.save()
+                        return
+
                     # Reset stats for this step
                     num_tokens_in_step = 0
                     for mask in did_fire.values():
