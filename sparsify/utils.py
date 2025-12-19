@@ -61,6 +61,80 @@ def resolve_widths(
     return shapes
 
 
+def get_max_layer_index(hookpoints: list[str], layers_name: str) -> int | None:
+    """Extract maximum layer index from hookpoints.
+
+    Args:
+        hookpoints: List of hookpoint paths like "layers.0.self_attn.o_proj"
+        layers_name: Name of the layers ModuleList (e.g., "layers" or "h")
+
+    Returns:
+        Maximum layer index if found, None otherwise
+    """
+    max_idx = -1
+    base_name = layers_name.split('.')[0]  # Handle "layers" or "model.layers"
+
+    for hookpoint in hookpoints:
+        parts = hookpoint.split('.')
+        # Check format: "layers.N.component" where N is integer
+        if len(parts) >= 2 and parts[0] == base_name:
+            try:
+                layer_idx = int(parts[1])
+                max_idx = max(max_idx, layer_idx)
+            except ValueError:
+                continue  # Skip non-numeric indices
+
+    return max_idx if max_idx >= 0 else None
+
+
+class StopForwardException(Exception):
+    """Exception used to stop forward pass early."""
+    pass
+
+
+def partial_forward_to_layer(
+    model: PreTrainedModel,
+    input_ids: Tensor,
+    max_layer_idx: int
+) -> None:
+    """Run forward pass only up to max_layer_idx to trigger necessary hooks.
+
+    This avoids computing unnecessary layers when training SAEs on early layers.
+
+    Args:
+        model: The transformer model
+        input_ids: Input token IDs
+        max_layer_idx: Maximum layer index to run (inclusive)
+    """
+    # Get the layer list
+    _, layers = get_layer_list(model)
+
+    # Register a hook on the last layer we need to stop after it
+    stop_hook_handle = None
+
+    def stop_hook(module, input):
+        """Hook that raises exception to stop forward pass."""
+        # Remove the hook immediately to avoid issues
+        if stop_hook_handle is not None:
+            stop_hook_handle.remove()
+        raise StopForwardException()
+
+    # Register hook on the layer AFTER the one we want (to stop after max_layer completes)
+    if max_layer_idx < len(layers) - 1:
+        stop_hook_handle = layers[max_layer_idx + 1].register_forward_pre_hook(stop_hook)
+
+    try:
+        # Run the full model forward - it will stop early due to our hook
+        model(input_ids)
+    except StopForwardException:
+        # Expected - this means we successfully stopped early
+        pass
+    finally:
+        # Clean up hook if it wasn't removed
+        if stop_hook_handle is not None:
+            stop_hook_handle.remove()
+
+
 def set_submodule(model: nn.Module, submodule_path: str, new_submodule: nn.Module):
     """
     Replaces a submodule in a PyTorch model dynamically.

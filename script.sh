@@ -89,7 +89,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node 4 --master_port 29501 -m 
       --hookpoints "layers.0.self_attn.o_proj" \
       --hook_mode input \
       --init_seeds 0 \
-      --batch_size 1 \
+      --batch_size 2 \
       --grad_acc_steps 8 \
       --micro_acc_steps 1 \
       --loss_fn "fvu" \

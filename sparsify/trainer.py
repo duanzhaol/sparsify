@@ -24,7 +24,7 @@ from .data import MemmapDataset
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
-from .utils import get_layer_list, resolve_widths, set_submodule
+from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
 
 
 class Trainer:
@@ -65,6 +65,13 @@ class Trainer:
         self.dataset = dataset
         self.resume_from = resume_from  # Store resume path for later use
         self.distribute_modules()
+
+        # Detect maximum layer index for partial forward optimization (FVU only)
+        if cfg.loss_fn == "fvu":
+            layers_name, _ = get_layer_list(model)
+            self._max_layer_for_fvu = get_max_layer_index(cfg.hookpoints, layers_name)
+        else:
+            self._max_layer_for_fvu = None
 
         device = model.device
         input_widths = resolve_widths(model, cfg.hookpoints)
@@ -701,7 +708,11 @@ class Trainer:
                         avg_losses = avg_kl
 
                     case "fvu":
-                        self.model(x)
+                        # Use partial forward if possible to save computation
+                        if self._max_layer_for_fvu is not None:
+                            partial_forward_to_layer(self.model, x, self._max_layer_for_fvu)
+                        else:
+                            self.model(x)  # Fallback to full forward
 
                         # For FVU, backward happens in hook, so end both timings here
                         if device.type == "cuda":
