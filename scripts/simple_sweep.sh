@@ -8,29 +8,33 @@ set -e  # Exit on error
 MODEL="~/models/Qwen3-8B/"
 DATASET="~/fineweb-edu/sample/10BT"
 NUM_GPUS=4
-MAX_TOKENS=1000000  # 100M tokens per run
+MASTER_PORT=29500
 
-# Hyperparameter grids
+# Hyperparameter grids (modify these for your sweep)
 EXPANSION_FACTORS=(4 8 12 16 20)
 K_VALUES=(8 16)
 
-# Base command template
-BASE_CMD="torchrun --nproc_per_node $NUM_GPUS -m sparsify \
+# Base command template (matches your reference command)
+BASE_CMD="torchrun --nproc_per_node $NUM_GPUS --master_port $MASTER_PORT -m sparsify \
   $MODEL \
   $DATASET \
   --split train \
   --ctx_len 2048 \
-  --hookpoints 'layers.0.self_attn.o_proj' \
-  --hook_mode input \
-  --batch_size 1 \
-  --grad_acc_steps 8 \
-  --micro_acc_steps 1 \
-  --max_tokens $MAX_TOKENS \
+  --max_examples 1000000 \
+  --text_column text \
+  --shuffle_seed 42 \
+  --data_preprocessing_num_proc 8 \
   --activation topk \
   --normalize_decoder True \
   --num_latents 0 \
   --multi_topk False \
   --skip_connection False \
+  --hookpoints 'layers.0.self_attn.o_proj' \
+  --hook_mode input \
+  --init_seeds 0 \
+  --batch_size 1 \
+  --grad_acc_steps 8 \
+  --micro_acc_steps 1 \
   --loss_fn fvu \
   --optimizer signum \
   --lr 5e-3 \
@@ -38,13 +42,12 @@ BASE_CMD="torchrun --nproc_per_node $NUM_GPUS -m sparsify \
   --dead_feature_threshold 10000000 \
   --save_every 100 \
   --save_best True \
-  --save_dir checkpoints \
+  --save_dir /data/checkpoints \
   --log_to_wandb True \
   --wandb_log_frequency 1 \
-  --data_preprocessing_num_proc 8 \
-  --shuffle_seed 42 \
-  --text_column text \
-  --init_seeds 0"
+  --elbow_threshold_path ~/sparsify/thresholds.json \
+  --max_tokens 100000000 \
+  --exceed_alphas 0.05 0.10 0.20 0.50 1.0 2.0"
 
 # Count total experiments
 TOTAL=$((${#EXPANSION_FACTORS[@]} * ${#K_VALUES[@]}))
@@ -58,7 +61,8 @@ echo "========================================"
 echo "Total experiments: $TOTAL"
 echo "Expansion factors: ${EXPANSION_FACTORS[*]}"
 echo "K values: ${K_VALUES[*]}"
-echo "Tokens per run: $MAX_TOKENS"
+echo "Master port: $MASTER_PORT"
+echo "Max tokens per run: 100M"
 echo "========================================"
 echo ""
 

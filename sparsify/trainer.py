@@ -345,10 +345,16 @@ class Trainer:
             try:
                 import wandb
 
+                # Determine project name: CLI arg > env var > default
+                project_name = (
+                    self.cfg.wandb_project
+                    or os.environ.get("WANDB_PROJECT", "sparsify")
+                )
+
                 wandb.init(
                     entity=os.environ.get("WANDB_ENTITY", None),
                     name=self.full_run_name,
-                    project=os.environ.get("WANDB_PROJECT", "sparsify"),
+                    project=project_name,
                     config=asdict(self.cfg),
                     save_code=True,
                 )
@@ -787,6 +793,11 @@ class Trainer:
                             print(f"\n✓ Reached target token count: {self.total_tokens:,} / {self.cfg.max_tokens:,}")
                         # Save checkpoint before stopping
                         self.save()
+
+                        # Clean up distributed process group
+                        if dist.is_initialized():
+                            dist.destroy_process_group()
+
                         return
 
                     # Reset stats for this step

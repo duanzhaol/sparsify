@@ -149,16 +149,17 @@ torchrun --nproc_per_node 4 -m sparsify \
       ~/models/Qwen3-8B/ \
       ~/fineweb-edu/sample/10BT \
       --split "train" \
+      --wandb_project 'sparsify_sweep' \
       --ctx_len 2048 \
       --max_examples 1000000 \
       --text_column "text" \
       --shuffle_seed 42 \
       --data_preprocessing_num_proc 8 \
       --activation "topk" \
-      --expansion_factor 8 \
+      --expansion_factor 16 \
       --normalize_decoder True \
       --num_latents 0 \
-      -k 16 \
+      -k 32 \
       --multi_topk False \
       --skip_connection False \
       --hookpoints "layers.0.self_attn.o_proj" \
@@ -179,7 +180,7 @@ torchrun --nproc_per_node 4 -m sparsify \
       --log_to_wandb True \
       --wandb_log_frequency 1 \
       --elbow_threshold_path ~/sparsify/thresholds.json \
-      --max_tokens 10000000 \
+      --max_tokens 100000000 \
       --exceed_alphas 0.05 0.10 0.20 0.50 1.0 2.0
 
 
@@ -187,16 +188,17 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node 4 --master_port 29501  -m
       ~/models/Qwen3-8B/ \
       ~/fineweb-edu/sample/10BT \
       --split "train" \
+      --wandb_project 'sparsify_sweep' \
       --ctx_len 2048 \
       --max_examples 1000000 \
       --text_column "text" \
       --shuffle_seed 42 \
       --data_preprocessing_num_proc 8 \
       --activation "topk" \
-      --expansion_factor 8 \
+      --expansion_factor 12 \
       --normalize_decoder True \
       --num_latents 0 \
-      -k 24 \
+      -k 32 \
       --multi_topk False \
       --skip_connection False \
       --hookpoints "layers.0.self_attn.o_proj" \

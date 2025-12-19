@@ -124,6 +124,8 @@ class TrainConfig(Serializable):
 
     log_to_wandb: bool = True
     run_name: str | None = None
+    wandb_project: str | None = None
+    """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
     wandb_log_frequency: int = 1
 
     save_dir: str = "checkpoints"
