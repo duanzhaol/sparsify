@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 from collections import defaultdict
 from dataclasses import asdict
@@ -27,6 +28,39 @@ from .sparse_coder import SparseCoder
 from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
 
 
+def expand_range_pattern(pattern: str) -> list[str]:
+    """
+    Expand hookpoint patterns with range syntax.
+
+    Supports syntax like:
+    - layers.[1-10].self_attn.o_proj  → layers.1...layers.10
+    - layers.[0-5,10,15].mlp.act      → layers.0...5, 10, 15
+    - layers.*.xxx                     → unchanged (normal glob)
+
+    Args:
+        pattern: Pattern string potentially containing [N-M] or [N,M,P] syntax
+
+    Returns:
+        List of expanded patterns
+    """
+    match = re.search(r'\[([0-9,\-]+)\]', pattern)
+    if not match:
+        return [pattern]
+
+    range_spec = match.group(1)
+    numbers = []
+
+    for part in range_spec.split(','):
+        if '-' in part:
+            start, end = map(int, part.split('-'))
+            numbers.extend(range(start, end + 1))
+        else:
+            numbers.append(int(part))
+
+    numbers = sorted(set(numbers))
+    return [pattern.replace(f'[{range_spec}]', str(num)) for num in numbers]
+
+
 class Trainer:
     def __init__(
         self,
@@ -41,10 +75,15 @@ class Trainer:
         if cfg.hookpoints:
             assert not cfg.layers, "Cannot specify both `hookpoints` and `layers`."
 
-            # Replace wildcard patterns
+            # Expand range patterns like layers.[1-10].xxx
+            expanded_patterns = []
+            for pattern in cfg.hookpoints:
+                expanded_patterns.extend(expand_range_pattern(pattern))
+
+            # Replace wildcard patterns with actual module names
             raw_hookpoints = []
             for name, _ in model.base_model.named_modules():
-                if any(fnmatchcase(name, pat) for pat in cfg.hookpoints):
+                if any(fnmatchcase(name, pat) for pat in expanded_patterns):
                     raw_hookpoints.append(name)
 
             # Natural sort to impose a consistent order
