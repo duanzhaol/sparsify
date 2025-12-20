@@ -66,15 +66,23 @@ class FusedEncoder(torch.autograd.Function):
         # --- Grad w.r.t. weight ---
         if ctx.needs_input_grad[1]:
             grad_weight = torch.zeros_like(weight)
-            # Compute contributions from each top-k element:
-            # computed as grad_values * input for each top-k location.
-            contributions = grad_values.unsqueeze(2) * input.unsqueeze(1)
-            _, _, D = contributions.shape
-            # Flatten contributions to shape (N*k, D)
-            contributions = contributions.reshape(-1, D)
+            k = ctx.k
+            d_in = input.shape[-1]
 
-            # Accumulate contributions into the correct rows of grad_weight.
-            grad_weight.index_add_(0, indices.flatten(), contributions.type_as(weight))
+            # Memory-optimized: loop over k to avoid creating [..., k, d_in] tensor
+            # Old approach allocated grad_values.unsqueeze(2) * input.unsqueeze(1)
+            # which could be 2-8 GB for k=32-128 with typical batch sizes.
+            # New approach: each iteration creates [..., d_in] tensor (~64 MB for 2D input)
+            for i in range(k):
+                # Each iteration processes one latent position
+                grad_v = grad_values[..., i]  # [..., k] -> [...]
+                idx = indices[..., i]          # [..., k] -> [...]
+
+                # Outer product: [..., 1] * [..., d_in] -> [..., d_in]
+                contrib = grad_v.unsqueeze(-1) * input
+                contrib = contrib.reshape(-1, d_in)
+
+                grad_weight.index_add_(0, idx.flatten(), contrib.type_as(weight))
 
         # --- Grad w.r.t. bias ---
         if bias is not None and ctx.needs_input_grad[2]:
