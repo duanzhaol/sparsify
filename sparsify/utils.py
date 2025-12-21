@@ -35,20 +35,38 @@ def resolve_widths(
     model: PreTrainedModel,
     module_names: list[str],
     dim: int = -1,
+    hook_mode: str = "output",
 ) -> dict[str, int]:
-    """Find number of output dimensions for the specified modules."""
+    """Find number of input/output dimensions for the specified modules.
+
+    Args:
+        model: The model to inspect
+        module_names: List of module names to check
+        dim: Which dimension to extract (default: -1)
+        hook_mode: "input" to measure input dimensions, "output" to measure output dimensions
+    """
     module_to_name = {
         model.base_model.get_submodule(name): name for name in module_names
     }
     shapes: dict[str, int] = {}
 
-    def hook(module, _, output):
-        # Unpack tuples if needed
-        if isinstance(output, tuple):
-            output, *_ = output
+    def hook(module, input, output):
+        # Choose input or output based on hook_mode
+        if hook_mode == "input":
+            # Unpack input tuple (forward hooks receive input as tuple)
+            if isinstance(input, tuple):
+                tensor = input[0]
+            else:
+                tensor = input
+        else:  # output mode
+            # Unpack output tuples if needed
+            if isinstance(output, tuple):
+                tensor = output[0]
+            else:
+                tensor = output
 
         name = module_to_name[module]
-        shapes[name] = output.shape[dim]
+        shapes[name] = tensor.shape[dim]
 
     handles = [mod.register_forward_hook(hook) for mod in module_to_name]
     dummy = send_to_device(model.dummy_inputs, model.device)

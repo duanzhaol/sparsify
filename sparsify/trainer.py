@@ -113,7 +113,9 @@ class Trainer:
             self._max_layer_for_fvu = None
 
         device = model.device
-        input_widths = resolve_widths(model, cfg.hookpoints)
+        # Resolve dimensions based on hook_mode: "input" captures input dims, others capture output dims
+        hook_mode_for_width = "input" if cfg.hook_mode == "input" else "output"
+        input_widths = resolve_widths(model, cfg.hookpoints, hook_mode=hook_mode_for_width)
         unique_widths = set(input_widths.values())
 
         if cfg.distribute_modules and len(unique_widths) > 1:

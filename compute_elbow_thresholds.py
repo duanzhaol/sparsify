@@ -215,21 +215,23 @@ class ActivationCollector:
         self.handles = []
 
     def _make_hook(self, name: str):
-        """创建hook函数"""
+        """创建hook函数（捕获输入）"""
         def hook(module, input, output):
             if self.tokens_collected >= self.max_tokens:
                 return
 
-            # 处理输出（可能是tuple）
-            if isinstance(output, tuple):
-                output = output[0]
+            # 处理输入（input是tuple，取第一个元素）
+            if isinstance(input, tuple):
+                act_tensor = input[0]
+            else:
+                act_tensor = input
 
             # 转换为float32再转numpy（numpy不支持bfloat16）
-            if output.dtype == torch.bfloat16:
-                output = output.float()
+            if act_tensor.dtype == torch.bfloat16:
+                act_tensor = act_tensor.float()
 
             # 转换为numpy并存储（使用CPU节省GPU内存）
-            act = output.detach().cpu().numpy()
+            act = act_tensor.detach().cpu().numpy()
             self.activations[name].append(act)
 
         return hook
