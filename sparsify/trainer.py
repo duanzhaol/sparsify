@@ -22,9 +22,11 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
+from .factory import create_sae
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
+from .switch_sae import SwitchSAE
 from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
 
 
@@ -134,10 +136,10 @@ class Trainer:
 
                 # Add suffix to the name to disambiguate multiple seeds
                 name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-                self.saes[name] = SparseCoder(
-                    input_widths[hook],
-                    cfg.sae,
-                    device,
+                self.saes[name] = create_sae(
+                    d_in=input_widths[hook],
+                    cfg=cfg,
+                    device=device,
                     dtype=torch.float32,
                     transcoder=(cfg.hook_mode == "transcode"),
                 )
@@ -340,7 +342,21 @@ class Trainer:
             optimizer.load_state_dict(opt_state)
 
         for name, sae in self.saes.items():
-            load_model(sae, f"{path}/{name}/sae.safetensors", device=str(device))
+            # Auto-detect checkpoint file (sae.safetensors or switch_sae.safetensors)
+            from pathlib import Path
+            sae_path = Path(f"{path}/{name}/sae.safetensors")
+            switch_path = Path(f"{path}/{name}/switch_sae.safetensors")
+
+            if switch_path.exists():
+                checkpoint_file = str(switch_path)
+            elif sae_path.exists():
+                checkpoint_file = str(sae_path)
+            else:
+                raise FileNotFoundError(
+                    f"No checkpoint found for {name} at {path}/{name}/"
+                )
+
+            load_model(sae, checkpoint_file, device=str(device))
 
     def get_current_k(self) -> int:
         """Get the current k value based on a linear decay schedule."""
@@ -456,6 +472,7 @@ class Trainer:
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
+        avg_load_balance_loss = defaultdict(float)
         avg_ce = 0.0
         avg_kl = 0.0
         # Exceed metrics (per hookpoint, per alpha)
@@ -568,13 +585,15 @@ class Trainer:
                 # Ensure the preactivations are centered at initialization
                 # This is mathematically equivalent to Anthropic's proposal of
                 # subtracting the decoder bias
-                if self.cfg.hook_mode == "transcode":
-                    mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
-                    mean_image = -mean @ raw.encoder.weight.data.T
-                    raw.encoder.bias.data = mean_image
+                # Note: Switch SAE initializes biases per-expert internally
+                if hasattr(raw, "encoder") and hasattr(raw, "b_dec"):
+                    if self.cfg.hook_mode == "transcode":
+                        mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
+                        mean_image = -mean @ raw.encoder.weight.data.T
+                        raw.encoder.bias.data = mean_image
 
-                mean = self.maybe_all_reduce(outputs.mean(0))
-                raw.b_dec.data = mean.to(raw.dtype)
+                    mean = self.maybe_all_reduce(outputs.mean(0))
+                    raw.b_dec.data = mean.to(raw.dtype)
 
             # Make sure the W_dec is still unit-norm if we're autoencoding
             if raw.cfg.normalize_decoder and self.cfg.hook_mode != "transcode":
@@ -611,6 +630,11 @@ class Trainer:
             if self.cfg.sae.multi_topk:
                 avg_multi_topk_fvu[name] += float(
                     self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
+                )
+            # Switch SAE specific metrics
+            if hasattr(out, "load_balance_loss"):
+                avg_load_balance_loss[name] += float(
+                    self.maybe_all_reduce(out.load_balance_loss.detach()) / denom
                 )
 
             # Compute exceed metrics if elbow thresholds available
@@ -658,6 +682,9 @@ class Trainer:
             loss = (
                 out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
             )
+            # Add load balance loss for Switch SAE
+            if hasattr(out, "load_balance_loss"):
+                loss = loss + self.cfg.load_balance_alpha * out.load_balance_loss
             loss.div(acc_steps).backward()
 
         k = self.get_current_k()
@@ -672,9 +699,15 @@ class Trainer:
                 # Wrap the SAEs with Distributed Data Parallel. We have to do this
                 # after we set the decoder bias, otherwise DDP will not register
                 # gradients flowing to the bias after the first step.
+                # For Switch SAE, use find_unused_parameters=True since not all experts
+                # are used in every batch.
                 maybe_wrapped = (
                     {
-                        name: DDP(sae, device_ids=[dist.get_rank()])
+                        name: DDP(
+                            sae,
+                            device_ids=[dist.get_rank()],
+                            find_unused_parameters=isinstance(sae, SwitchSAE),
+                        )
                         for name, sae in self.saes.items()
                     }
                     if ddp
@@ -900,6 +933,9 @@ class Trainer:
                             info[f"{name}/auxk"] = avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
                             info[f"{name}/multi_topk_fvu"] = avg_multi_topk_fvu[name]
+                        # Switch SAE specific metrics
+                        if name in avg_load_balance_loss:
+                            info[f"{name}/load_balance_loss"] = avg_load_balance_loss[name]
 
                         # Exceed metrics
                         if name in avg_exceed:
@@ -922,6 +958,7 @@ class Trainer:
                 avg_auxk_loss.clear()
                 avg_fvu.clear()
                 avg_multi_topk_fvu.clear()
+                avg_load_balance_loss.clear()
                 avg_exceed.clear()  # NEW
                 avg_ce = 0.0
                 avg_kl = 0.0
@@ -998,7 +1035,8 @@ class Trainer:
                 optimizer.eval()
 
         for name, sae in saes.items():
-            assert isinstance(sae, SparseCoder)
+            # Check that SAE has save_to_disk method (works for both SparseCoder and SwitchSAE)
+            assert hasattr(sae, "save_to_disk"), f"SAE {name} must have save_to_disk method"
 
             sae.save_to_disk(f"{path}/{name}")
 
