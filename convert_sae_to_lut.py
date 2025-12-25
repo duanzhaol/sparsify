@@ -28,13 +28,28 @@ from safetensors.torch import save_file
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM
 
-# Module path mappings
+# Module path mappings for single projections
 MODULE_PATTERNS = {
     "qproj": "model.layers.{layer_idx}.self_attn.q_proj",
     "oproj": "model.layers.{layer_idx}.self_attn.o_proj",
     "upproj": "model.layers.{layer_idx}.mlp.up_proj",
     "kproj": "model.layers.{layer_idx}.self_attn.k_proj",
     "vproj": "model.layers.{layer_idx}.self_attn.v_proj",
+    "gate": "model.layers.{layer_idx}.mlp.gate_proj",
+}
+
+# Fused projection mappings (P > 1)
+FUSED_PROJECTIONS = {
+    "qkv": {
+        "sae_source": "qproj",  # Use qproj's SAE checkpoint
+        "target_modules": ["q_proj", "k_proj", "v_proj"],
+        "output_name": "layers.{layer_idx}.self_attn.qkv_proj",
+    },
+    "gate_up": {
+        "sae_source": "upproj",  # Use upproj's SAE checkpoint
+        "target_modules": ["gate_proj", "up_proj"],
+        "output_name": "layers.{layer_idx}.mlp.gate_up_proj",
+    },
 }
 
 CHECKPOINT_PATTERNS = {
@@ -57,6 +72,8 @@ THRESHOLD_FILES = {
     "qproj": "thresholds_q.json",
     "oproj": "thresholds_o.json",
     "upproj": "thresholds_up.json",
+    "qkv": "thresholds_q.json",  # Use qproj thresholds
+    "gate_up": "thresholds_up.json",  # Use upproj thresholds
 }
 
 
@@ -186,6 +203,47 @@ def get_model_weight(model, module_path: str) -> torch.Tensor:
         raise ValueError(f"Module {module_path} has no weight attribute")
 
     return module.weight.detach()
+
+
+def get_fused_model_weights(
+    model,
+    layer_idx: int,
+    target_modules: list[str]
+) -> torch.Tensor:
+    """
+    Extract and concatenate multiple model weight matrices for fused projections.
+
+    Args:
+        model: HuggingFace model
+        layer_idx: Layer index
+        target_modules: List of module names (e.g., ["q_proj", "k_proj", "v_proj"])
+
+    Returns:
+        Concatenated weight tensor [total_out_features, in_features]
+        For QKV: [q_dim + k_dim + v_dim, hidden_size]
+        For Gate/Up: [2 * intermediate_size, hidden_size]
+    """
+    weights = []
+
+    # Attention modules: q_proj, k_proj, v_proj, o_proj
+    attn_modules = {"q_proj", "k_proj", "v_proj", "o_proj"}
+
+    for module_name in target_modules:
+        # Construct full module path based on module type
+        if module_name in attn_modules:
+            module_path = f"model.layers.{layer_idx}.self_attn.{module_name}"
+        else:
+            # MLP modules: gate_proj, up_proj, down_proj
+            module_path = f"model.layers.{layer_idx}.mlp.{module_name}"
+
+        # Extract weight
+        weight = get_model_weight(model, module_path)
+        weights.append(weight)
+
+    # Concatenate along output dimension (dim=0)
+    # Result: [total_out_features, in_features]
+    fused_weight = torch.cat(weights, dim=0)
+    return fused_weight
 
 
 def compute_precomputed_products(
@@ -371,11 +429,15 @@ def process_layer(
     """
     Process a single layer: load SAE, compute precomputed products, save LUT.
 
+    Supports both single and fused projections:
+    - Single: qproj, oproj, upproj (P=1)
+    - Fused: qkv (P=3), gate_up (P=2)
+
     Args:
         model: HuggingFace model
         checkpoint_base_dir: Base checkpoint directory
         output_dir: Output directory
-        proj_type: Projection type
+        proj_type: Projection type (qproj, oproj, upproj, qkv, gate_up, etc.)
         layer_idx: Layer index
         target_dtype: Target dtype for output
         device: Computation device
@@ -384,14 +446,32 @@ def process_layer(
     Returns:
         Layer info dict, or None on failure
     """
-    # Get module and checkpoint paths
-    module_path = MODULE_PATTERNS[proj_type].format(layer_idx=layer_idx)
-    checkpoint_name = CHECKPOINT_PATTERNS[proj_type].format(layer_idx=layer_idx)
+    # Check if this is a fused projection
+    is_fused = proj_type in FUSED_PROJECTIONS
+
+    if is_fused:
+        # Fused projection (QKV or Gate/Up)
+        fused_config = FUSED_PROJECTIONS[proj_type]
+        sae_source = fused_config["sae_source"]
+        target_modules = fused_config["target_modules"]
+        output_name = fused_config["output_name"].format(layer_idx=layer_idx)
+
+        # Use SAE from source projection
+        checkpoint_name = CHECKPOINT_PATTERNS[sae_source].format(layer_idx=layer_idx)
+        checkpoint_path = find_checkpoint_path(
+            checkpoint_base_dir, sae_source, checkpoint_name
+        )
+    else:
+        # Single projection
+        module_path = MODULE_PATTERNS[proj_type].format(layer_idx=layer_idx)
+        checkpoint_name = CHECKPOINT_PATTERNS[proj_type].format(layer_idx=layer_idx)
+        output_name = checkpoint_name
+
+        checkpoint_path = find_checkpoint_path(
+            checkpoint_base_dir, proj_type, checkpoint_name
+        )
 
     # 1. Find checkpoint
-    checkpoint_path = find_checkpoint_path(
-        checkpoint_base_dir, proj_type, checkpoint_name
-    )
     if checkpoint_path is None:
         print(f"  WARNING: Checkpoint not found for {checkpoint_name}")
         return None
@@ -403,9 +483,14 @@ def process_layer(
         print(f"  ERROR loading SAE checkpoint: {e}")
         return None
 
-    # 3. Get model weight
+    # 3. Get model weight(s)
     try:
-        W_target = get_model_weight(model, module_path)
+        if is_fused:
+            # Fused: concatenate multiple weights
+            W_target = get_fused_model_weights(model, layer_idx, target_modules)
+        else:
+            # Single: get one weight
+            W_target = get_model_weight(model, module_path)
     except Exception as e:
         print(f"  ERROR getting model weight: {e}")
         return None
@@ -442,7 +527,7 @@ def process_layer(
         return None
 
     # 7. Save LUT file
-    lut_filename = f"{checkpoint_name}.lut.safetensors"
+    lut_filename = f"{output_name}.lut.safetensors"
     lut_path = output_dir / lut_filename
 
     try:
@@ -467,7 +552,7 @@ def process_layer(
         "input_dim": int(d_in),
         "output_dim": int(W_target.shape[0]),
         "file": lut_filename,
-        "module_path": checkpoint_name,
+        "module_path": output_name,
         "sae_config": sae_data['config']
     }
 
@@ -478,13 +563,19 @@ def auto_detect_layers(checkpoint_base_dir: Path, proj_type: str) -> list[int]:
 
     Args:
         checkpoint_base_dir: Base checkpoint directory
-        proj_type: Projection type to scan
+        proj_type: Projection type to scan (supports fused types)
 
     Returns:
         List of available layer indices
     """
+    # Handle fused projections: use SAE source
+    if proj_type in FUSED_PROJECTIONS:
+        sae_source = FUSED_PROJECTIONS[proj_type]["sae_source"]
+        pattern = PROJ_DIR_PATTERNS.get(sae_source, "*-qproj")
+    else:
+        pattern = PROJ_DIR_PATTERNS.get(proj_type, "*-qproj")
+
     # Find checkpoint directory
-    pattern = PROJ_DIR_PATTERNS.get(proj_type, "*-qproj")
     search_pattern = str(checkpoint_base_dir / pattern)
     matching_dirs = glob(search_pattern)
 
@@ -516,17 +607,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage
+  # Basic usage (fused projections)
   python convert_sae_to_lut.py /root/models/Qwen3-0.6B /root/sparsify/checkpoints \\
       --output_dir /root/sparsify/lut_tables
 
   # With thresholds and specific layers
   python convert_sae_to_lut.py /root/models/Qwen3-0.6B /root/sparsify/checkpoints \\
       --output_dir ./lut_output \\
-      --proj_types qproj oproj \\
+      --proj_types qkv gate_up oproj \\
       --layers 0-5,10 \\
       --threshold_dir /root/sparsify/thresholds/Qwen3-0.6B \\
       --dtype bfloat16
+
+  # Single projections (no fusion)
+  python convert_sae_to_lut.py /root/models/Qwen3-0.6B /root/sparsify/checkpoints \\
+      --output_dir ./lut_output \\
+      --proj_types qproj oproj upproj \\
+      --layers 0-27
 """
     )
 
@@ -538,9 +635,9 @@ Examples:
     parser.add_argument("--output_dir", type=str, default="./lut_output",
                        help="Output directory for LUT files (default: ./lut_output)")
     parser.add_argument("--proj_types", nargs="+",
-                       default=["qproj", "oproj", "upproj"],
-                       choices=["qproj", "oproj", "upproj", "kproj", "vproj"],
-                       help="Projection types to process (default: qproj oproj upproj)")
+                       default=["qkv", "oproj", "gate_up"],
+                       choices=["qproj", "oproj", "upproj", "kproj", "vproj", "qkv", "gate_up"],
+                       help="Projection types to process. Use 'qkv' for fused Q/K/V, 'gate_up' for fused Gate/Up (default: qkv oproj gate_up)")
     parser.add_argument("--layers", type=str,
                        help="Layer range (e.g., '0-27', '0-5,10') (default: auto-detect)")
     parser.add_argument("--threshold_dir", type=str,
