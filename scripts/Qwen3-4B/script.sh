@@ -1,18 +1,18 @@
-python compute_elbow_thresholds.py \
-    ~/models/Qwen3-0.6B/ \
+CUDA_VISIBLE_DEVICES=2 python compute_elbow_thresholds.py \
+    ~/models/Qwen3-4B/ \
     --dataset ~/fineweb-edu/sample/10BT \
-    --hookpoints "layers.[0-35].self_attn.q_proj" \
+    --hookpoints "layers.[0-35].mlp.up_proj" \
     --num_tokens 100000 \
     --ctx_len 2048 \
-    --output thresholds/Qwen3-0.6B/thresholds_q.json  \
+    --output thresholds/Qwen3-4B/thresholds_up.json  \
     --max_percentile 0.95
 
 
 torchrun --nproc_per_node 8 --master_port 29501  -m sparsify \
-      ~/models/Qwen3-0.6B/ \
+      ~/models/Qwen3-8B/ \
       ~/fineweb-edu/sample/10BT \
       --split "train" \
-      --wandb_project 'qwen3-0.6B-1224-q' \
+      --wandb_project 'qwen3-8B-1231-q' \
       --ctx_len 2048 \
       --max_examples 1000000 \
       --text_column "text" \
@@ -22,7 +22,7 @@ torchrun --nproc_per_node 8 --master_port 29501  -m sparsify \
       --expansion_factor 8 \
       --normalize_decoder True \
       --num_latents 0 \
-      -k 128 \
+      -k 512 \
       --multi_topk False \
       --skip_connection False \
       --hookpoints "layers.[0-30].self_attn.q_proj" \
