@@ -1026,8 +1026,15 @@ class Trainer:
         for rank, modules in enumerate(self.module_plan):
             print(f"Rank {rank} modules: {modules}")
 
-    def _checkpoint(self, saes: dict[str, SparseCoder], path: str, rank_zero: bool):
-        """Save SAEs and training state to disk."""
+    def _checkpoint(self, saes: dict[str, SparseCoder], path: str, rank_zero: bool, save_training_state: bool = True):
+        """Save SAEs and training state to disk.
+
+        Args:
+            saes: Dictionary of SAE models to save
+            path: Path to save checkpoint
+            rank_zero: Whether this is rank 0
+            save_training_state: Whether to save optimizer/scheduler/global state (default True)
+        """
         print("Saving checkpoint")
 
         for optimizer in self.optimizers:
@@ -1040,35 +1047,36 @@ class Trainer:
 
             sae.save_to_disk(f"{path}/{name}")
 
-        if rank_zero:
-            for i, scheduler in enumerate(self.lr_schedulers):
-                torch.save(scheduler.state_dict(), f"{path}/lr_scheduler_{i}.pt")
+        if save_training_state:
+            if rank_zero:
+                for i, scheduler in enumerate(self.lr_schedulers):
+                    torch.save(scheduler.state_dict(), f"{path}/lr_scheduler_{i}.pt")
 
-            for i, optimizer in enumerate(self.optimizers):
-                torch.save(optimizer.state_dict(), f"{path}/optimizer_{i}.pt")
+                for i, optimizer in enumerate(self.optimizers):
+                    torch.save(optimizer.state_dict(), f"{path}/optimizer_{i}.pt")
 
+                torch.save(
+                    {
+                        "global_step": self.global_step,
+                        "total_tokens": self.total_tokens,
+                    },
+                    f"{path}/state.pt",
+                )
+
+                self.cfg.save_json(f"{path}/config.json")
+
+            rank = 0 if rank_zero else dist.get_rank()
             torch.save(
                 {
-                    "global_step": self.global_step,
-                    "total_tokens": self.total_tokens,
+                    "num_tokens_since_fired": self.num_tokens_since_fired,
+                    "best_loss": self.best_loss,
                 },
-                f"{path}/state.pt",
+                f"{path}/rank_{rank}_state.pt",
             )
-
-            self.cfg.save_json(f"{path}/config.json")
 
         for optimizer in self.optimizers:
             if isinstance(optimizer, ScheduleFreeWrapper):
                 optimizer.train()
-
-        rank = 0 if rank_zero else dist.get_rank()
-        torch.save(
-            {
-                "num_tokens_since_fired": self.num_tokens_since_fired,
-                "best_loss": self.best_loss,
-            },
-            f"{path}/rank_{rank}_state.pt",
-        )
 
     def save(self):
         """Save the SAEs and training state to disk."""
@@ -1089,14 +1097,47 @@ class Trainer:
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
 
         if isinstance(avg_loss, dict):
+            any_improved = False
             for name in self.saes:
                 if avg_loss[name] < self.best_loss[name]:  # type: ignore
                     self.best_loss[name] = avg_loss[name]  # type: ignore
+                    any_improved = True
 
                     if rank_zero or self.cfg.distribute_modules:
+                        # Save only SAE weights per layer, not training state
                         self._checkpoint(
-                            {name: self.saes[name]}, f"{base_path}/{name}", rank_zero
+                            {name: self.saes[name]}, base_path, rank_zero, save_training_state=False
                         )
+
+            # Save training state once at the base path if any layer improved
+            if any_improved and rank_zero:
+                import os
+                os.makedirs(base_path, exist_ok=True)
+
+                for i, scheduler in enumerate(self.lr_schedulers):
+                    torch.save(scheduler.state_dict(), f"{base_path}/lr_scheduler_{i}.pt")
+
+                for i, optimizer in enumerate(self.optimizers):
+                    torch.save(optimizer.state_dict(), f"{base_path}/optimizer_{i}.pt")
+
+                torch.save(
+                    {
+                        "global_step": self.global_step,
+                        "total_tokens": self.total_tokens,
+                    },
+                    f"{base_path}/state.pt",
+                )
+
+                self.cfg.save_json(f"{base_path}/config.json")
+
+                rank = 0 if rank_zero else dist.get_rank()
+                torch.save(
+                    {
+                        "num_tokens_since_fired": self.num_tokens_since_fired,
+                        "best_loss": self.best_loss,
+                    },
+                    f"{base_path}/rank_{rank}_state.pt",
+                )
         else:
             if avg_loss < self.best_loss:  # type: ignore
                 self.best_loss = avg_loss  # type: ignore
