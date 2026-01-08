@@ -130,16 +130,6 @@ class TrainConfig(Serializable):
 
     save_dir: str = "checkpoints"
 
-    # Switch SAE configuration
-    use_switch_sae: bool = False
-    """Use Switch SAE (mixture of experts) instead of regular SAE."""
-
-    num_experts: int = 8
-    """Number of expert SAEs (only used when use_switch_sae=True)."""
-
-    load_balance_alpha: float = 0.01
-    """Weight for load balancing loss (only used when use_switch_sae=True)."""
-
     def __post_init__(self):
         """Validate the configuration."""
         if self.layers and self.layer_stride != 1:
