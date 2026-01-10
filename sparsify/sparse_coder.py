@@ -59,7 +59,6 @@ class SparseCoder(nn.Module):
             # Transcoder initialization: use zeros
             if transcoder:
                 self.W_dec = nn.Parameter(torch.zeros_like(self.encoder.weight.data))
-
             # Sparse autoencoder initialization: use the transpose of encoder weights
             else:
                 self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
@@ -283,7 +282,8 @@ class SparseCoder(nn.Module):
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):
         assert self.W_dec is not None, "Decoder weight was not initialized."
-        assert self.W_dec.grad is not None  # keep pyright happy
+        if self.W_dec.grad is None:  # Decoder may be frozen during distillation
+            return
 
         parallel_component = einops.einsum(
             self.W_dec.grad,
@@ -295,6 +295,27 @@ class SparseCoder(nn.Module):
             self.W_dec.data,
             "d_sae, d_sae d_in -> d_sae d_in",
         )
+
+    @classmethod
+    def from_pretrained_lowrank(
+        cls,
+        teacher: "SparseCoder",
+        rank: int,
+        device: str | torch.device | None = None,
+    ):
+        """Create a low-rank version from a full-rank SAE using SVD initialization.
+
+        Args:
+            teacher: Full-rank SparseCoder to distill from
+            rank: Target rank for low-rank encoder
+            device: Device to place the model on (defaults to teacher's device)
+
+        Returns:
+            LowRankSparseCoder with SVD-initialized encoder
+        """
+        from lowrank_encoder import from_pretrained_lowrank
+
+        return from_pretrained_lowrank(teacher, rank, device)
 
 
 # Allow for alternate naming conventions

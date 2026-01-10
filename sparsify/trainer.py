@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from glob import glob
+from pathlib import Path
 from typing import Sized
 
 import torch
@@ -128,19 +129,53 @@ class Trainer:
         # Initialize all the SAEs
         print(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
         self.saes = {}
-        for hook in self.local_hookpoints():
-            for seed in cfg.init_seeds:
-                torch.manual_seed(seed)
+        self.teachers = {}  # For distillation mode
 
-                # Add suffix to the name to disambiguate multiple seeds
-                name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-                self.saes[name] = SparseCoder(
-                    input_widths[hook],
-                    cfg.sae,
-                    device,
-                    dtype=torch.float32,
-                    transcoder=(cfg.hook_mode == "transcode"),
+        # Distillation mode: load teacher SAEs first
+        if cfg.distill_from:
+            # Distillation mode doesn't support multiple seeds (student is initialized from teacher)
+            if len(cfg.init_seeds) > 1:
+                print("Warning: Distillation mode ignores init_seeds (student initialized from teacher via SVD)")
+
+            print(f"Distillation mode: loading teachers from {cfg.distill_from}")
+            for hook in self.local_hookpoints():
+                teacher_path = Path(cfg.distill_from) / hook
+                if not teacher_path.exists():
+                    raise FileNotFoundError(
+                        f"Teacher checkpoint not found: {teacher_path}"
+                    )
+                teacher = SparseCoder.load_from_disk(teacher_path, device=device)
+                teacher.requires_grad_(False)  # Freeze teacher
+                self.teachers[hook] = teacher
+
+                # Create student from teacher using SVD initialization
+                # Always use bare hook name (no seed suffix) in distillation mode
+                self.saes[hook] = SparseCoder.from_pretrained_lowrank(
+                    teacher, cfg.sae.encoder_rank, device=device
                 )
+
+                # Optionally freeze decoder
+                if cfg.freeze_decoder:
+                    self.saes[hook].W_dec.requires_grad_(False)
+                    self.saes[hook].b_dec.requires_grad_(False)
+
+            print(f"  Encoder rank: {cfg.sae.encoder_rank}")
+            print(f"  Freeze decoder: {cfg.freeze_decoder}")
+        else:
+            # Standard training mode
+            for hook in self.local_hookpoints():
+                for seed in cfg.init_seeds:
+                    torch.manual_seed(seed)
+
+                    # Add suffix to the name to disambiguate multiple seeds
+                    name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
+                    self.saes[name] = SparseCoder(
+                        input_widths[hook],
+                        cfg.sae,
+                        device,
+                        dtype=torch.float32,
+                        transcoder=(cfg.hook_mode == "transcode"),
+                    )
 
         assert isinstance(dataset, Sized)
         num_batches = len(dataset) // cfg.batch_size
@@ -240,7 +275,7 @@ class Trainer:
         self.final_k = self.cfg.sae.k
 
         self.best_loss = (
-            {name: float("inf") for name in self.local_hookpoints()}
+            {name: float("inf") for name in self.saes.keys()}
             if self.cfg.loss_fn == "fvu"
             else float("inf")
         )
@@ -501,6 +536,12 @@ class Trainer:
         maybe_wrapped: dict[str, DDP] | dict[str, SparseCoder] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
+        # Build mapping from bare hook name to SAE keys (supports multi-seed)
+        hook_to_sae_keys: dict[str, list[str]] = defaultdict(list)
+        for sae_key in self.saes:
+            hook = sae_key.partition("/")[0]
+            hook_to_sae_keys[hook].append(sae_key)
+
         def hook(module: nn.Module, inputs, outputs):
             nonlocal total_forward_time, total_backward_time, total_metrics_time, timing_step_count
             aux_out = None
@@ -562,103 +603,132 @@ class Trainer:
             outputs = outputs[mask]
             inputs = inputs[mask]
 
-            # On the first iteration, initialize the encoder and decoder biases
-            raw = self.saes[name]
-            if self.global_step == 0 and not self.cfg.finetune:
-                # Ensure the preactivations are centered at initialization
-                # This is mathematically equivalent to Anthropic's proposal of
-                # subtracting the decoder bias
-                if self.cfg.hook_mode == "transcode":
-                    mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
-                    mean_image = -mean @ raw.encoder.weight.data.T
-                    raw.encoder.bias.data = mean_image
+            # Get the bare hook name for lookups
+            hook_name = name
 
-                mean = self.maybe_all_reduce(outputs.mean(0))
-                raw.b_dec.data = mean.to(raw.dtype)
+            # Process each SAE for this hook (supports multi-seed)
+            for sae_key in hook_to_sae_keys[hook_name]:
+                # On the first iteration, initialize the encoder and decoder biases
+                raw = self.saes[sae_key]
+                if self.global_step == 0 and not self.cfg.finetune:
+                    # Ensure the preactivations are centered at initialization
+                    # This is mathematically equivalent to Anthropic's proposal of
+                    # subtracting the decoder bias
+                    if self.cfg.hook_mode == "transcode":
+                        mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
+                        # Handle both full-rank (encoder) and low-rank (encoder_A, encoder_B) models
+                        if raw.encoder is not None:
+                            # Full-rank SparseCoder
+                            mean_image = -mean @ raw.encoder.weight.data.T
+                            raw.encoder.bias.data = mean_image
+                        else:
+                            # Low-rank LowRankSparseCoder: W_enc = A @ B
+                            mean_image = -mean @ raw.encoder_B.weight.data.T @ raw.encoder_A.weight.data.T
+                            raw.encoder_A.bias.data = mean_image
 
-            # Make sure the W_dec is still unit-norm if we're autoencoding
-            if raw.cfg.normalize_decoder and self.cfg.hook_mode != "transcode":
-                raw.set_decoder_norm_to_unit_norm()
+                    mean = self.maybe_all_reduce(outputs.mean(0))
+                    raw.b_dec.data = mean.to(raw.dtype)
 
-            wrapped = maybe_wrapped[name]
-            out = wrapped(
-                x=inputs,
-                y=outputs,
-                dead_mask=(
-                    self.num_tokens_since_fired[name] > self.cfg.dead_feature_threshold
-                    if self.cfg.auxk_alpha > 0
-                    else None
-                ),
-            )
+                # Make sure the W_dec is still unit-norm if we're autoencoding
+                # Skip if decoder is frozen (e.g., in distillation mode) to preserve teacher weights
+                if raw.cfg.normalize_decoder and self.cfg.hook_mode != "transcode" and raw.W_dec.requires_grad:
+                    raw.set_decoder_norm_to_unit_norm()
 
-            # Update the did_fire mask
-            did_fire[name][out.latent_indices.flatten()] = True
-            self.maybe_all_reduce(did_fire[name], "max")  # max is boolean "any"
-
-            if self.cfg.loss_fn in ("ce", "kl"):
-                # Replace the normal output with the SAE output
-                output = all_outputs.clone()
-                output[mask] = out.sae_out.type_as(output)
-                output = output.reshape(out_shape)
-                return (output, *aux_out) if aux_out is not None else output
-
-            # Metrics that only make sense for local
-            avg_fvu[name] += float(self.maybe_all_reduce(out.fvu.detach()) / denom)
-            if self.cfg.auxk_alpha > 0:
-                avg_auxk_loss[name] += float(
-                    self.maybe_all_reduce(out.auxk_loss.detach()) / denom
-                )
-            if self.cfg.sae.multi_topk:
-                avg_multi_topk_fvu[name] += float(
-                    self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
+                wrapped = maybe_wrapped[sae_key]
+                out = wrapped(
+                    x=inputs,
+                    y=outputs,
+                    dead_mask=(
+                        self.num_tokens_since_fired[sae_key] > self.cfg.dead_feature_threshold
+                        if self.cfg.auxk_alpha > 0
+                        else None
+                    ),
                 )
 
-            # Compute exceed metrics if elbow thresholds available
-            if name in self.elbow_thresholds and self.cfg.exceed_alphas:
-                # Start metrics timing
-                if device.type == "cuda":
-                    metrics_start.record()
-                else:
-                    metrics_time_start = time.perf_counter()
+                # Update the did_fire mask
+                did_fire[sae_key][out.latent_indices.flatten()] = True
+                self.maybe_all_reduce(did_fire[sae_key], "max")  # max is boolean "any"
 
-                # CRITICAL: Compute in ORIGINAL space
-                # Both outputs and out.sae_out are already in original space
-                # (SAE decoder adds b_dec back at sparse_coder.py:204)
-                original_target = outputs
-                original_recon = out.sae_out
+                if self.cfg.loss_fn in ("ce", "kl"):
+                    # Replace the normal output with the SAE output
+                    output = all_outputs.clone()
+                    output[mask] = out.sae_out.type_as(output)
+                    output = output.reshape(out_shape)
+                    return (output, *aux_out) if aux_out is not None else output
 
-                # Compute absolute reconstruction error
-                error_magnitude = torch.abs(original_target - original_recon)
-
-                # Get elbow threshold for this hookpoint
-                elbow_value = self.elbow_thresholds[name]
-
-                # Count exceedances for each alpha
-                num_elements = error_magnitude.numel()
-                for alpha in self.cfg.exceed_alphas:
-                    threshold = alpha * elbow_value
-                    exceed_count = (error_magnitude > threshold).sum().float()
-                    exceed_ratio = exceed_count / num_elements
-
-                    # Accumulate (average over steps)
-                    avg_exceed[name][alpha] += float(
-                        self.maybe_all_reduce(exceed_ratio.detach()) / denom
+                # Metrics that only make sense for local
+                avg_fvu[sae_key] += float(self.maybe_all_reduce(out.fvu.detach()) / denom)
+                if self.cfg.auxk_alpha > 0:
+                    avg_auxk_loss[sae_key] += float(
+                        self.maybe_all_reduce(out.auxk_loss.detach()) / denom
+                    )
+                if self.cfg.sae.multi_topk:
+                    avg_multi_topk_fvu[sae_key] += float(
+                        self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
                     )
 
-                # End metrics timing
-                if device.type == "cuda":
-                    metrics_end.record()
-                    torch.cuda.synchronize()
-                    total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
-                else:
-                    metrics_time_end = time.perf_counter()
-                    total_metrics_time += metrics_time_end - metrics_time_start
+                # Compute exceed metrics if elbow thresholds available
+                # Use hook_name (bare name) to look up thresholds, not sae_key
+                if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
+                    # Start metrics timing
+                    if device.type == "cuda":
+                        metrics_start.record()
+                    else:
+                        metrics_time_start = time.perf_counter()
 
-            # Do a "local" backward pass if we're not training end-to-end
-            loss = (
-                out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-            )
-            loss.div(acc_steps).backward()
+                    # CRITICAL: Compute in ORIGINAL space
+                    # Both outputs and out.sae_out are already in original space
+                    # (SAE decoder adds b_dec back at sparse_coder.py:204)
+                    original_target = outputs
+                    original_recon = out.sae_out
+
+                    # Compute absolute reconstruction error
+                    error_magnitude = torch.abs(original_target - original_recon)
+
+                    # Get elbow threshold for this hookpoint (use bare hook name)
+                    elbow_value = self.elbow_thresholds[hook_name]
+
+                    # Count exceedances for each alpha
+                    num_elements = error_magnitude.numel()
+                    for alpha in self.cfg.exceed_alphas:
+                        threshold = alpha * elbow_value
+                        exceed_count = (error_magnitude > threshold).sum().float()
+                        exceed_ratio = exceed_count / num_elements
+
+                        # Accumulate (average over steps)
+                        avg_exceed[sae_key][alpha] += float(
+                            self.maybe_all_reduce(exceed_ratio.detach()) / denom
+                        )
+
+                    # End metrics timing
+                    if device.type == "cuda":
+                        metrics_end.record()
+                        torch.cuda.synchronize()
+                        total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
+                    else:
+                        metrics_time_end = time.perf_counter()
+                        total_metrics_time += metrics_time_end - metrics_time_start
+
+                # Do a "local" backward pass if we're not training end-to-end
+                loss = (
+                    out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
+                )
+
+                # Distillation loss (if enabled)
+                if hook_name in self.teachers:
+                    from lowrank_encoder import compute_distillation_loss
+
+                    distill_loss = compute_distillation_loss(
+                        student=raw,
+                        teacher=self.teachers[hook_name],
+                        inputs=inputs,
+                        student_output=out.sae_out,
+                        lambda_decode=self.cfg.distill_lambda_decode,
+                        lambda_acts=self.cfg.distill_lambda_acts,
+                    )
+                    loss = loss + distill_loss.total
+
+                loss.div(acc_steps).backward()
 
         k = self.get_current_k()
         for name, sae in self.saes.items():
@@ -1005,7 +1075,8 @@ class Trainer:
                 optimizer.eval()
 
         for name, sae in saes.items():
-            assert isinstance(sae, SparseCoder)
+            # Support both SparseCoder and LowRankSparseCoder
+            assert hasattr(sae, "save_to_disk"), f"SAE {name} does not have save_to_disk method"
 
             sae.save_to_disk(f"{path}/{name}")
 

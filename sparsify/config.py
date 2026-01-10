@@ -32,6 +32,9 @@ class SparseCoderConfig(Serializable):
     skip_connection: bool = False
     """Include a linear skip connection."""
 
+    encoder_rank: int = 0
+    """Low-rank encoder rank. 0 means full-rank (default)."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -122,6 +125,18 @@ class TrainConfig(Serializable):
     finetune: str | None = None
     """Finetune the sparse coders from a pretrained checkpoint."""
 
+    distill_from: str | None = None
+    """Path to teacher SAE checkpoint for distillation training."""
+
+    distill_lambda_decode: float = 0.5
+    """Weight for decode distillation loss."""
+
+    distill_lambda_acts: float = 0.1
+    """Weight for top-k activation distillation loss."""
+
+    freeze_decoder: bool = True
+    """Freeze decoder during distillation (use teacher's decoder)."""
+
     log_to_wandb: bool = True
     run_name: str | None = None
     wandb_project: str | None = None
@@ -150,3 +165,9 @@ class TrainConfig(Serializable):
 
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        # Validate distillation configuration
+        if self.distill_from and self.sae.encoder_rank <= 0:
+            raise ValueError(
+                "distill_from requires encoder_rank > 0 in sae config."
+            )
