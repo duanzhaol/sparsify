@@ -116,6 +116,10 @@ class TrainConfig(Serializable):
     distribute_modules: bool = False
     """Store one copy of each sparse coder, instead of copying them across devices."""
 
+    num_tiles: int = 1
+    """Number of tiles to split input activations. Each tile trains a separate SAE.
+    d_in must be divisible by num_tiles. Set to 1 (default) for standard training."""
+
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
 
@@ -170,4 +174,14 @@ class TrainConfig(Serializable):
         if self.distill_from and self.sae.encoder_rank <= 0:
             raise ValueError(
                 "distill_from requires encoder_rank > 0 in sae config."
+            )
+
+        # Validate tiling configuration
+        if self.num_tiles > 1 and self.hook_mode == "transcode":
+            raise ValueError("Tiled training does not support transcode mode.")
+
+        if self.num_tiles > 1 and self.distill_from:
+            raise ValueError(
+                "Tiled training (num_tiles > 1) does not support distillation mode. "
+                "Use num_tiles=1 for distillation training."
             )

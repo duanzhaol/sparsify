@@ -26,7 +26,68 @@ from .data import MemmapDataset
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
+from .tiled_sparse_coder import TiledSparseCoder
 from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
+
+
+def is_tiled_checkpoint(path: str | Path) -> bool:
+    """Check if a checkpoint path contains a TiledSparseCoder checkpoint."""
+    path = Path(path)
+    cfg_path = path / "cfg.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+            return "num_tiles" in cfg and cfg["num_tiles"] > 1
+    return False
+
+
+def get_checkpoint_num_tiles(path: str | Path) -> int:
+    """Get the num_tiles value from a checkpoint, returns 1 if not tiled."""
+    path = Path(path)
+    cfg_path = path / "cfg.json"
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+            return cfg.get("num_tiles", 1)
+    return 1
+
+
+def load_sae_checkpoint(sae: nn.Module, path: str | Path, device: str) -> None:
+    """Load SAE checkpoint, handling both regular and tiled formats.
+
+    Validates that checkpoint format matches the SAE type to fail fast with
+    clear error messages on misconfiguration.
+    """
+    path = Path(path)
+    checkpoint_num_tiles = get_checkpoint_num_tiles(path)
+
+    if isinstance(sae, TiledSparseCoder):
+        # Current SAE is tiled
+        if checkpoint_num_tiles == 1:
+            raise TypeError(
+                f"Checkpoint at {path} is regular SparseCoder (num_tiles=1) "
+                f"but current config has num_tiles={sae.num_tiles}. "
+                f"Cannot resume/finetune tiled SAE from non-tiled checkpoint."
+            )
+        if checkpoint_num_tiles != sae.num_tiles:
+            raise ValueError(
+                f"Checkpoint at {path} has num_tiles={checkpoint_num_tiles} "
+                f"but current config has num_tiles={sae.num_tiles}. "
+                f"num_tiles must match for resume/finetune."
+            )
+        # Load each tile
+        for i, tile_sae in enumerate(sae.saes):
+            tile_path = path / f"tile_{i}" / "sae.safetensors"
+            load_model(tile_sae, str(tile_path), device=device)
+    else:
+        # Current SAE is regular SparseCoder
+        if checkpoint_num_tiles > 1:
+            raise TypeError(
+                f"Checkpoint at {path} is TiledSparseCoder (num_tiles={checkpoint_num_tiles}) "
+                f"but current config has num_tiles=1. "
+                f"Cannot resume/finetune regular SAE from tiled checkpoint."
+            )
+        load_model(sae, str(path / "sae.safetensors"), device=device)
 
 
 def expand_range_pattern(pattern: str) -> list[str]:
@@ -128,6 +189,8 @@ class Trainer:
 
         # Initialize all the SAEs
         print(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
+        if cfg.num_tiles > 1:
+            print(f"Tiled mode: splitting input into {cfg.num_tiles} tiles")
         self.saes = {}
         self.teachers = {}  # For distillation mode
 
@@ -169,13 +232,24 @@ class Trainer:
 
                     # Add suffix to the name to disambiguate multiple seeds
                     name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-                    self.saes[name] = SparseCoder(
-                        input_widths[hook],
-                        cfg.sae,
-                        device,
-                        dtype=torch.float32,
-                        transcoder=(cfg.hook_mode == "transcode"),
-                    )
+
+                    # Use TiledSparseCoder if num_tiles > 1
+                    if cfg.num_tiles > 1:
+                        self.saes[name] = TiledSparseCoder(
+                            input_widths[hook],
+                            cfg.sae,
+                            cfg.num_tiles,
+                            device,
+                            dtype=torch.float32,
+                        )
+                    else:
+                        self.saes[name] = SparseCoder(
+                            input_widths[hook],
+                            cfg.sae,
+                            device,
+                            dtype=torch.float32,
+                            transcoder=(cfg.hook_mode == "transcode"),
+                        )
 
         assert isinstance(dataset, Sized)
         num_batches = len(dataset) // cfg.batch_size
@@ -375,7 +449,7 @@ class Trainer:
             optimizer.load_state_dict(opt_state)
 
         for name, sae in self.saes.items():
-            load_model(sae, f"{path}/{name}/sae.safetensors", device=str(device))
+            load_sae_checkpoint(sae, f"{path}/{name}", device=str(device))
 
     def get_current_k(self) -> int:
         """Get the current k value based on a linear decay schedule."""
@@ -627,7 +701,11 @@ class Trainer:
                             raw.encoder_A.bias.data = mean_image
 
                     mean = self.maybe_all_reduce(outputs.mean(0))
-                    raw.b_dec.data = mean.to(raw.dtype)
+                    # Handle TiledSparseCoder which needs special b_dec handling
+                    if hasattr(raw, 'set_b_dec_data'):
+                        raw.set_b_dec_data(mean.to(raw.dtype))
+                    else:
+                        raw.b_dec.data = mean.to(raw.dtype)
 
                 # Make sure the W_dec is still unit-norm if we're autoencoding
                 # Skip if decoder is frozen (e.g., in distillation mode) to preserve teacher weights
@@ -732,7 +810,10 @@ class Trainer:
 
         k = self.get_current_k()
         for name, sae in self.saes.items():
-            sae.cfg.k = k
+            if hasattr(sae, 'set_k'):
+                sae.set_k(k)  # TiledSparseCoder: propagate to all tiles
+            else:
+                sae.cfg.k = k
 
         for batch in dl:
             x = batch["input_ids"].to(device)
@@ -878,7 +959,10 @@ class Trainer:
 
                 k = self.get_current_k()
                 for name, sae in self.saes.items():
-                    sae.cfg.k = k
+                    if hasattr(sae, 'set_k'):
+                        sae.set_k(k)  # TiledSparseCoder: propagate to all tiles
+                    else:
+                        sae.cfg.k = k
 
                 ###############
                 with torch.no_grad():

@@ -8,7 +8,6 @@ from multiprocessing import cpu_count
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
-from safetensors.torch import load_model
 from simple_parsing import field, parse
 from transformers import (
     AutoModel,
@@ -19,7 +18,7 @@ from transformers import (
 )
 
 from .data import MemmapDataset, chunk_and_tokenize
-from .trainer import TrainConfig, Trainer
+from .trainer import TrainConfig, Trainer, load_sae_checkpoint
 from .utils import simple_parse_args_string
 
 
@@ -209,11 +208,7 @@ def run():
             trainer.load_state(resume_path)
         elif args.finetune:
             for name, sae in trainer.saes.items():
-                load_model(
-                    sae,
-                    f"{args.finetune}/{name}/sae.safetensors",
-                    device=str(model.device),
-                )
+                load_sae_checkpoint(sae, f"{args.finetune}/{name}", device=str(model.device))
 
         trainer.fit()
 
