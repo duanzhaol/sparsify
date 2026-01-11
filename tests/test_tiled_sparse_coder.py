@@ -332,3 +332,191 @@ class TestConfigValidation:
                 num_tiles=4,
                 hook_mode="transcode",
             )
+
+
+class TestGlobalTopK:
+    """Test global top-k functionality."""
+
+    @pytest.fixture
+    def cfg(self):
+        return SparseCoderConfig(expansion_factor=4, k=8)
+
+    @pytest.fixture
+    def device(self):
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def test_init_global_topk(self, cfg):
+        """Test initialization with global_topk enabled."""
+        d_in = 64
+        num_tiles = 4
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu", global_topk=True)
+
+        assert tiled.global_topk is True
+        assert tiled.input_mixing is False
+
+    @requires_cuda
+    def test_forward_global_topk(self, cfg, device):
+        """Test forward pass with global top-k."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 8
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device=device, global_topk=True)
+
+        x = torch.randn(batch_size, d_in, device=device)
+        out = tiled(x)
+
+        # Check output shapes - should be same as per-tile mode
+        assert out.sae_out.shape == (batch_size, d_in)
+        assert out.latent_acts.shape == (batch_size, cfg.k)
+        assert out.latent_indices.shape == (batch_size, cfg.k)
+
+        # Indices should span all tiles (not just tile-local)
+        assert out.latent_indices.min() >= 0
+        assert out.latent_indices.max() < tiled.num_latents
+
+    @requires_cuda
+    def test_global_topk_indices_cross_tiles(self, cfg, device):
+        """Test that global top-k can select from multiple tiles."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 16
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device=device, global_topk=True)
+
+        x = torch.randn(batch_size, d_in, device=device)
+        out = tiled(x)
+
+        # Check that indices come from multiple tiles (statistical check)
+        num_latents_per_tile = tiled.saes[0].num_latents
+        tile_counts = torch.zeros(num_tiles, device=device)
+        for i in range(num_tiles):
+            tile_start = i * num_latents_per_tile
+            tile_end = (i + 1) * num_latents_per_tile
+            mask = (out.latent_indices >= tile_start) & (out.latent_indices < tile_end)
+            tile_counts[i] = mask.sum()
+
+        # At least some indices should come from different tiles
+        # (not all from one tile)
+        assert (tile_counts > 0).sum() > 1, "Global top-k should select from multiple tiles"
+
+    @requires_cuda
+    def test_global_topk_gradient_flow(self, cfg, device):
+        """Test gradient flow with global top-k."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 8
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device=device, global_topk=True)
+
+        x = torch.randn(batch_size, d_in, device=device, requires_grad=True)
+        out = tiled(x)
+        out.fvu.backward()
+
+        assert x.grad is not None
+        for sae in tiled.saes:
+            assert sae.encoder.weight.grad is not None
+
+    def test_save_load_global_topk(self, cfg):
+        """Test save/load preserves global_topk setting."""
+        d_in = 64
+        num_tiles = 4
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu", global_topk=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tiled.save_to_disk(tmpdir)
+            loaded = TiledSparseCoder.load_from_disk(tmpdir, device="cpu")
+
+            assert loaded.global_topk is True
+
+
+class TestInputMixing:
+    """Test input mixing functionality."""
+
+    @pytest.fixture
+    def cfg(self):
+        return SparseCoderConfig(expansion_factor=4, k=8)
+
+    @pytest.fixture
+    def device(self):
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def test_init_input_mixing(self, cfg):
+        """Test initialization with input_mixing enabled."""
+        d_in = 64
+        num_tiles = 4
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu", input_mixing=True)
+
+        assert tiled.input_mixing is True
+        assert hasattr(tiled, 'mixing')
+        assert tiled.mixing.shape == (num_tiles, num_tiles)
+        # Should be initialized as identity
+        assert torch.allclose(tiled.mixing, torch.eye(num_tiles))
+
+    @requires_cuda
+    def test_forward_input_mixing(self, cfg, device):
+        """Test forward pass with input mixing."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 8
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device=device, input_mixing=True)
+
+        x = torch.randn(batch_size, d_in, device=device)
+        out = tiled(x)
+
+        assert out.sae_out.shape == (batch_size, d_in)
+        assert out.latent_acts.shape == (batch_size, cfg.k)
+
+    @requires_cuda
+    def test_input_mixing_gradient(self, cfg, device):
+        """Test that mixing matrix receives gradients."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 8
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device=device, input_mixing=True)
+
+        x = torch.randn(batch_size, d_in, device=device)
+        out = tiled(x)
+        out.fvu.backward()
+
+        assert tiled.mixing.grad is not None
+        assert tiled.mixing.grad.abs().sum() > 0
+
+    def test_save_load_input_mixing(self, cfg):
+        """Test save/load preserves input_mixing setting and weights."""
+        d_in = 64
+        num_tiles = 4
+        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu", input_mixing=True)
+
+        # Modify mixing matrix
+        tiled.mixing.data = torch.randn(num_tiles, num_tiles)
+        original_mixing = tiled.mixing.data.clone()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tiled.save_to_disk(tmpdir)
+            loaded = TiledSparseCoder.load_from_disk(tmpdir, device="cpu")
+
+            assert loaded.input_mixing is True
+            assert hasattr(loaded, 'mixing')
+            assert torch.allclose(loaded.mixing, original_mixing)
+
+    @requires_cuda
+    def test_combined_global_topk_and_mixing(self, cfg, device):
+        """Test both global_topk and input_mixing enabled together."""
+        d_in = 64
+        num_tiles = 4
+        batch_size = 8
+        tiled = TiledSparseCoder(
+            d_in, cfg, num_tiles, device=device,
+            global_topk=True, input_mixing=True
+        )
+
+        x = torch.randn(batch_size, d_in, device=device, requires_grad=True)
+        out = tiled(x)
+
+        assert out.sae_out.shape == (batch_size, d_in)
+        assert out.latent_acts.shape == (batch_size, cfg.k)
+
+        # Test gradient flow
+        out.fvu.backward()
+        assert x.grad is not None
+        assert tiled.mixing.grad is not None
+        for sae in tiled.saes:
+            assert sae.encoder.weight.grad is not None

@@ -120,6 +120,16 @@ class TrainConfig(Serializable):
     """Number of tiles to split input activations. Each tile trains a separate SAE.
     d_in must be divisible by num_tiles. Set to 1 (default) for standard training."""
 
+    global_topk: bool = False
+    """Use global top-k selection across all tiles instead of per-tile top-k.
+    When enabled, all tiles compete for the same k activation budget, allowing
+    more important tiles to use more capacity. Only effective when num_tiles > 1."""
+
+    input_mixing: bool = False
+    """Apply learnable T×T mixing matrix on tile dimension before encoding.
+    This allows the model to learn a better coordinate system for tiling.
+    Only effective when num_tiles > 1."""
+
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
 

@@ -241,6 +241,8 @@ class Trainer:
                             cfg.num_tiles,
                             device,
                             dtype=torch.float32,
+                            global_topk=cfg.global_topk,
+                            input_mixing=cfg.input_mixing,
                         )
                     else:
                         self.saes[name] = SparseCoder(

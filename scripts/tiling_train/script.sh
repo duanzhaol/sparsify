@@ -8,7 +8,7 @@ python compute_elbow_thresholds.py \
     --max_percentile 0.95
 
 
-torchrun --nproc_per_node 2 --master_port 29501  -m sparsify \
+torchrun --nproc_per_node 1 --master_port 29501  -m sparsify \
         /model-weights/Qwen3-0.6B/ \
         /mnt/data/fineweb-edu/sample/10BT \
         --split "train" \
@@ -28,7 +28,7 @@ torchrun --nproc_per_node 2 --master_port 29501  -m sparsify \
         --hookpoints "layers.[0,5,10,15].self_attn.q_proj" \
         --hook_mode input \
         --init_seeds 1127 \
-        --batch_size 4 \
+        --batch_size 8 \
         --grad_acc_steps 8 \
         --micro_acc_steps 1 \
         --loss_fn "fvu" \
