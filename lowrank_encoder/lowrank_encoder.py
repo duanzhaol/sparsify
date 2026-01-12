@@ -114,21 +114,23 @@ class LowRankFusedEncoder(torch.autograd.Function):
         if grad_preacts is not None and grad_preacts.abs().sum() > 0:
             # Recompute ReLU mask: preacts > 0
             # pre_linear = intermediate @ A.T + bias
-            pre_linear = intermediate @ A.T + bias
+            intermediate_fp = intermediate.to(A.dtype)
+            pre_linear = intermediate_fp @ A.T + bias
             relu_mask = (pre_linear > 0).type_as(grad_preacts)
             grad_pre_linear = grad_preacts * relu_mask  # [N, M]
+            grad_pre_linear_fp = grad_pre_linear.to(A.dtype)
 
             # grad_bias += grad_pre_linear.sum(0)
             if ctx.needs_input_grad[3]:
                 if grad_bias is None:
-                    grad_bias = grad_pre_linear.sum(0).type_as(bias)
+                    grad_bias = grad_pre_linear_fp.sum(0).type_as(bias)
                 else:
-                    grad_bias = grad_bias + grad_pre_linear.sum(0).type_as(bias)
+                    grad_bias = grad_bias + grad_pre_linear_fp.sum(0).type_as(bias)
 
             # grad_A += intermediate.T @ grad_pre_linear -> transpose for weight format
             # A has shape [M, r], grad w.r.t. A: grad_pre_linear.T @ intermediate
             if ctx.needs_input_grad[1]:
-                grad_A_dense = grad_pre_linear.T @ intermediate.type_as(A)  # [M, r]
+                grad_A_dense = grad_pre_linear_fp.T @ intermediate_fp  # [M, r]
                 if grad_A is None:
                     grad_A = grad_A_dense
                 else:
@@ -137,7 +139,7 @@ class LowRankFusedEncoder(torch.autograd.Function):
             # grad_intermediate_dense = grad_pre_linear @ A
             # grad_B += grad_intermediate_dense.T @ input
             if ctx.needs_input_grad[2]:
-                grad_intermediate_dense = grad_pre_linear @ A  # [N, r]
+                grad_intermediate_dense = grad_pre_linear_fp @ A  # [N, r]
                 grad_B_dense = grad_intermediate_dense.T @ input.type_as(B)  # [r, D]
                 if grad_B is None:
                     grad_B = grad_B_dense

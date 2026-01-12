@@ -28,6 +28,7 @@ from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
 from .tiled_sparse_coder import TiledSparseCoder
 from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
+from lowrank_encoder import LowRankSparseCoder
 
 
 def is_tiled_checkpoint(path: str | Path) -> bool:
@@ -243,6 +244,14 @@ class Trainer:
                             dtype=torch.float32,
                             global_topk=cfg.global_topk,
                             input_mixing=cfg.input_mixing,
+                        )
+                    elif cfg.sae.encoder_rank > 0:
+                        self.saes[name] = LowRankSparseCoder(
+                            input_widths[hook],
+                            cfg.sae,
+                            device,
+                            dtype=torch.float32,
+                            transcoder=(cfg.hook_mode == "transcode"),
                         )
                     else:
                         self.saes[name] = SparseCoder(

@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from .config import SparseCoderConfig
 from .sparse_coder import ForwardOutput, SparseCoder
 from .utils import decoder_impl
+from lowrank_encoder import LowRankSparseCoder
 
 
 class TiledSparseCoder(nn.Module):
@@ -53,10 +54,20 @@ class TiledSparseCoder(nn.Module):
         tile_cfg = copy.deepcopy(cfg)
         tile_cfg.k = self.k_per_tile
 
-        self.saes = nn.ModuleList([
-            SparseCoder(self.tile_size, tile_cfg, device, dtype)
-            for _ in range(num_tiles)
-        ])
+        # Check if using low-rank encoder
+        self.use_lowrank = cfg.encoder_rank > 0
+
+        # Create per-tile SAEs
+        if self.use_lowrank:
+            self.saes = nn.ModuleList([
+                LowRankSparseCoder(self.tile_size, tile_cfg, device, dtype)
+                for _ in range(num_tiles)
+            ])
+        else:
+            self.saes = nn.ModuleList([
+                SparseCoder(self.tile_size, tile_cfg, device, dtype)
+                for _ in range(num_tiles)
+            ])
 
         # Input mixing matrix (T×T) for cross-tile information flow
         if input_mixing:
@@ -190,6 +201,20 @@ class TiledSparseCoder(nn.Module):
         x_unmixed = torch.einsum('nid,ji->njd', x_reshaped, mixing_inv)
         return x_unmixed.reshape(x.shape[0], -1)
 
+    def _compute_pre_acts(self, sae, x_tile: Tensor) -> Tensor:
+        """Compute pre-activations for a single tile, handling both full-rank and low-rank."""
+        centered = x_tile - sae.b_dec
+
+        if self.use_lowrank:
+            # LowRankSparseCoder: pre_acts = ReLU((x @ B.T) @ A.T + bias)
+            intermediate = centered @ sae.encoder_B.weight.T  # [N, r]
+            pre_acts = F.relu(F.linear(intermediate, sae.encoder_A.weight, sae.encoder_A.bias))
+        else:
+            # SparseCoder: pre_acts = ReLU(x @ W_enc.T + bias)
+            pre_acts = F.relu(F.linear(centered, sae.encoder.weight, sae.encoder.bias))
+
+        return pre_acts
+
     def _forward_per_tile(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
@@ -236,11 +261,7 @@ class TiledSparseCoder(nn.Module):
         # Step 1: Compute pre-activations for all tiles
         all_pre_acts = []
         for sae, x_tile in zip(self.saes, x_tiles):
-            sae: SparseCoder  # type: ignore
-            # Center the input (same as in SparseCoder.encode)
-            centered = x_tile - sae.b_dec
-            # Linear transform + ReLU
-            pre_acts = F.relu(F.linear(centered, sae.encoder.weight, sae.encoder.bias))
+            pre_acts = self._compute_pre_acts(sae, x_tile)
             all_pre_acts.append(pre_acts)
 
         global_pre_acts = torch.cat(all_pre_acts, dim=-1)  # [N, M_total]
@@ -355,12 +376,18 @@ class TiledSparseCoder(nn.Module):
             global_topk=global_topk, input_mixing=input_mixing
         )
 
-        # Load each tile
+        # Load each tile (use appropriate loader based on encoder_rank)
+        use_lowrank = cfg.encoder_rank > 0
         for i in range(num_tiles):
             tile_path = path / f"tile_{i}"
-            instance.saes[i] = SparseCoder.load_from_disk(
-                tile_path, device=device, decoder=decoder
-            )
+            if use_lowrank:
+                instance.saes[i] = LowRankSparseCoder.load_from_disk(
+                    tile_path, device=device, decoder=decoder
+                )
+            else:
+                instance.saes[i] = SparseCoder.load_from_disk(
+                    tile_path, device=device, decoder=decoder
+                )
 
         # Load mixing matrix if it exists
         mixing_path = path / "mixing.pt"

@@ -195,3 +195,4 @@ class TrainConfig(Serializable):
                 "Tiled training (num_tiles > 1) does not support distillation mode. "
                 "Use num_tiles=1 for distillation training."
             )
+
