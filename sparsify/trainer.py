@@ -25,6 +25,7 @@ from .config import TrainConfig
 from .data import MemmapDataset
 from .hadamard import HadamardRotation
 from .muon import Muon
+from .outlier_clip import OutlierClipper
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
 from .tiled_sparse_coder import TiledSparseCoder
@@ -375,6 +376,16 @@ class Trainer:
                 f"seed={cfg.hadamard_seed}, use_perm={cfg.hadamard_use_perm}"
             )
 
+        # Initialize outlier clippers if enabled
+        # Will be lazily initialized in hook when we know the actual d_in
+        self.outlier_clippers: dict[str, OutlierClipper] = {}
+        if cfg.use_outlier_clip:
+            print(
+                f"Outlier clipping enabled: k={cfg.outlier_k}, "
+                f"ema_alpha={cfg.outlier_ema_alpha}, warmup_steps={cfg.outlier_warmup_steps}, "
+                f"loss_mode={cfg.outlier_loss_mode}"
+            )
+
     def _load_elbow_thresholds(self, path: str):
         """Load elbow thresholds from JSON file and match to hookpoints.
 
@@ -481,6 +492,16 @@ class Trainer:
                     state, device=device
                 )
             print(f"  Loaded Hadamard rotations for {len(self.hadamard_rotations)} hookpoints")
+
+        # Load outlier clipper states if they exist
+        clipper_path = f"{path}/outlier_clippers.pt"
+        if os.path.exists(clipper_path):
+            clipper_states = torch.load(clipper_path, map_location=device, weights_only=False)
+            for name, state in clipper_states.items():
+                self.outlier_clippers[name] = OutlierClipper.from_state_dict(
+                    state, device=device
+                )
+            print(f"  Loaded outlier clippers for {len(self.outlier_clippers)} hookpoints")
 
     def get_current_k(self) -> int:
         """Get the current k value based on a linear decay schedule."""
@@ -596,6 +617,7 @@ class Trainer:
         avg_auxk_loss = defaultdict(float)
         avg_fvu = defaultdict(float)
         avg_multi_topk_fvu = defaultdict(float)
+        avg_outlier_ratio = defaultdict(float)
         avg_ce = 0.0
         avg_kl = 0.0
         # Exceed metrics (per hookpoint, per alpha)
@@ -725,8 +747,38 @@ class Trainer:
                 inputs = rotation.rotate(inputs)
                 # Note: all_outputs is not rotated since ce/kl is disabled with hadamard
 
+            # Apply outlier clipping if enabled
+            outlier_residual = None
+            outlier_mask = None
+            original_outputs = None  # For exceed metrics
+            if self.cfg.use_outlier_clip:
+                if name not in self.outlier_clippers:
+                    d_in = outputs.shape[-1]
+                    self.outlier_clippers[name] = OutlierClipper(
+                        d_in=d_in,
+                        k=self.cfg.outlier_k,
+                        ema_alpha=self.cfg.outlier_ema_alpha,
+                        warmup_steps=self.cfg.outlier_warmup_steps,
+                        device=outputs.device,
+                        dtype=torch.float32,
+                    )
+
+                clipper = self.outlier_clippers[name]
+                # Store original outputs for exceed calculation
+                original_outputs = outputs.detach().clone()
+                # Clip outputs (update stats during training)
+                outputs, outlier_residual, outlier_mask = clipper.clip(outputs, update_stats=True)
+                # Clip inputs with same threshold (no stats update)
+                inputs, _, _ = clipper.clip(inputs, update_stats=False)
+
             # Get the bare hook name for lookups
             hook_name = name
+
+            if self.cfg.use_outlier_clip and outlier_mask is not None:
+                outlier_ratio = outlier_mask.mean()
+                avg_outlier_ratio[hook_name] += float(
+                    self.maybe_all_reduce(outlier_ratio.detach()) / denom
+                )
 
             # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
             original_target_for_exceed = None
@@ -808,11 +860,23 @@ class Trainer:
                         metrics_time_start = time.perf_counter()
 
                     # CRITICAL: Compute in ORIGINAL space
-                    # Use pre-computed unrotated target (computed once outside loop)
-                    original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
-                    original_recon = out.sae_out
-                    if self.cfg.use_hadamard and name in self.hadamard_rotations:
-                        original_recon = self.hadamard_rotations[name].unrotate(original_recon)
+                    if self.cfg.use_outlier_clip and outlier_residual is not None:
+                        # Full reconstruction strategy depends on loss mode:
+                        # - weighted: SAE output on outlier dims is unconstrained, must zero out
+                        # - inlier_only: SAE is encouraged to output ~0 on outlier dims, keep it
+                        if self.cfg.outlier_loss_mode == "weighted":
+                            original_recon = out.sae_out * (1 - outlier_mask) + outlier_residual
+                        else:  # inlier_only
+                            original_recon = out.sae_out + outlier_residual
+                        # Original target = inlier + residual = original_outputs
+                        original_target = original_outputs
+                    elif self.cfg.use_hadamard and name in self.hadamard_rotations:
+                        # Use pre-computed unrotated target
+                        original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
+                        original_recon = self.hadamard_rotations[name].unrotate(out.sae_out)
+                    else:
+                        original_target = outputs
+                        original_recon = out.sae_out
 
                     # Compute absolute reconstruction error
                     error_magnitude = torch.abs(original_target - original_recon)
@@ -842,9 +906,29 @@ class Trainer:
                         total_metrics_time += metrics_time_end - metrics_time_start
 
                 # Do a "local" backward pass if we're not training end-to-end
-                loss = (
-                    out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-                )
+                # Compute loss with outlier handling if enabled
+                if self.cfg.use_outlier_clip and outlier_mask is not None:
+                    if self.cfg.outlier_loss_mode == "weighted":
+                        # Weighted loss: outlier dims have weight 0
+                        error_sq = (out.sae_out - outputs) ** 2
+                        weight = 1 - outlier_mask
+                        # Compute weighted MSE
+                        weighted_mse = (error_sq * weight).sum() / (weight.sum() + 1e-8)
+                        # Compute per-dimension centered variance (consistent with original FVU)
+                        # Per-dim weighted mean: [d_in]
+                        inlier_mean = (outputs * weight).sum(dim=0) / (weight.sum(dim=0) + 1e-8)
+                        # Weighted variance using per-dim mean
+                        inlier_var = (((outputs - inlier_mean) ** 2) * weight).sum() / (weight.sum() + 1e-8)
+                        fvu_loss = weighted_mse / (inlier_var + 1e-8)
+                    else:  # inlier_only
+                        # Standard FVU on x_inlier. Note: this still penalizes SAE output on
+                        # outlier dims (encouraging them toward 0), unlike weighted mode.
+                        fvu_loss = out.fvu
+                    loss = fvu_loss + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
+                else:
+                    loss = (
+                        out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
+                    )
 
                 # Distillation loss (if enabled)
                 if hook_name in self.teachers:
@@ -1109,6 +1193,11 @@ class Trainer:
                         if self.cfg.sae.multi_topk:
                             info[f"{name}/multi_topk_fvu"] = avg_multi_topk_fvu[name]
 
+                        if self.cfg.use_outlier_clip:
+                            hook_name = name.partition("/")[0]
+                            if hook_name in avg_outlier_ratio:
+                                info[f"{name}/outlier_ratio"] = avg_outlier_ratio[hook_name]
+
                         # Exceed metrics
                         if name in avg_exceed:
                             for alpha, exceed_val in avg_exceed[name].items():
@@ -1123,6 +1212,12 @@ class Trainer:
                         info["k"] = k
                         info["_step"] = step  # Keep gradient step count for reference
 
+                        if self.cfg.use_outlier_clip and avg_outlier_ratio:
+                            avg_ratio = sum(avg_outlier_ratio.values()) / len(
+                                avg_outlier_ratio
+                            )
+                            pbar.set_postfix(outlier_ratio=f"{avg_ratio:.6f}")
+
                         if wandb is not None:
                             # Use total tokens as x-axis for fair comparison across configs
                             wandb.log(info, step=self.total_tokens)
@@ -1130,6 +1225,7 @@ class Trainer:
                 avg_auxk_loss.clear()
                 avg_fvu.clear()
                 avg_multi_topk_fvu.clear()
+                avg_outlier_ratio.clear()
                 avg_exceed.clear()  # NEW
                 avg_ce = 0.0
                 avg_kl = 0.0
@@ -1243,6 +1339,14 @@ class Trainer:
                         for name, rot in self.hadamard_rotations.items()
                     }
                     torch.save(hadamard_states, f"{path}/hadamard_rotations.pt")
+
+                # Save outlier clipper states if enabled
+                if self.cfg.use_outlier_clip and self.outlier_clippers:
+                    clipper_states = {
+                        name: clipper.state_dict()
+                        for name, clipper in self.outlier_clippers.items()
+                    }
+                    torch.save(clipper_states, f"{path}/outlier_clippers.pt")
 
             rank = 0 if rank_zero else dist.get_rank()
             torch.save(

@@ -1,9 +1,16 @@
 import os
+import sys
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
 from glob import glob
 from multiprocessing import cpu_count
+from pathlib import Path
+
+# Add project root to path so lowrank_encoder can be imported
+_project_root = Path(__file__).parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import torch
 import torch.distributed as dist

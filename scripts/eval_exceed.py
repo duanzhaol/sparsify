@@ -25,6 +25,7 @@ from transformers import (
 from sparsify.config import TrainConfig
 from sparsify.data import MemmapDataset, chunk_and_tokenize
 from sparsify.hadamard import HadamardRotation
+from sparsify.outlier_clip import OutlierClipper
 from sparsify.sparse_coder import SparseCoder
 from sparsify.tiled_sparse_coder import TiledSparseCoder
 from sparsify.eval.two_stage import TwoStageConfig
@@ -240,6 +241,23 @@ def load_hadamard_rotations(
     return rotations
 
 
+def load_outlier_clippers(
+    checkpoint: Path, hookpoints: list[str], device: str | torch.device
+) -> dict[str, OutlierClipper]:
+    """Load outlier clipper states from checkpoint if they exist."""
+    clipper_path = checkpoint / "outlier_clippers.pt"
+    if not clipper_path.exists():
+        return {}
+
+    clipper_states = torch.load(clipper_path, map_location=device, weights_only=False)
+    clippers = {}
+    for name, state in clipper_states.items():
+        if name in hookpoints:
+            clippers[name] = OutlierClipper.from_state_dict(state, device=device)
+    print(f"Loaded outlier clippers for {len(clippers)} hookpoints")
+    return clippers
+
+
 from lowrank_encoder import LowRankSparseCoder
 
 
@@ -301,6 +319,11 @@ def main() -> None:
 
     # Load Hadamard rotations if they exist in checkpoint
     hadamard_rotations = load_hadamard_rotations(checkpoint, hookpoints, device)
+
+    # Load outlier clippers if they exist in checkpoint
+    outlier_clippers = load_outlier_clippers(checkpoint, hookpoints, device)
+    # Get outlier loss mode from config (default to "weighted" for backwards compatibility)
+    outlier_loss_mode = cfg.outlier_loss_mode if cfg and hasattr(cfg, 'outlier_loss_mode') else "weighted"
 
     pca_bundle = None
     if args.encoder_mode == "two_stage" and args.two_stage_proj == "pca":
@@ -390,6 +413,19 @@ def main() -> None:
             outputs = rotation.rotate(outputs)
             inputs = rotation.rotate(inputs)
 
+        # Apply outlier clipping if available for this hookpoint
+        outlier_residual = None
+        outlier_mask = None
+        original_outputs = None
+        if name in outlier_clippers:
+            clipper = outlier_clippers[name]
+            # Store original outputs for exceed calculation
+            original_outputs = outputs.detach().clone()
+            # Clip outputs (no stats update during inference)
+            outputs, outlier_residual, outlier_mask = clipper.clip(outputs, update_stats=False)
+            # Clip inputs with same threshold
+            inputs, _, _ = clipper.clip(inputs, update_stats=False)
+
         # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
         original_target_for_exceed = None
         if name in hadamard_rotations and hook_name in elbow_thresholds:
@@ -410,11 +446,23 @@ def main() -> None:
 
             if hook_name in elbow_thresholds and exceed_alphas:
                 # CRITICAL: Compute exceed in ORIGINAL space
-                # Use pre-computed unrotated target (computed once outside loop)
-                original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
-                original_recon = out.sae_out
-                if name in hadamard_rotations:
-                    original_recon = hadamard_rotations[name].unrotate(original_recon)
+                if outlier_residual is not None:
+                    # Full reconstruction strategy depends on loss mode:
+                    # - weighted: SAE output on outlier dims is unconstrained, must zero out
+                    # - inlier_only: SAE is encouraged to output ~0 on outlier dims, keep it
+                    if outlier_loss_mode == "weighted":
+                        original_recon = out.sae_out * (1 - outlier_mask) + outlier_residual
+                    else:  # inlier_only
+                        original_recon = out.sae_out + outlier_residual
+                    # Original target = original_outputs (before clipping)
+                    original_target = original_outputs
+                elif name in hadamard_rotations:
+                    # Use pre-computed unrotated target
+                    original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
+                    original_recon = hadamard_rotations[name].unrotate(out.sae_out)
+                else:
+                    original_target = outputs
+                    original_recon = out.sae_out
 
                 error_magnitude = torch.abs(original_target - original_recon)
                 num_elements = float(error_magnitude.numel())

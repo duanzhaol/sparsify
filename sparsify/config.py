@@ -4,6 +4,8 @@ from typing import Literal
 
 from simple_parsing import Serializable, list_field
 
+OutlierLossMode = Literal["weighted", "inlier_only"]
+
 
 @dataclass
 class SparseCoderConfig(Serializable):
@@ -147,6 +149,27 @@ class TrainConfig(Serializable):
     """Whether to use random permutation before Hadamard transform.
     Recommended to keep True for better outlier distribution."""
 
+    # Outlier clipping settings
+    use_outlier_clip: bool = False
+    """Apply outlier clipping to activations before SAE.
+    Separates outlier dimensions from SAE training, letting SAE focus on main distribution."""
+
+    outlier_k: float = 3.0
+    """Threshold multiplier: threshold_d = k * RMS_d"""
+
+    outlier_ema_alpha: float = 0.01
+    """EMA decay factor for online RMS estimation."""
+
+    outlier_warmup_steps: int = 100
+    """Number of warmup steps with larger alpha for faster EMA convergence."""
+
+    outlier_loss_mode: OutlierLossMode = "weighted"
+    """Loss computation mode:
+    - weighted: Outlier dims have weight 0 in loss. SAE output on outlier dims is unconstrained.
+    - inlier_only: Standard FVU on x_inlier. SAE output on outlier dims (target=0) is still
+      penalized, implicitly encouraging the SAE to output near-zero on those dims.
+    """
+
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
 
@@ -224,5 +247,20 @@ class TrainConfig(Serializable):
                 raise ValueError(
                     "Hadamard rotation is not supported with ce/kl loss. "
                     "Use loss_fn='fvu' with use_hadamard=True."
+                )
+
+        # Validate outlier clipping configuration
+        if self.use_outlier_clip:
+            if self.outlier_k <= 0:
+                raise ValueError(f"outlier_k must be positive, got {self.outlier_k}")
+            if self.use_hadamard:
+                raise ValueError(
+                    "use_outlier_clip and use_hadamard are mutually exclusive. "
+                    "Choose one preprocessing method."
+                )
+            if self.loss_fn in ("ce", "kl"):
+                raise ValueError(
+                    "Outlier clipping is not supported with ce/kl loss. "
+                    "Use loss_fn='fvu' with use_outlier_clip=True."
                 )
 
