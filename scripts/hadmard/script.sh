@@ -1,0 +1,39 @@
+torchrun --nproc_per_node 4 --master_port 29501  -m sparsify \
+        ~/models/Qwen3-0.6B/ \
+        ~/fineweb-edu/sample/10BT-tokenized-qwen3-2048/ \
+        --split "train" \
+        --wandb_project 'qwen3-0.6B-0108' \
+        --ctx_len 2048 \
+        --max_examples 1000000 \
+        --text_column "text" \
+        --shuffle_seed 1127 \
+        --data_preprocessing_num_proc 16 \
+        --activation "topk" \
+        --expansion_factor 8 \
+        --normalize_decoder True \
+        --num_latents 0 \
+        -k 128 \
+        --multi_topk False \
+        --skip_connection False \
+        --hookpoints "layers.[0,5,10,15].self_attn.q_proj" \
+        --hook_mode input \
+        --init_seeds 1127 \
+        --batch_size 2 \
+        --grad_acc_steps 8 \
+        --micro_acc_steps 1 \
+        --loss_fn "fvu" \
+        --optimizer "signum" \
+        --lr 8e-4 \
+        --auxk_alpha 0.03125 \
+        --dead_feature_threshold 10000000 \
+        --save_every 200 \
+        --save_best True \
+        --save_dir "checkpoints/lowrank" \
+        --run_name "qwen3-0.6B-lowrank" \
+        --log_to_wandb True \
+        --wandb_log_frequency 1 \
+        --elbow_threshold_path ~/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json \
+        --max_tokens 200000000 \
+        --exceed_alphas 0.10 0.20 0.3 0.4 0.5 0.6 0.7 1.0 \
+        --use_hadamard \
+        --hadamard_block_size 1024 --hadamard_seed 42

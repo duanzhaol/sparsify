@@ -24,6 +24,7 @@ from transformers import (
 
 from sparsify.config import TrainConfig
 from sparsify.data import MemmapDataset, chunk_and_tokenize
+from sparsify.hadamard import HadamardRotation
 from sparsify.sparse_coder import SparseCoder
 from sparsify.tiled_sparse_coder import TiledSparseCoder
 from sparsify.eval.two_stage import TwoStageConfig
@@ -222,6 +223,23 @@ def load_sae_from_disk(path: Path, device: str | torch.device):
     return SparseCoder.load_from_disk(path, device=device)
 
 
+def load_hadamard_rotations(
+    checkpoint: Path, hookpoints: list[str], device: str | torch.device
+) -> dict[str, HadamardRotation]:
+    """Load Hadamard rotation states from checkpoint if they exist."""
+    hadamard_path = checkpoint / "hadamard_rotations.pt"
+    if not hadamard_path.exists():
+        return {}
+
+    hadamard_states = torch.load(hadamard_path, map_location=device, weights_only=False)
+    rotations = {}
+    for name, state in hadamard_states.items():
+        if name in hookpoints:
+            rotations[name] = HadamardRotation.from_state_dict(state, device=device)
+    print(f"Loaded Hadamard rotations for {len(rotations)} hookpoints")
+    return rotations
+
+
 from lowrank_encoder import LowRankSparseCoder
 
 
@@ -280,6 +298,9 @@ def main() -> None:
         sae.eval()
         sae.requires_grad_(False)
         saes[key] = sae
+
+    # Load Hadamard rotations if they exist in checkpoint
+    hadamard_rotations = load_hadamard_rotations(checkpoint, hookpoints, device)
 
     pca_bundle = None
     if args.encoder_mode == "two_stage" and args.two_stage_proj == "pca":
@@ -363,6 +384,17 @@ def main() -> None:
         outputs = outputs[mask]
         inputs = inputs[mask]
 
+        # Apply Hadamard rotation if available for this hookpoint
+        if name in hadamard_rotations:
+            rotation = hadamard_rotations[name]
+            outputs = rotation.rotate(outputs)
+            inputs = rotation.rotate(inputs)
+
+        # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
+        original_target_for_exceed = None
+        if name in hadamard_rotations and hook_name in elbow_thresholds:
+            original_target_for_exceed = hadamard_rotations[name].unrotate(outputs)
+
         for sae_key in hook_to_sae_keys[hook_name]:
             out = encoder_strategies[sae_key].forward(inputs, outputs)
 
@@ -377,7 +409,14 @@ def main() -> None:
                 latent_counts[sae_key] += counts
 
             if hook_name in elbow_thresholds and exceed_alphas:
-                error_magnitude = torch.abs(outputs - out.sae_out)
+                # CRITICAL: Compute exceed in ORIGINAL space
+                # Use pre-computed unrotated target (computed once outside loop)
+                original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
+                original_recon = out.sae_out
+                if name in hadamard_rotations:
+                    original_recon = hadamard_rotations[name].unrotate(original_recon)
+
+                error_magnitude = torch.abs(original_target - original_recon)
                 num_elements = float(error_magnitude.numel())
                 if num_elements == 0:
                     continue

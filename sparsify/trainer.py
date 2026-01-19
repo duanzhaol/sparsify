@@ -23,6 +23,7 @@ from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
 from .data import MemmapDataset
+from .hadamard import HadamardRotation
 from .muon import Muon
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
@@ -365,6 +366,15 @@ class Trainer:
             else float("inf")
         )
 
+        # Initialize Hadamard rotations if enabled
+        # Will be lazily initialized in hook when we know the actual d_in
+        self.hadamard_rotations: dict[str, HadamardRotation] = {}
+        if cfg.use_hadamard:
+            print(
+                f"Hadamard rotation enabled: block_size={cfg.hadamard_block_size}, "
+                f"seed={cfg.hadamard_seed}, use_perm={cfg.hadamard_use_perm}"
+            )
+
     def _load_elbow_thresholds(self, path: str):
         """Load elbow thresholds from JSON file and match to hookpoints.
 
@@ -461,6 +471,16 @@ class Trainer:
 
         for name, sae in self.saes.items():
             load_sae_checkpoint(sae, f"{path}/{name}", device=str(device))
+
+        # Load Hadamard rotation states if they exist
+        hadamard_path = f"{path}/hadamard_rotations.pt"
+        if os.path.exists(hadamard_path):
+            hadamard_states = torch.load(hadamard_path, map_location=device, weights_only=False)
+            for name, state in hadamard_states.items():
+                self.hadamard_rotations[name] = HadamardRotation.from_state_dict(
+                    state, device=device
+                )
+            print(f"  Loaded Hadamard rotations for {len(self.hadamard_rotations)} hookpoints")
 
     def get_current_k(self) -> int:
         """Get the current k value based on a linear decay schedule."""
@@ -688,8 +708,30 @@ class Trainer:
             outputs = outputs[mask]
             inputs = inputs[mask]
 
+            # Apply Hadamard rotation if enabled
+            if self.cfg.use_hadamard:
+                if name not in self.hadamard_rotations:
+                    d_in = outputs.shape[-1]
+                    self.hadamard_rotations[name] = HadamardRotation(
+                        d_in,
+                        block_size=self.cfg.hadamard_block_size,
+                        seed=self.cfg.hadamard_seed,
+                        use_permutation=self.cfg.hadamard_use_perm,
+                        device=outputs.device,
+                        dtype=outputs.dtype,
+                    )
+                rotation = self.hadamard_rotations[name]
+                outputs = rotation.rotate(outputs)
+                inputs = rotation.rotate(inputs)
+                # Note: all_outputs is not rotated since ce/kl is disabled with hadamard
+
             # Get the bare hook name for lookups
             hook_name = name
+
+            # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
+            original_target_for_exceed = None
+            if self.cfg.use_hadamard and name in self.hadamard_rotations and hook_name in self.elbow_thresholds:
+                original_target_for_exceed = self.hadamard_rotations[name].unrotate(outputs)
 
             # Process each SAE for this hook (supports multi-seed)
             for sae_key in hook_to_sae_keys[hook_name]:
@@ -766,10 +808,11 @@ class Trainer:
                         metrics_time_start = time.perf_counter()
 
                     # CRITICAL: Compute in ORIGINAL space
-                    # Both outputs and out.sae_out are already in original space
-                    # (SAE decoder adds b_dec back at sparse_coder.py:204)
-                    original_target = outputs
+                    # Use pre-computed unrotated target (computed once outside loop)
+                    original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
                     original_recon = out.sae_out
+                    if self.cfg.use_hadamard and name in self.hadamard_rotations:
+                        original_recon = self.hadamard_rotations[name].unrotate(original_recon)
 
                     # Compute absolute reconstruction error
                     error_magnitude = torch.abs(original_target - original_recon)
@@ -1192,6 +1235,14 @@ class Trainer:
                 )
 
                 self.cfg.save_json(f"{path}/config.json")
+
+                # Save Hadamard rotation states if enabled
+                if self.cfg.use_hadamard and self.hadamard_rotations:
+                    hadamard_states = {
+                        name: rot.state_dict()
+                        for name, rot in self.hadamard_rotations.items()
+                    }
+                    torch.save(hadamard_states, f"{path}/hadamard_rotations.pt")
 
             rank = 0 if rank_zero else dist.get_rank()
             torch.save(

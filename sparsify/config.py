@@ -130,6 +130,23 @@ class TrainConfig(Serializable):
     This allows the model to learn a better coordinate system for tiling.
     Only effective when num_tiles > 1."""
 
+    # Hadamard rotation settings
+    use_hadamard: bool = False
+    """Apply block-diagonal Hadamard rotation to activations before SAE.
+    This can help distribute outlier energy across dimensions, potentially
+    improving reconstruction quality."""
+
+    hadamard_block_size: int = 128
+    """Block size for Hadamard transform (must be power of 2).
+    Common choices: 64, 128, 256. Smaller blocks are faster but less effective."""
+
+    hadamard_seed: int = 0
+    """Random seed for Hadamard permutation."""
+
+    hadamard_use_perm: bool = True
+    """Whether to use random permutation before Hadamard transform.
+    Recommended to keep True for better outlier distribution."""
+
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
 
@@ -195,4 +212,17 @@ class TrainConfig(Serializable):
                 "Tiled training (num_tiles > 1) does not support distillation mode. "
                 "Use num_tiles=1 for distillation training."
             )
+
+        # Validate Hadamard configuration
+        if self.use_hadamard:
+            bs = self.hadamard_block_size
+            if bs <= 0 or (bs & (bs - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+            if self.loss_fn in ("ce", "kl"):
+                raise ValueError(
+                    "Hadamard rotation is not supported with ce/kl loss. "
+                    "Use loss_fn='fvu' with use_hadamard=True."
+                )
 
