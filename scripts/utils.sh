@@ -1,3 +1,11 @@
+#预处理数据集
+
+python scripts/preprocess_dataset.py \
+      --model ~/models/Qwen3-0.6B \
+      --dataset ~/fineweb-edu/sample/10BT \
+      --output ~/fineweb-edu/sample/10BT-tokenized-qwen3-2048 \
+      --ctx_len 2048 \
+      --num_proc 16
 
 
 # 根据sae生成lut
