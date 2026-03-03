@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .config import SparseCoderConfig
+from .device import device_autocast
 from .sparse_coder import ForwardOutput, SparseCoder
 from .utils import decoder_impl
 from lowrank_encoder import LowRankSparseCoder
@@ -131,11 +132,7 @@ class TiledSparseCoder(nn.Module):
         """Return None - tiling doesn't support transcode mode's bias initialization."""
         return None
 
-    @torch.autocast(
-        "cuda",
-        dtype=torch.bfloat16,
-        enabled=torch.cuda.is_bf16_supported(),
-    )
+    @device_autocast
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:

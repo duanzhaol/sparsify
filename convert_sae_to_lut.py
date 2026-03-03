@@ -645,9 +645,11 @@ Examples:
     parser.add_argument("--dtype", type=str, default="bfloat16",
                        choices=["float16", "bfloat16", "float32"],
                        help="Output dtype (default: bfloat16)")
+    from sparsify.device import get_device_string, is_accelerator_available
+
     parser.add_argument("--device", type=str,
-                       default="cuda" if torch.cuda.is_available() else "cpu",
-                       help="Computation device (default: cuda if available)")
+                       default=get_device_string(0) if is_accelerator_available() else "cpu",
+                       help="Computation device (default: cuda/npu if available)")
     parser.add_argument("--batch_compute", action="store_true",
                        help="Enable batch computation for memory efficiency")
 

@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 from transformers import PreTrainedModel, get_linear_schedule_with_warmup
 
 from .config import TrainConfig
+from .device import create_event, synchronize
 from .data import MemmapDataset
 from .hadamard import HadamardRotation
 from .muon import Muon
@@ -512,8 +513,9 @@ class Trainer:
         return round(self.initial_k * (1 - progress) + self.final_k * progress)
 
     def fit(self):
-        # Use Tensor Cores even for fp32 matmuls
-        torch.set_float32_matmul_precision("high")
+        # Use Tensor Cores even for fp32 matmuls (CUDA TensorCore specific)
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
 
         # Make sure the model is frozen
         self.model.requires_grad_(False)
@@ -628,14 +630,14 @@ class Trainer:
             else float("inf")
         )
 
-        # CUDA events for accurate GPU timing
-        if device.type == "cuda":
-            forward_start = torch.cuda.Event(enable_timing=True)
-            forward_end = torch.cuda.Event(enable_timing=True)
-            backward_start = torch.cuda.Event(enable_timing=True)
-            backward_end = torch.cuda.Event(enable_timing=True)
-            metrics_start = torch.cuda.Event(enable_timing=True)
-            metrics_end = torch.cuda.Event(enable_timing=True)
+        # Device events for accurate GPU/NPU timing
+        if device.type in ("cuda", "npu"):
+            forward_start = create_event(enable_timing=True)
+            forward_end = create_event(enable_timing=True)
+            backward_start = create_event(enable_timing=True)
+            backward_end = create_event(enable_timing=True)
+            metrics_start = create_event(enable_timing=True)
+            metrics_end = create_event(enable_timing=True)
         else:
             forward_start = forward_end = None
             backward_start = backward_end = None
@@ -854,7 +856,7 @@ class Trainer:
                 # Use hook_name (bare name) to look up thresholds, not sae_key
                 if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
                     # Start metrics timing
-                    if device.type == "cuda":
+                    if device.type in ("cuda", "npu"):
                         metrics_start.record()
                     else:
                         metrics_time_start = time.perf_counter()
@@ -897,9 +899,9 @@ class Trainer:
                         )
 
                     # End metrics timing
-                    if device.type == "cuda":
+                    if device.type in ("cuda", "npu"):
                         metrics_end.record()
-                        torch.cuda.synchronize()
+                        synchronize()
                         total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
                     else:
                         metrics_time_end = time.perf_counter()
@@ -982,8 +984,8 @@ class Trainer:
             )
 
             # Start timing forward pass
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+            if device.type in ("cuda", "npu"):
+                synchronize()
                 forward_start.record()
             else:
                 forward_time_start = time.perf_counter()
@@ -998,9 +1000,9 @@ class Trainer:
                         ce = self.model(x, labels=x).loss
 
                         # End forward, start backward timing
-                        if device.type == "cuda":
+                        if device.type in ("cuda", "npu"):
                             forward_end.record()
-                            torch.cuda.synchronize()
+                            synchronize()
                             backward_start.record()
                         else:
                             forward_time_end = time.perf_counter()
@@ -1009,9 +1011,9 @@ class Trainer:
                         ce.div(acc_steps).backward()
 
                         # End backward timing
-                        if device.type == "cuda":
+                        if device.type in ("cuda", "npu"):
                             backward_end.record()
-                            torch.cuda.synchronize()
+                            synchronize()
                         else:
                             backward_time_end = time.perf_counter()
 
@@ -1023,9 +1025,9 @@ class Trainer:
                         kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
 
                         # End forward, start backward timing
-                        if device.type == "cuda":
+                        if device.type in ("cuda", "npu"):
                             forward_end.record()
-                            torch.cuda.synchronize()
+                            synchronize()
                             backward_start.record()
                         else:
                             forward_time_end = time.perf_counter()
@@ -1034,9 +1036,9 @@ class Trainer:
                         kl.div(acc_steps).backward()
 
                         # End backward timing
-                        if device.type == "cuda":
+                        if device.type in ("cuda", "npu"):
                             backward_end.record()
-                            torch.cuda.synchronize()
+                            synchronize()
                         else:
                             backward_time_end = time.perf_counter()
 
@@ -1051,13 +1053,13 @@ class Trainer:
                             self.model(x)  # Fallback to full forward
 
                         # For FVU, backward happens in hook, so end both timings here
-                        if device.type == "cuda":
+                        if device.type in ("cuda", "npu"):
                             forward_end.record()
                             # Record backward events even though there's no separate backward pass
                             # This ensures elapsed_time() calls don't fail
                             backward_start.record()
                             backward_end.record()
-                            torch.cuda.synchronize()
+                            synchronize()
                         else:
                             forward_time_end = time.perf_counter()
                             backward_time_start = forward_time_end
@@ -1069,7 +1071,7 @@ class Trainer:
                         raise ValueError(f"Unknown loss function '{other}'")
 
                 # Accumulate timing metrics
-                if device.type == "cuda":
+                if device.type in ("cuda", "npu"):
                     total_forward_time += forward_start.elapsed_time(forward_end) / 1000.0  # ms to s
                     total_backward_time += backward_start.elapsed_time(backward_end) / 1000.0
                 else:

@@ -157,15 +157,17 @@ def load_elbow_thresholds(path: str, hookpoints: list[str]) -> dict[str, float]:
 
 
 def load_artifacts(args: EvalConfig, loss_fn: str) -> tuple[torch.nn.Module, Dataset | MemmapDataset]:
+    from sparsify.device import get_device_string, is_accelerator_available, is_bf16_supported
+
     if args.load_in_8bit:
         dtype = torch.float16
-    elif torch.cuda.is_bf16_supported():
+    elif is_bf16_supported():
         dtype = torch.bfloat16
     else:
         dtype = "auto"
 
     model_cls = AutoModel if loss_fn == "fvu" else AutoModelForCausalLM
-    device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+    device = args.device or (get_device_string(0) if is_accelerator_available() else "cpu")
     model = model_cls.from_pretrained(
         args.model,
         device_map={"": device},

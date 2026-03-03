@@ -12,6 +12,7 @@ from safetensors.torch import load_model, save_model
 from torch import Tensor, nn
 
 from .config import SparseCoderConfig
+from .device import device_autocast
 from .fused_encoder import EncoderOutput, fused_encoder
 from .utils import decoder_impl
 
@@ -203,11 +204,7 @@ class SparseCoder(nn.Module):
         return y + self.b_dec
 
     # Wrapping the forward in bf16 autocast improves performance by almost 2x
-    @torch.autocast(
-        "cuda",
-        dtype=torch.bfloat16,
-        enabled=torch.cuda.is_bf16_supported(),
-    )
+    @device_autocast
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:

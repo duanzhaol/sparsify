@@ -1,5 +1,5 @@
 torchrun --nproc_per_node 4 --master_port 29501  -m sparsify \
-        ~/models/Qwen3-0.6B/ \
+        /mnt/model/Qwen3-0.6B \
         ~/fineweb-edu/sample/10BT-tokenized-qwen3-2048/ \
         --split "train" \
         --wandb_project 'qwen3-0.6B-0108' \

@@ -6,12 +6,13 @@ import pytest
 import torch
 
 from sparsify.config import SparseCoderConfig
+from sparsify.device import get_device_type, is_accelerator_available
 from sparsify.tiled_sparse_coder import TiledSparseCoder
 
 
-# Skip tests that require CUDA if not available
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA required for forward pass"
+# Skip tests that require an accelerator (CUDA or NPU)
+requires_accelerator = pytest.mark.skipif(
+    not is_accelerator_available(), reason="CUDA or NPU required for forward pass"
 )
 
 
@@ -22,7 +23,7 @@ def cfg():
 
 @pytest.fixture
 def device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    return get_device_type() if is_accelerator_available() else "cpu"
 
 
 class TestTiledSparseCoder:
@@ -49,7 +50,7 @@ class TestTiledSparseCoder:
         with pytest.raises(AssertionError):
             TiledSparseCoder(64, cfg, 4, device="cpu")
 
-    @requires_cuda
+    @requires_accelerator
     def test_forward(self, cfg, device):
         """Test forward pass produces correct output shapes."""
         d_in = 64
@@ -70,7 +71,7 @@ class TestTiledSparseCoder:
         assert out.latent_indices.min() >= 0
         assert out.latent_indices.max() < tiled.num_latents
 
-    @requires_cuda
+    @requires_accelerator
     def test_forward_with_y(self, cfg, device):
         """Test forward pass with explicit target y."""
         d_in = 64
@@ -84,7 +85,7 @@ class TestTiledSparseCoder:
 
         assert out.sae_out.shape == (batch_size, d_in)
 
-    @requires_cuda
+    @requires_accelerator
     def test_forward_with_dead_mask(self, cfg, device):
         """Test forward pass with dead feature mask."""
         d_in = 64
@@ -183,7 +184,7 @@ class TestTiledSparseCoder:
         with pytest.raises(AssertionError):
             tiled.set_k(5)  # 5 not divisible by 4
 
-    @requires_cuda
+    @requires_accelerator
     def test_gradient_flow(self, cfg, device):
         """Test that gradients flow through all tiles."""
         d_in = 64
@@ -202,7 +203,7 @@ class TestTiledSparseCoder:
             assert sae.encoder.weight.grad is not None, f"Tile {i} encoder has no grad"
             assert sae.encoder.weight.grad.abs().sum() > 0, f"Tile {i} encoder grad is zero"
 
-    @requires_cuda
+    @requires_accelerator
     def test_indices_offset(self, cfg, device):
         """Test that latent indices are properly offset per tile."""
         d_in = 64
@@ -343,7 +344,7 @@ class TestGlobalTopK:
 
     @pytest.fixture
     def device(self):
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        return get_device_type() if is_accelerator_available() else "cpu"
 
     def test_init_global_topk(self, cfg):
         """Test initialization with global_topk enabled."""
@@ -354,7 +355,7 @@ class TestGlobalTopK:
         assert tiled.global_topk is True
         assert tiled.input_mixing is False
 
-    @requires_cuda
+    @requires_accelerator
     def test_forward_global_topk(self, cfg, device):
         """Test forward pass with global top-k."""
         d_in = 64
@@ -374,7 +375,7 @@ class TestGlobalTopK:
         assert out.latent_indices.min() >= 0
         assert out.latent_indices.max() < tiled.num_latents
 
-    @requires_cuda
+    @requires_accelerator
     def test_global_topk_indices_cross_tiles(self, cfg, device):
         """Test that global top-k can select from multiple tiles."""
         d_in = 64
@@ -398,7 +399,7 @@ class TestGlobalTopK:
         # (not all from one tile)
         assert (tile_counts > 0).sum() > 1, "Global top-k should select from multiple tiles"
 
-    @requires_cuda
+    @requires_accelerator
     def test_global_topk_gradient_flow(self, cfg, device):
         """Test gradient flow with global top-k."""
         d_in = 64
@@ -436,7 +437,7 @@ class TestInputMixing:
 
     @pytest.fixture
     def device(self):
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        return get_device_type() if is_accelerator_available() else "cpu"
 
     def test_init_input_mixing(self, cfg):
         """Test initialization with input_mixing enabled."""
@@ -450,7 +451,7 @@ class TestInputMixing:
         # Should be initialized as identity
         assert torch.allclose(tiled.mixing, torch.eye(num_tiles))
 
-    @requires_cuda
+    @requires_accelerator
     def test_forward_input_mixing(self, cfg, device):
         """Test forward pass with input mixing."""
         d_in = 64
@@ -464,7 +465,7 @@ class TestInputMixing:
         assert out.sae_out.shape == (batch_size, d_in)
         assert out.latent_acts.shape == (batch_size, cfg.k)
 
-    @requires_cuda
+    @requires_accelerator
     def test_input_mixing_gradient(self, cfg, device):
         """Test that mixing matrix receives gradients."""
         d_in = 64
@@ -497,7 +498,7 @@ class TestInputMixing:
             assert hasattr(loaded, 'mixing')
             assert torch.allclose(loaded.mixing, original_mixing)
 
-    @requires_cuda
+    @requires_accelerator
     def test_combined_global_topk_and_mixing(self, cfg, device):
         """Test both global_topk and input_mixing enabled together."""
         d_in = 64

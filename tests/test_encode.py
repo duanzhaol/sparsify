@@ -1,9 +1,12 @@
+import pytest
 import torch
 import torch.nn.functional as F
 
+from sparsify.device import get_device_type, is_accelerator_available, synchronize
 from sparsify.fused_encoder import fused_encoder
 
 
+@pytest.mark.skipif(not is_accelerator_available(), reason="CUDA or NPU required")
 def test_fused_encoder():
     torch.manual_seed(42)
 
@@ -11,7 +14,7 @@ def test_fused_encoder():
     k = 32
 
     # Example inputs
-    device = "cuda"
+    device = get_device_type()
     x = torch.randn(N, D, requires_grad=True, device=device)
     W = torch.randn(M, D, requires_grad=True, device=device)
     b = torch.randn(M, requires_grad=True, device=device)
@@ -25,7 +28,7 @@ def test_fused_encoder():
     loss_naive = values_naive.sum()
     loss_naive.backward()
 
-    torch.cuda.synchronize()
+    synchronize()
     print("Naive time:", monotonic() - start)
 
     x_grad_naive = x.grad.clone()
@@ -46,7 +49,7 @@ def test_fused_encoder():
     loss = values.sum()
     loss.backward()
 
-    torch.cuda.synchronize()
+    synchronize()
     print("Fused time:", monotonic() - start)
 
     torch.testing.assert_close(values, values_naive)

@@ -11,6 +11,7 @@ from lowrank_encoder import (
     compute_distillation_loss,
     from_pretrained_lowrank,
 )
+from sparsify.device import get_device_type, is_accelerator_available
 from sparsify.fused_encoder import fused_encoder
 
 
@@ -133,12 +134,12 @@ class TestLowRankFusedEncoder:
 class TestLowRankSparseCoder:
     """Test LowRankSparseCoder."""
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_lowrank_encode_decode(self):
         """Test encoding and decoding with low-rank encoder."""
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
         cfg = SparseCoderConfig(
             expansion_factor=8,
@@ -161,13 +162,13 @@ class TestLowRankSparseCoder:
         assert out.latent_acts.shape == (8, cfg.k)
         assert out.latent_indices.shape == (8, cfg.k)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_from_pretrained_lowrank(self):
         """Test SVD initialization from full-rank teacher."""
         from sparsify.sparse_coder import SparseCoder
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
 
         # Create full-rank teacher
@@ -192,13 +193,13 @@ class TestLowRankSparseCoder:
         assert torch.allclose(student.W_dec.data, teacher.W_dec.data)
         assert torch.allclose(student.b_dec.data, teacher.b_dec.data)
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_classmethod_wrapper(self):
         """Test SparseCoder.from_pretrained_lowrank classmethod."""
         from sparsify.sparse_coder import SparseCoder
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
 
         teacher_cfg = SparseCoderConfig(expansion_factor=8, k=16)
@@ -214,13 +215,13 @@ class TestLowRankSparseCoder:
 class TestDistillationLoss:
     """Test distillation loss computation."""
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_compute_distillation_loss(self):
         """Test distillation loss returns valid values."""
         from sparsify.sparse_coder import SparseCoder
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
 
         # Create teacher (full-rank)
@@ -252,13 +253,13 @@ class TestDistillationLoss:
         assert loss.total >= 0
         assert loss.total == 0.5 * loss.decode_loss + 0.1 * loss.acts_loss
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_distillation_loss_gradients(self):
         """Test gradients flow through distillation loss."""
         from sparsify.sparse_coder import SparseCoder
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
 
         teacher_cfg = SparseCoderConfig(expansion_factor=8, k=16)
@@ -284,7 +285,7 @@ class TestDistillationLoss:
         assert student.encoder_A.weight.grad is not None
         assert student.encoder_B.weight.grad is not None
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+    @pytest.mark.skipif(not is_accelerator_available(), reason="Requires CUDA or NPU")
     def test_acts_loss_gradient_flows_to_encoder(self):
         """Test that acts_loss gradient (via grad_preacts) flows to encoder params.
 
@@ -294,7 +295,7 @@ class TestDistillationLoss:
         from sparsify.sparse_coder import SparseCoder
         from sparsify.config import SparseCoderConfig
 
-        device = "cuda"
+        device = get_device_type()
         d_in = 128
 
         teacher_cfg = SparseCoderConfig(expansion_factor=8, k=16)

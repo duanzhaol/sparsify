@@ -380,7 +380,10 @@ def main():
                         help="Max percentile for kneedle algorithm")
     parser.add_argument("--plot_dir", type=str, default=None,
                         help="Directory to save elbow curve plots (optional)")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+    from sparsify.device import get_device_string, is_accelerator_available, is_bf16_supported
+
+    parser.add_argument("--device", type=str,
+                        default=get_device_string(0) if is_accelerator_available() else "cpu",
                         help="Device to use")
 
     args = parser.parse_args()
@@ -388,7 +391,7 @@ def main():
     print(f"🚀 Loading model: {args.model}")
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float32,
+        torch_dtype=torch.bfloat16 if is_bf16_supported() else torch.float32,
         device_map=args.device,
     )
     model.eval()

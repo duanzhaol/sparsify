@@ -25,6 +25,14 @@ from transformers import (
 )
 
 from .data import MemmapDataset, chunk_and_tokenize
+from .device import (
+    get_device,
+    get_device_string,
+    get_device_type,
+    get_dist_backend,
+    is_bf16_supported,
+    set_device,
+)
 from .trainer import TrainConfig, Trainer, load_sae_checkpoint
 from .utils import simple_parse_args_string
 
@@ -87,9 +95,16 @@ class RunConfig(TrainConfig):
 def load_artifacts(
     args: RunConfig, rank: int
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
+    if args.load_in_8bit and get_device_type() != "cuda":
+        print(
+            "Warning: 8-bit loading is only supported on CUDA. "
+            "Falling back to bf16."
+        )
+        args.load_in_8bit = False
+
     if args.load_in_8bit:
         dtype = torch.float16
-    elif torch.cuda.is_bf16_supported():
+    elif is_bf16_supported():
         dtype = torch.bfloat16
     else:
         dtype = "auto"
@@ -98,7 +113,7 @@ def load_artifacts(
     model_cls = AutoModel if args.loss_fn == "fvu" else AutoModelForCausalLM
     model = model_cls.from_pretrained(
         args.model,
-        device_map={"": f"cuda:{rank}"},
+        device_map={"": get_device_string(rank)},
         quantization_config=(
             BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
             if args.load_in_8bit
@@ -153,12 +168,14 @@ def run():
     rank = int(local_rank) if ddp else 0
 
     if ddp:
-        torch.cuda.set_device(int(local_rank))
+        set_device(int(local_rank))
 
         # Increase the default timeout in order to account for slow downloads
         # and data preprocessing on the main rank
         dist.init_process_group(
-            "nccl", device_id=torch.device(rank), timeout=timedelta(weeks=1)
+            get_dist_backend(),
+            device_id=get_device(rank),
+            timeout=timedelta(weeks=1),
         )
 
         if rank == 0:

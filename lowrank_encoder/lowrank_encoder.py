@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from sparsify.config import SparseCoderConfig
+from sparsify.device import device_autocast
 from sparsify.fused_encoder import EncoderOutput
 
 if TYPE_CHECKING:
@@ -269,11 +270,7 @@ class LowRankSparseCoder(nn.Module):
         y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
-    @torch.autocast(
-        "cuda",
-        dtype=torch.bfloat16,
-        enabled=torch.cuda.is_bf16_supported(),
-    )
+    @device_autocast
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ):
