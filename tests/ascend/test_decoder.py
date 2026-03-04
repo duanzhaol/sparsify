@@ -54,8 +54,9 @@ def test_eager_decode_vs_cpu():
     torch.testing.assert_close(r_npu.cpu(), r_cpu, atol=1e-5, rtol=1e-5)
 
 
-def test_decoder_impl_is_eager_on_npu():
-    """On NPU, the module-level decoder_impl should be eager_decode."""
+def test_decoder_impl_is_fused_on_npu():
+    """On NPU, the module-level decoder_impl should be fused_decode."""
+    from sparsify.fused_decoder import fused_decode
     from sparsify.utils import decoder_impl
 
-    assert decoder_impl is eager_decode
+    assert decoder_impl is fused_decode

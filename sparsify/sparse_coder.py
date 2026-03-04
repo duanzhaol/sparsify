@@ -32,9 +32,6 @@ class ForwardOutput(NamedTuple):
     auxk_loss: Tensor
     """AuxK loss, if applicable."""
 
-    multi_topk_fvu: Tensor
-    """Multi-TopK FVU, if applicable."""
-
 
 class SparseCoder(nn.Module):
     def __init__(
@@ -45,35 +42,23 @@ class SparseCoder(nn.Module):
         dtype: torch.dtype | None = None,
         *,
         decoder: bool = True,
-        transcoder: bool = False,
     ):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        self.transcoder = transcoder
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
         self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
 
         if decoder:
-            # Transcoder initialization: use zeros
-            if transcoder:
-                self.W_dec = nn.Parameter(torch.zeros_like(self.encoder.weight.data))
-            # Sparse autoencoder initialization: use the transpose of encoder weights
-            else:
-                self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
-                if self.cfg.normalize_decoder:
-                    self.set_decoder_norm_to_unit_norm()
+            self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
         else:
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
-        self.W_skip = (
-            nn.Parameter(torch.zeros(d_in, d_in, device=device, dtype=dtype))
-            if cfg.skip_connection
-            else None
-        )
 
     @staticmethod
     def load_many(
@@ -190,12 +175,8 @@ class SparseCoder(nn.Module):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
-        if not self.transcoder:
-            x = x - self.b_dec
-
-        return fused_encoder(
-            x, self.encoder.weight, self.encoder.bias, self.cfg.k, self.cfg.activation
-        )
+        x = x - self.b_dec
+        return fused_encoder(x, self.encoder.weight, self.encoder.bias, self.cfg.k)
 
     def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
@@ -216,8 +197,6 @@ class SparseCoder(nn.Module):
 
         # Decode
         sae_out = self.decode(top_acts, top_indices)
-        if self.W_skip is not None:
-            sae_out += x.to(self.dtype) @ self.W_skip.mT
 
         # Compute the residual
         e = y - sae_out
@@ -251,21 +230,12 @@ class SparseCoder(nn.Module):
         l2_loss = e.pow(2).sum()
         fvu = l2_loss / total_variance
 
-        if self.cfg.multi_topk:
-            top_acts, top_indices = pre_acts.topk(4 * self.cfg.k, sorted=False)
-            sae_out = self.decode(top_acts, top_indices)
-
-            multi_topk_fvu = (sae_out - y).pow(2).sum() / total_variance
-        else:
-            multi_topk_fvu = sae_out.new_tensor(0.0)
-
         return ForwardOutput(
             sae_out,
             top_acts,
             top_indices,
             fvu,
             auxk_loss,
-            multi_topk_fvu,
         )
 
     @torch.no_grad()
@@ -279,7 +249,7 @@ class SparseCoder(nn.Module):
     @torch.no_grad()
     def remove_gradient_parallel_to_decoder_directions(self):
         assert self.W_dec is not None, "Decoder weight was not initialized."
-        if self.W_dec.grad is None:  # Decoder may be frozen during distillation
+        if self.W_dec.grad is None:
             return
 
         parallel_component = einops.einsum(
@@ -292,27 +262,6 @@ class SparseCoder(nn.Module):
             self.W_dec.data,
             "d_sae, d_sae d_in -> d_sae d_in",
         )
-
-    @classmethod
-    def from_pretrained_lowrank(
-        cls,
-        teacher: "SparseCoder",
-        rank: int,
-        device: str | torch.device | None = None,
-    ):
-        """Create a low-rank version from a full-rank SAE using SVD initialization.
-
-        Args:
-            teacher: Full-rank SparseCoder to distill from
-            rank: Target rank for low-rank encoder
-            device: Device to place the model on (defaults to teacher's device)
-
-        Returns:
-            LowRankSparseCoder with SVD-initialized encoder
-        """
-        from lowrank_encoder import from_pretrained_lowrank
-
-        return from_pretrained_lowrank(teacher, rank, device)
 
 
 # Allow for alternate naming conventions

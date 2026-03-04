@@ -93,7 +93,9 @@ def get_dist_backend() -> str:
     """Return the distributed backend name for the current platform."""
     if _USE_NPU:
         return "hccl"
-    return "nccl"
+    if _USE_CUDA:
+        return "nccl"
+    return "gloo"
 
 
 def device_autocast(func):

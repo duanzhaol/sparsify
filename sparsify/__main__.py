@@ -1,29 +1,18 @@
+import logging
 import os
-import sys
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
 from glob import glob
 from multiprocessing import cpu_count
-from pathlib import Path
-
-# Add project root to path so lowrank_encoder can be imported
-_project_root = Path(__file__).parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
-from transformers import (
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    PreTrainedModel,
-)
+from transformers import AutoModel, AutoTokenizer, PreTrainedModel
 
+from .checkpoint import load_sae_checkpoint
 from .data import MemmapDataset, chunk_and_tokenize
 from .device import (
     get_device,
@@ -33,8 +22,10 @@ from .device import (
     is_bf16_supported,
     set_device,
 )
-from .trainer import TrainConfig, Trainer, load_sae_checkpoint
+from .trainer import Trainer, TrainConfig
 from .utils import simple_parse_args_string
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,16 +48,11 @@ class RunConfig(TrainConfig):
     ctx_len: int = 2048
     """Context length to use for training."""
 
-    # Use a dummy encoding function to prevent the token from being saved
-    # to disk in plain text
     hf_token: str | None = field(default=None, encoding_fn=lambda _: None)
     """Huggingface API token for downloading models."""
 
     revision: str | None = None
     """Model revision to use for training."""
-
-    load_in_8bit: bool = False
-    """Load the model in 8-bit mode."""
 
     max_examples: int | None = None
     """Maximum number of examples to use for training."""
@@ -95,30 +81,11 @@ class RunConfig(TrainConfig):
 def load_artifacts(
     args: RunConfig, rank: int
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
-    if args.load_in_8bit and get_device_type() != "cuda":
-        print(
-            "Warning: 8-bit loading is only supported on CUDA. "
-            "Falling back to bf16."
-        )
-        args.load_in_8bit = False
+    dtype = torch.bfloat16 if is_bf16_supported() else "auto"
 
-    if args.load_in_8bit:
-        dtype = torch.float16
-    elif is_bf16_supported():
-        dtype = torch.bfloat16
-    else:
-        dtype = "auto"
-
-    # End-to-end training requires a model with a causal LM head
-    model_cls = AutoModel if args.loss_fn == "fvu" else AutoModelForCausalLM
-    model = model_cls.from_pretrained(
+    model = AutoModel.from_pretrained(
         args.model,
         device_map={"": get_device_string(rank)},
-        quantization_config=(
-            BitsAndBytesConfig(load_in_8bit=args.load_in_8bit)
-            if args.load_in_8bit
-            else None
-        ),
         revision=args.revision,
         torch_dtype=dtype,
         token=args.hf_token,
@@ -133,7 +100,6 @@ def load_artifacts(
             kwargs = simple_parse_args_string(args.data_args)
             dataset = load_dataset(args.dataset, split=args.split, **kwargs)
         except ValueError as e:
-            # Automatically use load_from_disk if appropriate
             if "load_from_disk" in str(e):
                 dataset = Dataset.load_from_disk(args.dataset, keep_in_memory=False)
             else:
@@ -150,9 +116,9 @@ def load_artifacts(
                 text_key=args.text_column,
             )
         else:
-            print("Dataset already tokenized; skipping tokenization.")
+            logger.info("Dataset already tokenized; skipping tokenization.")
 
-        print(f"Shuffling dataset with seed {args.shuffle_seed}")
+        logger.info(f"Shuffling dataset with seed {args.shuffle_seed}")
         dataset = dataset.shuffle(args.shuffle_seed)
 
         dataset = dataset.with_format("torch")
@@ -163,6 +129,8 @@ def load_artifacts(
 
 
 def run():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     local_rank = os.environ.get("LOCAL_RANK")
     ddp = local_rank is not None
     rank = int(local_rank) if ddp else 0
@@ -170,8 +138,6 @@ def run():
     if ddp:
         set_device(int(local_rank))
 
-        # Increase the default timeout in order to account for slow downloads
-        # and data preprocessing on the main rank
         dist.init_process_group(
             get_dist_backend(),
             device_id=get_device(rank),
@@ -179,13 +145,12 @@ def run():
         )
 
         if rank == 0:
-            print(f"Using DDP across {dist.get_world_size()} GPUs.")
+            logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
 
     args = parse(RunConfig)
 
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
-        # Awkward hack to prevent other ranks from duplicating data preprocessing
         if not ddp or rank == 0:
             model, dataset = load_artifacts(args, rank)
         if ddp:
@@ -193,38 +158,40 @@ def run():
             if rank != 0:
                 model, dataset = load_artifacts(args, rank)
 
-            # Drop examples that are indivisible across processes to prevent deadlock
+            # Drop examples indivisible across processes to prevent deadlock
             remainder_examples = len(dataset) % dist.get_world_size()
             dataset = dataset.select(range(len(dataset) - remainder_examples))
 
             dataset = dataset.shard(dist.get_world_size(), rank)
 
-            # Drop examples that are indivisible across processes to prevent deadlock
             remainder_examples = len(dataset) % dist.get_world_size()
             dataset = dataset.select(range(len(dataset) - remainder_examples))
 
-        print(f"Training on '{args.dataset}' (split '{args.split}')")
-        print(f"Storing model weights in {model.dtype}")
+        logger.info(f"Training on '{args.dataset}' (split '{args.split}')")
+        logger.info(f"Storing model weights in {model.dtype}")
 
         # Determine the checkpoint path for resume
         resume_path = None
         if args.resume:
-            base_path = f"checkpoints/{args.run_name}" if args.run_name else "checkpoints/unnamed"
+            base_path = (
+                f"{args.save_dir}/{args.run_name}"
+                if args.run_name
+                else f"{args.save_dir}/unnamed"
+            )
 
-            # If exact path exists, use it
             if os.path.exists(base_path):
                 resume_path = base_path
             else:
-                # Try to find the latest checkpoint matching the pattern
                 pattern = f"{base_path}_dp*_bs*_ga*_ef*_k*_*"
                 matching_paths = sorted(glob(pattern))
                 if matching_paths:
-                    resume_path = matching_paths[-1]  # Use the latest (sorted by name, which includes timestamp)
-                    print(f"Found checkpoint to resume from: {resume_path}")
+                    resume_path = matching_paths[-1]
+                    logger.info(f"Found checkpoint to resume from: {resume_path}")
                 else:
                     raise FileNotFoundError(
                         f"No checkpoint found matching pattern: {pattern}\n"
-                        f"If resuming, make sure the checkpoint exists or specify the full path."
+                        f"If resuming, make sure the checkpoint exists or "
+                        f"specify the full path."
                     )
 
         trainer = Trainer(args, dataset, model, resume_from=resume_path)
@@ -232,7 +199,9 @@ def run():
             trainer.load_state(resume_path)
         elif args.finetune:
             for name, sae in trainer.saes.items():
-                load_sae_checkpoint(sae, f"{args.finetune}/{name}", device=str(model.device))
+                load_sae_checkpoint(
+                    sae, f"{args.finetune}/{name}", device=str(model.device)
+                )
 
         trainer.fit()
 

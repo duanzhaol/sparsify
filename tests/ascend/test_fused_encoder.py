@@ -11,22 +11,11 @@ def test_topk_forward_shapes():
     x = torch.randn(N, D, device="npu")
     W = torch.randn(M, D, device="npu")
     b = torch.randn(M, device="npu")
-    values, indices, preacts = fused_encoder(x, W, b, k, "topk")
+    values, indices, preacts = fused_encoder(x, W, b, k)
 
     assert values.shape == (N, k)
     assert indices.shape == (N, k)
     assert preacts.shape == (N, M)
-
-
-def test_groupmax_forward_shapes():
-    N, D, M, k = 16, 64, 256, 8
-    x = torch.randn(N, D, device="npu")
-    W = torch.randn(M, D, device="npu")
-    b = torch.randn(M, device="npu")
-    values, indices, preacts = fused_encoder(x, W, b, k, "groupmax")
-
-    assert values.shape == (N, k)
-    assert indices.shape == (N, k)
 
 
 def test_gradient_vs_naive():
@@ -46,7 +35,7 @@ def test_gradient_vs_naive():
     x.grad, W.grad, b.grad = None, None, None
 
     # Fused implementation
-    vals, _, _ = fused_encoder(x, W, b, k, "topk")
+    vals, _, _ = fused_encoder(x, W, b, k)
     vals.sum().backward()
 
     torch.testing.assert_close(vals, vals_naive)
@@ -66,14 +55,14 @@ def test_gradient_vs_cpu():
     x_cpu = x_data.clone().requires_grad_(True)
     W_cpu = W_data.clone().requires_grad_(True)
     b_cpu = b_data.clone().requires_grad_(True)
-    v_cpu, _, _ = fused_encoder(x_cpu, W_cpu, b_cpu, k, "topk")
+    v_cpu, _, _ = fused_encoder(x_cpu, W_cpu, b_cpu, k)
     v_cpu.sum().backward()
 
     # NPU
     x_npu = x_data.to("npu").requires_grad_(True)
     W_npu = W_data.to("npu").requires_grad_(True)
     b_npu = b_data.to("npu").requires_grad_(True)
-    v_npu, _, _ = fused_encoder(x_npu, W_npu, b_npu, k, "topk")
+    v_npu, _, _ = fused_encoder(x_npu, W_npu, b_npu, k)
     v_npu.sum().backward()
 
     torch.testing.assert_close(x_npu.grad.cpu(), x_cpu.grad, atol=1e-5, rtol=1e-5)
@@ -87,7 +76,7 @@ def test_large_batch():
     x = torch.randn(N, D, device="npu", requires_grad=True)
     W = torch.randn(M, D, device="npu", requires_grad=True)
     b = torch.randn(M, device="npu", requires_grad=True)
-    vals, _, _ = fused_encoder(x, W, b, k, "topk")
+    vals, _, _ = fused_encoder(x, W, b, k)
     vals.sum().backward()
 
     assert x.grad.shape == (N, D)

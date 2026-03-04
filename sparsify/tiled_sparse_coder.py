@@ -12,7 +12,6 @@ from .config import SparseCoderConfig
 from .device import device_autocast
 from .sparse_coder import ForwardOutput, SparseCoder
 from .utils import decoder_impl
-from lowrank_encoder import LowRankSparseCoder
 
 
 class TiledSparseCoder(nn.Module):
@@ -55,20 +54,11 @@ class TiledSparseCoder(nn.Module):
         tile_cfg = copy.deepcopy(cfg)
         tile_cfg.k = self.k_per_tile
 
-        # Check if using low-rank encoder
-        self.use_lowrank = cfg.encoder_rank > 0
-
         # Create per-tile SAEs
-        if self.use_lowrank:
-            self.saes = nn.ModuleList([
-                LowRankSparseCoder(self.tile_size, tile_cfg, device, dtype)
-                for _ in range(num_tiles)
-            ])
-        else:
-            self.saes = nn.ModuleList([
-                SparseCoder(self.tile_size, tile_cfg, device, dtype)
-                for _ in range(num_tiles)
-            ])
+        self.saes = nn.ModuleList([
+            SparseCoder(self.tile_size, tile_cfg, device, dtype)
+            for _ in range(num_tiles)
+        ])
 
         # Input mixing matrix (T×T) for cross-tile information flow
         if input_mixing:
@@ -109,29 +99,6 @@ class TiledSparseCoder(nn.Module):
         for sae, tile in zip(self.saes, tiles):
             sae.b_dec.data = tile.clone()  # clone() to avoid shared storage (safetensors issue)
 
-    def freeze_decoder(self):
-        """Freeze decoder weights and biases for all tiles."""
-        for sae in self.saes:
-            sae: SparseCoder  # type: ignore
-            sae.W_dec.requires_grad_(False)
-            sae.b_dec.requires_grad_(False)
-
-    def set_k(self, k: int):
-        """Set k value, propagating to all tiles as k // num_tiles."""
-        assert k % self.num_tiles == 0, (
-            f"k ({k}) must be divisible by num_tiles ({self.num_tiles})"
-        )
-        self.cfg.k = k
-        self.k_per_tile = k // self.num_tiles
-        for sae in self.saes:
-            sae: SparseCoder  # type: ignore
-            sae.cfg.k = self.k_per_tile
-
-    @property
-    def encoder(self):
-        """Return None - tiling doesn't support transcode mode's bias initialization."""
-        return None
-
     @device_autocast
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
@@ -168,7 +135,6 @@ class TiledSparseCoder(nn.Module):
                 latent_indices=out.latent_indices,
                 fvu=fvu,
                 auxk_loss=out.auxk_loss,
-                multi_topk_fvu=out.multi_topk_fvu,
             )
 
         return out
@@ -199,18 +165,9 @@ class TiledSparseCoder(nn.Module):
         return x_unmixed.reshape(x.shape[0], -1)
 
     def _compute_pre_acts(self, sae, x_tile: Tensor) -> Tensor:
-        """Compute pre-activations for a single tile, handling both full-rank and low-rank."""
+        """Compute pre-activations for a single tile."""
         centered = x_tile - sae.b_dec
-
-        if self.use_lowrank:
-            # LowRankSparseCoder: pre_acts = ReLU((x @ B.T) @ A.T + bias)
-            intermediate = centered @ sae.encoder_B.weight.T  # [N, r]
-            pre_acts = F.relu(F.linear(intermediate, sae.encoder_A.weight, sae.encoder_A.bias))
-        else:
-            # SparseCoder: pre_acts = ReLU(x @ W_enc.T + bias)
-            pre_acts = F.relu(F.linear(centered, sae.encoder.weight, sae.encoder.bias))
-
-        return pre_acts
+        return F.relu(F.linear(centered, sae.encoder.weight, sae.encoder.bias))
 
     def _forward_per_tile(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
@@ -235,7 +192,6 @@ class TiledSparseCoder(nn.Module):
         # Merge outputs
         fvu = torch.stack([o.fvu for o in outputs]).mean()
         auxk_loss = torch.stack([o.auxk_loss for o in outputs]).mean()
-        multi_topk_fvu = torch.stack([o.multi_topk_fvu for o in outputs]).mean()
 
         return ForwardOutput(
             sae_out=torch.cat([o.sae_out for o in outputs], dim=-1),
@@ -243,7 +199,6 @@ class TiledSparseCoder(nn.Module):
             latent_indices=self._merge_indices(outputs),
             fvu=fvu,
             auxk_loss=auxk_loss,
-            multi_topk_fvu=multi_topk_fvu,
         )
 
     def _forward_global_topk(
@@ -288,7 +243,6 @@ class TiledSparseCoder(nn.Module):
         # AuxK loss is disabled for global_topk mode (dead_mask handling is complex)
         # TODO: Implement global dead feature tracking if needed
         auxk_loss = sae_out.new_tensor(0.0)
-        multi_topk_fvu = sae_out.new_tensor(0.0)
 
         return ForwardOutput(
             sae_out=sae_out,
@@ -296,7 +250,6 @@ class TiledSparseCoder(nn.Module):
             latent_indices=top_indices,
             fvu=fvu,
             auxk_loss=auxk_loss,
-            multi_topk_fvu=multi_topk_fvu,
         )
 
     def _merge_indices(self, outputs: list[ForwardOutput]) -> Tensor:
@@ -373,18 +326,12 @@ class TiledSparseCoder(nn.Module):
             global_topk=global_topk, input_mixing=input_mixing
         )
 
-        # Load each tile (use appropriate loader based on encoder_rank)
-        use_lowrank = cfg.encoder_rank > 0
+        # Load each tile
         for i in range(num_tiles):
             tile_path = path / f"tile_{i}"
-            if use_lowrank:
-                instance.saes[i] = LowRankSparseCoder.load_from_disk(
-                    tile_path, device=device, decoder=decoder
-                )
-            else:
-                instance.saes[i] = SparseCoder.load_from_disk(
-                    tile_path, device=device, decoder=decoder
-                )
+            instance.saes[i] = SparseCoder.load_from_disk(
+                tile_path, device=device, decoder=decoder
+            )
 
         # Load mixing matrix if it exists
         mixing_path = path / "mixing.pt"

@@ -1,133 +1,41 @@
+import logging
 import os
-import json
-import re
 import time
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
-from glob import glob
-from pathlib import Path
 from typing import Sized
 
 import torch
 import torch.distributed as dist
 from datasets import Dataset as HfDataset
 from natsort import natsorted
-from safetensors.torch import load_model
 from schedulefree import ScheduleFreeWrapper
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from transformers import PreTrainedModel, get_linear_schedule_with_warmup
+from transformers import PreTrainedModel
 
+from .checkpoint import CheckpointMixin, expand_range_pattern
 from .config import TrainConfig
-from .device import create_event, synchronize
 from .data import MemmapDataset
+from .device import create_event, synchronize
 from .hadamard import HadamardRotation
-from .muon import Muon
-from .outlier_clip import OutlierClipper
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder
 from .tiled_sparse_coder import TiledSparseCoder
-from .utils import get_layer_list, get_max_layer_index, partial_forward_to_layer, resolve_widths, set_submodule
-from lowrank_encoder import LowRankSparseCoder
+from .utils import (
+    get_layer_list,
+    get_max_layer_index,
+    partial_forward_to_layer,
+    resolve_widths,
+)
+
+logger = logging.getLogger(__name__)
 
 
-def is_tiled_checkpoint(path: str | Path) -> bool:
-    """Check if a checkpoint path contains a TiledSparseCoder checkpoint."""
-    path = Path(path)
-    cfg_path = path / "cfg.json"
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-            return "num_tiles" in cfg and cfg["num_tiles"] > 1
-    return False
-
-
-def get_checkpoint_num_tiles(path: str | Path) -> int:
-    """Get the num_tiles value from a checkpoint, returns 1 if not tiled."""
-    path = Path(path)
-    cfg_path = path / "cfg.json"
-    if cfg_path.exists():
-        with open(cfg_path) as f:
-            cfg = json.load(f)
-            return cfg.get("num_tiles", 1)
-    return 1
-
-
-def load_sae_checkpoint(sae: nn.Module, path: str | Path, device: str) -> None:
-    """Load SAE checkpoint, handling both regular and tiled formats.
-
-    Validates that checkpoint format matches the SAE type to fail fast with
-    clear error messages on misconfiguration.
-    """
-    path = Path(path)
-    checkpoint_num_tiles = get_checkpoint_num_tiles(path)
-
-    if isinstance(sae, TiledSparseCoder):
-        # Current SAE is tiled
-        if checkpoint_num_tiles == 1:
-            raise TypeError(
-                f"Checkpoint at {path} is regular SparseCoder (num_tiles=1) "
-                f"but current config has num_tiles={sae.num_tiles}. "
-                f"Cannot resume/finetune tiled SAE from non-tiled checkpoint."
-            )
-        if checkpoint_num_tiles != sae.num_tiles:
-            raise ValueError(
-                f"Checkpoint at {path} has num_tiles={checkpoint_num_tiles} "
-                f"but current config has num_tiles={sae.num_tiles}. "
-                f"num_tiles must match for resume/finetune."
-            )
-        # Load each tile
-        for i, tile_sae in enumerate(sae.saes):
-            tile_path = path / f"tile_{i}" / "sae.safetensors"
-            load_model(tile_sae, str(tile_path), device=device)
-    else:
-        # Current SAE is regular SparseCoder
-        if checkpoint_num_tiles > 1:
-            raise TypeError(
-                f"Checkpoint at {path} is TiledSparseCoder (num_tiles={checkpoint_num_tiles}) "
-                f"but current config has num_tiles=1. "
-                f"Cannot resume/finetune regular SAE from tiled checkpoint."
-            )
-        load_model(sae, str(path / "sae.safetensors"), device=device)
-
-
-def expand_range_pattern(pattern: str) -> list[str]:
-    """
-    Expand hookpoint patterns with range syntax.
-
-    Supports syntax like:
-    - layers.[1-10].self_attn.o_proj  → layers.1...layers.10
-    - layers.[0-5,10,15].mlp.act      → layers.0...5, 10, 15
-    - layers.*.xxx                     → unchanged (normal glob)
-
-    Args:
-        pattern: Pattern string potentially containing [N-M] or [N,M,P] syntax
-
-    Returns:
-        List of expanded patterns
-    """
-    match = re.search(r'\[([0-9,\-]+)\]', pattern)
-    if not match:
-        return [pattern]
-
-    range_spec = match.group(1)
-    numbers = []
-
-    for part in range_spec.split(','):
-        if '-' in part:
-            start, end = map(int, part.split('-'))
-            numbers.extend(range(start, end + 1))
-        else:
-            numbers.append(int(part))
-
-    numbers = sorted(set(numbers))
-    return [pattern.replace(f'[{range_spec}]', str(num)) for num in numbers]
-
-
-class Trainer:
+class Trainer(CheckpointMixin):
     def __init__(
         self,
         cfg: TrainConfig,
@@ -135,7 +43,6 @@ class Trainer:
         model: PreTrainedModel,
         resume_from: str | None = None,
     ):
-        # Store the whole model, including any potential causal LM wrapper
         self.model = model
 
         if cfg.hookpoints:
@@ -152,7 +59,6 @@ class Trainer:
                 if any(fnmatchcase(name, pat) for pat in expanded_patterns):
                     raw_hookpoints.append(name)
 
-            # Natural sort to impose a consistent order
             cfg.hookpoints = natsorted(raw_hookpoints)
         else:
             # If no layers are specified, train on all of them
@@ -160,7 +66,6 @@ class Trainer:
                 N = model.config.num_hidden_layers
                 cfg.layers = list(range(0, N))
 
-            # Now convert layers to hookpoints
             layers_name, _ = get_layer_list(model)
             cfg.hookpoints = [f"{layers_name}.{i}" for i in cfg.layers]
 
@@ -168,380 +73,113 @@ class Trainer:
 
         self.cfg = cfg
         self.dataset = dataset
-        self.resume_from = resume_from  # Store resume path for later use
-        self.distribute_modules()
+        self.resume_from = resume_from
 
-        # Detect maximum layer index for partial forward optimization (FVU only)
-        if cfg.loss_fn == "fvu":
-            layers_name, _ = get_layer_list(model)
-            self._max_layer_for_fvu = get_max_layer_index(cfg.hookpoints, layers_name)
-        else:
-            self._max_layer_for_fvu = None
+        logger.info(f"Training on modules: {cfg.hookpoints}")
+
+        # Detect maximum layer index for partial forward optimization
+        layers_name, _ = get_layer_list(model)
+        self._max_layer_for_fvu = get_max_layer_index(cfg.hookpoints, layers_name)
 
         device = model.device
-        # Resolve dimensions based on hook_mode: "input" captures input dims, others capture output dims
-        hook_mode_for_width = "input" if cfg.hook_mode == "input" else "output"
-        input_widths = resolve_widths(model, cfg.hookpoints, hook_mode=hook_mode_for_width)
-        unique_widths = set(input_widths.values())
+        input_widths = resolve_widths(model, cfg.hookpoints, hook_mode="input")
 
-        if cfg.distribute_modules and len(unique_widths) > 1:
-            # dist.all_to_all requires tensors to have the same shape across ranks
-            raise ValueError(
-                f"All modules must output tensors of the same shape when using "
-                f"`distribute_modules=True`, got {unique_widths}"
-            )
-
-        # Initialize all the SAEs
-        print(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
+        # Initialize SAEs
+        logger.info(f"Initializing SAEs with random seed(s) {cfg.init_seeds}")
         if cfg.num_tiles > 1:
-            print(f"Tiled mode: splitting input into {cfg.num_tiles} tiles")
+            logger.info(f"Tiled mode: splitting input into {cfg.num_tiles} tiles")
+
         self.saes = {}
-        self.teachers = {}  # For distillation mode
+        for hook in cfg.hookpoints:
+            for seed in cfg.init_seeds:
+                torch.manual_seed(seed)
+                name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
 
-        # Distillation mode: load teacher SAEs first
-        if cfg.distill_from:
-            # Distillation mode doesn't support multiple seeds (student is initialized from teacher)
-            if len(cfg.init_seeds) > 1:
-                print("Warning: Distillation mode ignores init_seeds (student initialized from teacher via SVD)")
-
-            print(f"Distillation mode: loading teachers from {cfg.distill_from}")
-            for hook in self.local_hookpoints():
-                teacher_path = Path(cfg.distill_from) / hook
-                if not teacher_path.exists():
-                    raise FileNotFoundError(
-                        f"Teacher checkpoint not found: {teacher_path}"
+                if cfg.num_tiles > 1:
+                    self.saes[name] = TiledSparseCoder(
+                        input_widths[hook],
+                        cfg.sae,
+                        cfg.num_tiles,
+                        device,
+                        dtype=torch.float32,
+                        global_topk=cfg.global_topk,
+                        input_mixing=cfg.input_mixing,
                     )
-                teacher = SparseCoder.load_from_disk(teacher_path, device=device)
-                teacher.requires_grad_(False)  # Freeze teacher
-                self.teachers[hook] = teacher
-
-                # Create student from teacher using SVD initialization
-                # Always use bare hook name (no seed suffix) in distillation mode
-                self.saes[hook] = SparseCoder.from_pretrained_lowrank(
-                    teacher, cfg.sae.encoder_rank, device=device
-                )
-
-                # Optionally freeze decoder
-                if cfg.freeze_decoder:
-                    self.saes[hook].W_dec.requires_grad_(False)
-                    self.saes[hook].b_dec.requires_grad_(False)
-
-            print(f"  Encoder rank: {cfg.sae.encoder_rank}")
-            print(f"  Freeze decoder: {cfg.freeze_decoder}")
-        else:
-            # Standard training mode
-            for hook in self.local_hookpoints():
-                for seed in cfg.init_seeds:
-                    torch.manual_seed(seed)
-
-                    # Add suffix to the name to disambiguate multiple seeds
-                    name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
-
-                    # Use TiledSparseCoder if num_tiles > 1
-                    if cfg.num_tiles > 1:
-                        self.saes[name] = TiledSparseCoder(
-                            input_widths[hook],
-                            cfg.sae,
-                            cfg.num_tiles,
-                            device,
-                            dtype=torch.float32,
-                            global_topk=cfg.global_topk,
-                            input_mixing=cfg.input_mixing,
-                        )
-                    elif cfg.sae.encoder_rank > 0:
-                        self.saes[name] = LowRankSparseCoder(
-                            input_widths[hook],
-                            cfg.sae,
-                            device,
-                            dtype=torch.float32,
-                            transcoder=(cfg.hook_mode == "transcode"),
-                        )
-                    else:
-                        self.saes[name] = SparseCoder(
-                            input_widths[hook],
-                            cfg.sae,
-                            device,
-                            dtype=torch.float32,
-                            transcoder=(cfg.hook_mode == "transcode"),
-                        )
+                else:
+                    self.saes[name] = SparseCoder(
+                        input_widths[hook],
+                        cfg.sae,
+                        device,
+                        dtype=torch.float32,
+                    )
 
         assert isinstance(dataset, Sized)
-        num_batches = len(dataset) // cfg.batch_size
 
-        match cfg.optimizer:
-            case "adam":
-                try:
-                    from bitsandbytes.optim import Adam8bit as Adam
+        # Optimizer: Signum with schedule-free wrapper
+        pgs = [
+            dict(
+                params=sae.parameters(),
+                lr=cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5,
+            )
+            for sae in self.saes.values()
+        ]
+        lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
-                    print("Using 8-bit Adam from bitsandbytes")
-                except ImportError:
-                    from torch.optim import Adam
+        opt = ScheduleFreeWrapper(SignSGD(pgs), momentum=0.95)
+        opt.train()
+        self.optimizers = [opt]
 
-                    print(
-                        "bitsandbytes 8-bit Adam not available, using torch.optim.Adam"
-                    )
-                    print("Run `pip install bitsandbytes` for less memory usage.")
+        logger.info(
+            f"Learning rate{'s' if len(lrs) > 1 else ''}: {', '.join(lrs)}"
+        )
 
-                pgs = [
-                    dict(
-                        params=sae.parameters(),
-                        lr=cfg.lr or 2e-4 / (sae.num_latents / (2**14)) ** 0.5,
-                    )
-                    for sae in self.saes.values()
-                ]
-                # For logging purposes
-                lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
-
-                adam = Adam(pgs)
-                self.optimizers = [adam]
-                self.lr_schedulers = [
-                    get_linear_schedule_with_warmup(
-                        adam, cfg.lr_warmup_steps, num_batches
-                    )
-                ]
-            case "muon":
-                params = {p for sae in self.saes.values() for p in sae.parameters()}
-                muon_params = {p for p in params if p.ndim >= 2}
-                lrs = [f"{cfg.lr or 2e-3:.2e}"]
-
-                self.optimizers = [
-                    Muon(
-                        muon_params,
-                        # Muon LR is independent of the number of latents
-                        lr=cfg.lr or 2e-3,
-                        # Muon distributes the work of the Newton-Schulz iterations
-                        # across all ranks for DDP but this doesn't make sense when
-                        # we're distributing modules across ranks
-                        ddp=not cfg.distribute_modules,
-                    ),
-                    torch.optim.Adam(params - muon_params, lr=cfg.lr or 2e-3),
-                ]
-                self.lr_schedulers = [
-                    get_linear_schedule_with_warmup(self.optimizers[0], 0, num_batches),
-                    get_linear_schedule_with_warmup(
-                        self.optimizers[1], cfg.lr_warmup_steps, num_batches
-                    ),
-                ]
-            case "signum":
-                from schedulefree import ScheduleFreeWrapper
-
-                pgs = [
-                    dict(
-                        params=sae.parameters(),
-                        lr=cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5,
-                    )
-                    for sae in self.saes.values()
-                ]
-                lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
-
-                opt = ScheduleFreeWrapper(SignSGD(pgs), momentum=0.95)
-                opt.train()
-
-                self.optimizers = [opt]
-                self.lr_schedulers = []
-            case other:
-                raise ValueError(f"Unknown optimizer '{other}'")
-
-        print(f"Learning rates: {lrs}" if len(lrs) > 1 else f"Learning rate: {lrs[0]}")
         self.global_step = 0
-        self.total_tokens = 0  # Total tokens processed (for wandb x-axis)
+        self.total_tokens = 0
+
         self.num_tokens_since_fired = {
             name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
             for name, sae in self.saes.items()
         }
-        self.exclude_tokens = torch.tensor(
-            self.cfg.exclude_tokens, device=device, dtype=torch.long
-        )
 
         # Load elbow thresholds if provided
         self.elbow_thresholds: dict[str, float] = {}
         if cfg.elbow_threshold_path:
             self._load_elbow_thresholds(cfg.elbow_threshold_path)
 
-        num_latents = list(self.saes.values())[0].num_latents
-        self.initial_k = min(num_latents, round(list(input_widths.values())[0] * 10))
-        self.final_k = self.cfg.sae.k
+        self.best_loss: dict[str, float] = {
+            name: float("inf") for name in self.saes.keys()
+        }
 
-        self.best_loss = (
-            {name: float("inf") for name in self.saes.keys()}
-            if self.cfg.loss_fn == "fvu"
-            else float("inf")
-        )
-
-        # Initialize Hadamard rotations if enabled
-        # Will be lazily initialized in hook when we know the actual d_in
+        # Hadamard rotations (lazily initialized in hook when we know d_in)
         self.hadamard_rotations: dict[str, HadamardRotation] = {}
         if cfg.use_hadamard:
-            print(
+            logger.info(
                 f"Hadamard rotation enabled: block_size={cfg.hadamard_block_size}, "
                 f"seed={cfg.hadamard_seed}, use_perm={cfg.hadamard_use_perm}"
             )
 
-        # Initialize outlier clippers if enabled
-        # Will be lazily initialized in hook when we know the actual d_in
-        self.outlier_clippers: dict[str, OutlierClipper] = {}
-        if cfg.use_outlier_clip:
-            print(
-                f"Outlier clipping enabled: k={cfg.outlier_k}, "
-                f"ema_alpha={cfg.outlier_ema_alpha}, warmup_steps={cfg.outlier_warmup_steps}, "
-                f"loss_mode={cfg.outlier_loss_mode}"
-            )
-
-    def _load_elbow_thresholds(self, path: str):
-        """Load elbow thresholds from JSON file and match to hookpoints.
-
-        JSON format: {"layer_10/mlp_down_proj": {"elbow_p": 0.95, "elbow_value": 1.234}}
-        Hookpoint format: "layers.10.mlp.down_proj" or "h.10.attn.o_proj"
-
-        Supports both underscore and dot separators in component names.
-        """
-        with open(path, 'r') as f:
-            elbow_data = json.load(f)
-
-        for hookpoint in self.cfg.hookpoints:
-            matched = False
-
-            # Strategy 1: Direct match
-            if hookpoint in elbow_data:
-                self.elbow_thresholds[hookpoint] = elbow_data[hookpoint]["elbow_value"]
-                matched = True
-                continue
-
-            # Strategy 2: Extract layer number and component
-            # From "layers.10.mlp.down_proj" -> try "layer_10/mlp.down_proj", "layer_10/mlp_down_proj", etc.
-            parts = hookpoint.split('.')
-            if len(parts) >= 2 and parts[0] in ('layers', 'h', 'model.layers'):
-                layer_num = parts[1]
-                component = '.'.join(parts[2:]) if len(parts) > 2 else ''
-
-                # Generate search patterns with both dot and underscore formats
-                search_patterns = []
-                if component:
-                    # Try both dot and underscore versions
-                    component_underscore = component.replace('.', '_')
-                    search_patterns.extend([
-                        f"layer_{layer_num}/{component}",
-                        f"layer_{layer_num}/{component_underscore}",
-                    ])
-                search_patterns.append(f"layer_{layer_num}")
-
-                for pattern in search_patterns:
-                    for json_key, value in elbow_data.items():
-                        if pattern in json_key or json_key in hookpoint:
-                            self.elbow_thresholds[hookpoint] = value["elbow_value"]
-                            matched = True
-                            break
-                    if matched:
-                        break
-
-            if not matched:
-                print(f"⚠️  No elbow threshold found for hookpoint '{hookpoint}'")
-
-        print(f"✓ Loaded elbow thresholds for {len(self.elbow_thresholds)}/{len(self.cfg.hookpoints)} hookpoints")
-
-    def load_state(self, path: str):
-        """Load the trainer state from disk."""
-        device = self.model.device
-
-        # Load the train state first so we can print the step number
-        train_state = torch.load(
-            f"{path}/state.pt", map_location=device, weights_only=True
-        )
-        self.global_step = train_state["global_step"]
-        # Backward compatibility: older checkpoints don't have total_tokens
-        self.total_tokens = train_state.get("total_tokens", 0)
-
-        for file in glob(f"{path}/rank_*_state.pt"):
-            rank_state = torch.load(file, map_location=device, weights_only=True)
-
-            for k in self.local_hookpoints():
-                if k in rank_state["num_tokens_since_fired"]:
-                    self.num_tokens_since_fired[k] = rank_state[
-                        "num_tokens_since_fired"
-                    ][k]
-
-                if not isinstance(rank_state["best_loss"], dict):
-                    self.best_loss = rank_state["best_loss"]
-                elif k in rank_state["best_loss"]:
-                    self.best_loss[k] = rank_state["best_loss"][k]  # type: ignore
-
-        print(
-            f"\033[92mResuming training at step {self.global_step} from '{path}'\033[0m"
-        )
-
-        for i, scheduler in enumerate(self.lr_schedulers):
-            lr_state = torch.load(
-                f"{path}/lr_scheduler_{i}.pt", map_location=device, weights_only=True
-            )
-            scheduler.load_state_dict(lr_state)
-
-        for i, optimizer in enumerate(self.optimizers):
-            opt_state = torch.load(
-                f"{path}/optimizer_{i}.pt", map_location=device, weights_only=True
-            )
-            optimizer.load_state_dict(opt_state)
-
-        for name, sae in self.saes.items():
-            load_sae_checkpoint(sae, f"{path}/{name}", device=str(device))
-
-        # Load Hadamard rotation states if they exist
-        hadamard_path = f"{path}/hadamard_rotations.pt"
-        if os.path.exists(hadamard_path):
-            hadamard_states = torch.load(hadamard_path, map_location=device, weights_only=False)
-            for name, state in hadamard_states.items():
-                self.hadamard_rotations[name] = HadamardRotation.from_state_dict(
-                    state, device=device
-                )
-            print(f"  Loaded Hadamard rotations for {len(self.hadamard_rotations)} hookpoints")
-
-        # Load outlier clipper states if they exist
-        clipper_path = f"{path}/outlier_clippers.pt"
-        if os.path.exists(clipper_path):
-            clipper_states = torch.load(clipper_path, map_location=device, weights_only=False)
-            for name, state in clipper_states.items():
-                self.outlier_clippers[name] = OutlierClipper.from_state_dict(
-                    state, device=device
-                )
-            print(f"  Loaded outlier clippers for {len(self.outlier_clippers)} hookpoints")
-
-    def get_current_k(self) -> int:
-        """Get the current k value based on a linear decay schedule."""
-        if self.global_step >= self.cfg.k_decay_steps:
-            return self.final_k
-
-        progress = self.global_step / self.cfg.k_decay_steps
-        return round(self.initial_k * (1 - progress) + self.final_k * progress)
-
     def fit(self):
-        # Use Tensor Cores even for fp32 matmuls (CUDA TensorCore specific)
-        if torch.cuda.is_available():
-            torch.set_float32_matmul_precision("high")
+        # Use Tensor Cores even for fp32 matmuls
+        torch.set_float32_matmul_precision("high")
 
-        # Make sure the model is frozen
         self.model.requires_grad_(False)
 
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
-        ddp = dist.is_initialized() and not self.cfg.distribute_modules
+        ddp = dist.is_initialized()
 
-        # Generate full run name with hyperparameters and timestamp
-        # This is used for both wandb and checkpoint paths
+        # Generate full run name
         if self.resume_from:
-            # Extract the run name from the resume path (remove save_dir prefix)
-            # e.g., "checkpoints/my_run_dp8_bs1_ga8_ef8_k32_20231218_120000" -> "my_run_dp8_bs1_ga8_ef8_k32_20231218_120000"
             self.full_run_name = self.resume_from.split("/")[-1]
         else:
-            # Generate new run name with timestamp for new training
             from datetime import datetime
 
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             base_name = self.cfg.run_name or "unnamed"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Format: {base_name}_dp{world_size}_bs{batch_size}_ga{grad_acc}_ef{expansion}_k{k}_{timestamp}
             self.full_run_name = (
                 f"{base_name}_dp{world_size}_bs{self.cfg.batch_size}"
-                f"_ga{self.cfg.grad_acc_steps}_ef{self.cfg.sae.expansion_factor}_k{self.cfg.sae.k}"
-                f"_{timestamp}"
+                f"_ga{self.cfg.grad_acc_steps}_ef{self.cfg.sae.expansion_factor}"
+                f"_k{self.cfg.sae.k}_{timestamp}"
             )
 
         wandb = None
@@ -549,12 +187,10 @@ class Trainer:
             try:
                 import wandb
 
-                # Determine project name: CLI arg > env var > default
                 project_name = (
                     self.cfg.wandb_project
                     or os.environ.get("WANDB_PROJECT", "sparsify")
                 )
-
                 wandb.init(
                     entity=os.environ.get("WANDB_ENTITY", None),
                     name=self.full_run_name,
@@ -563,21 +199,19 @@ class Trainer:
                     save_code=True,
                 )
             except (AttributeError, ImportError):
-                print("Weights & Biases not available, skipping logging.")
-                print("Run `pip install -U wandb` if you want to use it.")
+                logger.warning("Weights & Biases not available, skipping logging.")
                 self.cfg.log_to_wandb = False
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
         )
         num_model_params = sum(p.numel() for p in self.model.parameters())
-        print(f"Number of SAE parameters: {num_sae_params:_}")
-        print(f"Number of model parameters: {num_model_params:_}")
+        logger.info(f"Number of SAE parameters: {num_sae_params:_}")
+        logger.info(f"Number of model parameters: {num_model_params:_}")
 
         num_batches = len(self.dataset) // self.cfg.batch_size
         if self.global_step > 0:
             assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
-
             n = self.global_step * self.cfg.batch_size
             ds = self.dataset.select(range(n, len(self.dataset)))  # type: ignore
         else:
@@ -587,8 +221,6 @@ class Trainer:
         dl = DataLoader(
             ds,  # type: ignore
             batch_size=self.cfg.batch_size,
-            # NOTE: We do not shuffle here for reproducibility; the dataset should
-            # be shuffled before passing it to the trainer.
             shuffle=False,
         )
         pbar = tqdm(
@@ -603,66 +235,37 @@ class Trainer:
             for name, sae in self.saes.items()
         }
 
-        tokens_mask: torch.Tensor
-
         acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
         denom = acc_steps * self.cfg.wandb_log_frequency
         num_tokens_in_step = 0
 
-        # Timing metrics (accumulated over wandb_log_frequency steps)
+        # Timing metrics
         total_forward_time = 0.0
-        total_backward_time = 0.0
         total_metrics_time = 0.0
         timing_step_count = 0
 
-        # For logging purposes
-        avg_auxk_loss = defaultdict(float)
-        avg_fvu = defaultdict(float)
-        avg_multi_topk_fvu = defaultdict(float)
-        avg_outlier_ratio = defaultdict(float)
-        avg_ce = 0.0
-        avg_kl = 0.0
-        # Exceed metrics (per hookpoint, per alpha)
-        avg_exceed: dict[str, dict[float, float]] = defaultdict(lambda: defaultdict(float))
-        avg_losses = (
-            {name: float("inf") for name in self.local_hookpoints()}
-            if self.cfg.loss_fn == "fvu"
-            else float("inf")
+        # Logging accumulators
+        avg_auxk_loss: dict[str, float] = defaultdict(float)
+        avg_fvu: dict[str, float] = defaultdict(float)
+        avg_exceed: dict[str, dict[float, float]] = defaultdict(
+            lambda: defaultdict(float)
         )
+        avg_losses: dict[str, float] = {
+            name: float("inf") for name in self.saes.keys()
+        }
 
-        # Device events for accurate GPU/NPU timing
+        # Device events for timing
         if device.type in ("cuda", "npu"):
             forward_start = create_event(enable_timing=True)
             forward_end = create_event(enable_timing=True)
-            backward_start = create_event(enable_timing=True)
-            backward_end = create_event(enable_timing=True)
-            metrics_start = create_event(enable_timing=True)
-            metrics_end = create_event(enable_timing=True)
         else:
             forward_start = forward_end = None
-            backward_start = backward_end = None
-            metrics_start = metrics_end = None
-
-        if self.cfg.loss_fn == "ce":
-            batch = next(iter(dl))
-            x = batch["input_ids"].to(device)
-
-            clean_loss = self.model(x, labels=x).loss
-            self.maybe_all_reduce(clean_loss)
-            if rank_zero:
-                print(f"Initial CE loss: {clean_loss.item():.4f}")
-
-            # If doing end-to-end transcoders, then we don't actually want to run the
-            # modules that we're replacing
-            if self.cfg.hook_mode == "transcode":
-                for point in self.cfg.hookpoints:
-                    set_submodule(self.model.base_model, point, nn.Identity())
 
         name_to_module = {
             name: self.model.base_model.get_submodule(name)
             for name in self.cfg.hookpoints
         }
-        maybe_wrapped: dict[str, DDP] | dict[str, SparseCoder] = {}
+        maybe_wrapped: dict[str, DDP | SparseCoder | TiledSparseCoder] = {}
         module_to_name = {v: k for k, v in name_to_module.items()}
 
         # Build mapping from bare hook name to SAE keys (supports multi-seed)
@@ -672,159 +275,64 @@ class Trainer:
             hook_to_sae_keys[hook].append(sae_key)
 
         def hook(module: nn.Module, inputs, outputs):
-            nonlocal total_forward_time, total_backward_time, total_metrics_time, timing_step_count
-            aux_out = None
+            nonlocal total_forward_time, total_metrics_time, timing_step_count
 
-            # Maybe unpack tuple inputs and outputs
             if isinstance(inputs, tuple):
                 inputs = inputs[0]
-            if isinstance(outputs, tuple):
-                outputs, *aux_out = outputs
-            mask = tokens_mask
 
-            # Name may optionally contain a suffix of the form /seedN where N is an
-            # integer. We only care about the part before the slash.
-            name, _, _ = module_to_name[module].partition("/")
+            name = module_to_name[module]
 
-            # Remember the original output shape since we'll need it for e2e training
-            out_shape = outputs.shape
-
-            # Scatter and gather the hidden states across ranks if necessary
-            if self.cfg.distribute_modules:
-                world_outputs = outputs.new_empty(
-                    outputs.shape[0] * dist.get_world_size(), *outputs.shape[1:]
-                )
-                dist.all_gather_into_tensor(world_outputs, outputs)
-                outputs = world_outputs
-
-                # Don't bother with the communication overhead if we're autoencoding
-                # on outputs (the default mode)
-                if self.cfg.hook_mode in ("input", "transcode"):
-                    world_inputs = inputs.new_empty(
-                        inputs.shape[0] * dist.get_world_size(), *inputs.shape[1:]
-                    )
-                    dist.all_gather_into_tensor(world_inputs, inputs)
-                    inputs = world_inputs
-
-                world_mask = mask.new_empty(
-                    mask.shape[0] * dist.get_world_size(), *mask.shape[1:]
-                )
-                dist.all_gather_into_tensor(world_mask, mask)
-                mask = world_mask.bool()
-
-                if name not in self.module_plan[dist.get_rank()]:
-                    return
-
-            # Flatten the batch and sequence dimensions
-            outputs = outputs.flatten(0, 1)
-            inputs = inputs.flatten(0, 1)
-            match self.cfg.hook_mode:
-                case "output":
-                    inputs = outputs
-                case "input":
-                    outputs = inputs
-                case "transcode":
-                    pass
-            mask = mask.flatten(0, 1)
-
-            # Remove tokens not used for training
-            all_outputs = outputs.detach().clone()
-            outputs = outputs[mask]
-            inputs = inputs[mask]
+            # Flatten batch and sequence dimensions, use input activations
+            acts = inputs.flatten(0, 1)
 
             # Apply Hadamard rotation if enabled
             if self.cfg.use_hadamard:
                 if name not in self.hadamard_rotations:
-                    d_in = outputs.shape[-1]
+                    d_in = acts.shape[-1]
                     self.hadamard_rotations[name] = HadamardRotation(
                         d_in,
                         block_size=self.cfg.hadamard_block_size,
                         seed=self.cfg.hadamard_seed,
                         use_permutation=self.cfg.hadamard_use_perm,
-                        device=outputs.device,
-                        dtype=outputs.dtype,
+                        device=acts.device,
+                        dtype=acts.dtype,
                     )
-                rotation = self.hadamard_rotations[name]
-                outputs = rotation.rotate(outputs)
-                inputs = rotation.rotate(inputs)
-                # Note: all_outputs is not rotated since ce/kl is disabled with hadamard
+                acts = self.hadamard_rotations[name].rotate(acts)
 
-            # Apply outlier clipping if enabled
-            outlier_residual = None
-            outlier_mask = None
-            original_outputs = None  # For exceed metrics
-            if self.cfg.use_outlier_clip:
-                if name not in self.outlier_clippers:
-                    d_in = outputs.shape[-1]
-                    self.outlier_clippers[name] = OutlierClipper(
-                        d_in=d_in,
-                        k=self.cfg.outlier_k,
-                        ema_alpha=self.cfg.outlier_ema_alpha,
-                        warmup_steps=self.cfg.outlier_warmup_steps,
-                        device=outputs.device,
-                        dtype=torch.float32,
-                    )
-
-                clipper = self.outlier_clippers[name]
-                # Store original outputs for exceed calculation
-                original_outputs = outputs.detach().clone()
-                # Clip outputs (update stats during training)
-                outputs, outlier_residual, outlier_mask = clipper.clip(outputs, update_stats=True)
-                # Clip inputs with same threshold (no stats update)
-                inputs, _, _ = clipper.clip(inputs, update_stats=False)
-
-            # Get the bare hook name for lookups
-            hook_name = name
-
-            if self.cfg.use_outlier_clip and outlier_mask is not None:
-                outlier_ratio = outlier_mask.mean()
-                avg_outlier_ratio[hook_name] += float(
-                    self.maybe_all_reduce(outlier_ratio.detach()) / denom
-                )
-
-            # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
+            # Pre-compute unrotated target for exceed metrics
             original_target_for_exceed = None
-            if self.cfg.use_hadamard and name in self.hadamard_rotations and hook_name in self.elbow_thresholds:
-                original_target_for_exceed = self.hadamard_rotations[name].unrotate(outputs)
+            if (
+                self.cfg.use_hadamard
+                and name in self.hadamard_rotations
+                and name in self.elbow_thresholds
+            ):
+                original_target_for_exceed = self.hadamard_rotations[
+                    name
+                ].unrotate(acts)
 
             # Process each SAE for this hook (supports multi-seed)
-            for sae_key in hook_to_sae_keys[hook_name]:
-                # On the first iteration, initialize the encoder and decoder biases
+            for sae_key in hook_to_sae_keys[name]:
                 raw = self.saes[sae_key]
-                if self.global_step == 0 and not self.cfg.finetune:
-                    # Ensure the preactivations are centered at initialization
-                    # This is mathematically equivalent to Anthropic's proposal of
-                    # subtracting the decoder bias
-                    if self.cfg.hook_mode == "transcode":
-                        mean = self.maybe_all_reduce(inputs.mean(0)).to(raw.dtype)
-                        # Handle both full-rank (encoder) and low-rank (encoder_A, encoder_B) models
-                        if raw.encoder is not None:
-                            # Full-rank SparseCoder
-                            mean_image = -mean @ raw.encoder.weight.data.T
-                            raw.encoder.bias.data = mean_image
-                        else:
-                            # Low-rank LowRankSparseCoder: W_enc = A @ B
-                            mean_image = -mean @ raw.encoder_B.weight.data.T @ raw.encoder_A.weight.data.T
-                            raw.encoder_A.bias.data = mean_image
 
-                    mean = self.maybe_all_reduce(outputs.mean(0))
-                    # Handle TiledSparseCoder which needs special b_dec handling
+                # On the first iteration, initialize decoder bias from data mean
+                if self.global_step == 0 and not self.cfg.finetune:
+                    mean = self.maybe_all_reduce(acts.mean(0))
+
                     if hasattr(raw, 'set_b_dec_data'):
                         raw.set_b_dec_data(mean.to(raw.dtype))
                     else:
                         raw.b_dec.data = mean.to(raw.dtype)
 
-                # Make sure the W_dec is still unit-norm if we're autoencoding
-                # Skip if decoder is frozen (e.g., in distillation mode) to preserve teacher weights
-                if raw.cfg.normalize_decoder and self.cfg.hook_mode != "transcode" and raw.W_dec.requires_grad:
+                # Normalize decoder if applicable
+                if raw.cfg.normalize_decoder and raw.W_dec.requires_grad:
                     raw.set_decoder_norm_to_unit_norm()
 
                 wrapped = maybe_wrapped[sae_key]
                 out = wrapped(
-                    x=inputs,
-                    y=outputs,
+                    x=acts,
                     dead_mask=(
-                        self.num_tokens_since_fired[sae_key] > self.cfg.dead_feature_threshold
+                        self.num_tokens_since_fired[sae_key]
+                        > self.cfg.dead_feature_threshold
                         if self.cfg.auxk_alpha > 0
                         else None
                     ),
@@ -832,140 +340,84 @@ class Trainer:
 
                 # Update the did_fire mask
                 did_fire[sae_key][out.latent_indices.flatten()] = True
-                self.maybe_all_reduce(did_fire[sae_key], "max")  # max is boolean "any"
+                self.maybe_all_reduce(did_fire[sae_key], "max")
 
-                if self.cfg.loss_fn in ("ce", "kl"):
-                    # Replace the normal output with the SAE output
-                    output = all_outputs.clone()
-                    output[mask] = out.sae_out.type_as(output)
-                    output = output.reshape(out_shape)
-                    return (output, *aux_out) if aux_out is not None else output
-
-                # Metrics that only make sense for local
-                avg_fvu[sae_key] += float(self.maybe_all_reduce(out.fvu.detach()) / denom)
+                # Accumulate metrics
+                avg_fvu[sae_key] += float(
+                    self.maybe_all_reduce(out.fvu.detach()) / denom
+                )
                 if self.cfg.auxk_alpha > 0:
                     avg_auxk_loss[sae_key] += float(
                         self.maybe_all_reduce(out.auxk_loss.detach()) / denom
                     )
-                if self.cfg.sae.multi_topk:
-                    avg_multi_topk_fvu[sae_key] += float(
-                        self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
-                    )
 
                 # Compute exceed metrics if elbow thresholds available
-                # Use hook_name (bare name) to look up thresholds, not sae_key
-                if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
-                    # Start metrics timing
+                if name in self.elbow_thresholds and self.cfg.exceed_alphas:
                     if device.type in ("cuda", "npu"):
-                        metrics_start.record()
+                        metrics_start_evt = create_event(enable_timing=True)
+                        metrics_end_evt = create_event(enable_timing=True)
+                        metrics_start_evt.record()
                     else:
                         metrics_time_start = time.perf_counter()
 
-                    # CRITICAL: Compute in ORIGINAL space
-                    if self.cfg.use_outlier_clip and outlier_residual is not None:
-                        # Full reconstruction strategy depends on loss mode:
-                        # - weighted: SAE output on outlier dims is unconstrained, must zero out
-                        # - inlier_only: SAE is encouraged to output ~0 on outlier dims, keep it
-                        if self.cfg.outlier_loss_mode == "weighted":
-                            original_recon = out.sae_out * (1 - outlier_mask) + outlier_residual
-                        else:  # inlier_only
-                            original_recon = out.sae_out + outlier_residual
-                        # Original target = inlier + residual = original_outputs
-                        original_target = original_outputs
-                    elif self.cfg.use_hadamard and name in self.hadamard_rotations:
-                        # Use pre-computed unrotated target
-                        original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
-                        original_recon = self.hadamard_rotations[name].unrotate(out.sae_out)
+                    if (
+                        self.cfg.use_hadamard
+                        and name in self.hadamard_rotations
+                    ):
+                        original_target = (
+                            original_target_for_exceed
+                            if original_target_for_exceed is not None
+                            else acts
+                        )
+                        original_recon = self.hadamard_rotations[
+                            name
+                        ].unrotate(out.sae_out)
                     else:
-                        original_target = outputs
+                        original_target = acts
                         original_recon = out.sae_out
 
-                    # Compute absolute reconstruction error
                     error_magnitude = torch.abs(original_target - original_recon)
-
-                    # Get elbow threshold for this hookpoint (use bare hook name)
-                    elbow_value = self.elbow_thresholds[hook_name]
-
-                    # Count exceedances for each alpha
+                    elbow_value = self.elbow_thresholds[name]
                     num_elements = error_magnitude.numel()
+
                     for alpha in self.cfg.exceed_alphas:
                         threshold = alpha * elbow_value
-                        exceed_count = (error_magnitude > threshold).sum().float()
+                        exceed_count = (
+                            (error_magnitude > threshold).sum().float()
+                        )
                         exceed_ratio = exceed_count / num_elements
-
-                        # Accumulate (average over steps)
                         avg_exceed[sae_key][alpha] += float(
                             self.maybe_all_reduce(exceed_ratio.detach()) / denom
                         )
 
-                    # End metrics timing
                     if device.type in ("cuda", "npu"):
-                        metrics_end.record()
+                        metrics_end_evt.record()
                         synchronize()
-                        total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
+                        total_metrics_time += (
+                            metrics_start_evt.elapsed_time(metrics_end_evt)
+                            / 1000.0
+                        )
                     else:
-                        metrics_time_end = time.perf_counter()
-                        total_metrics_time += metrics_time_end - metrics_time_start
+                        total_metrics_time += (
+                            time.perf_counter() - metrics_time_start
+                        )
 
-                # Do a "local" backward pass if we're not training end-to-end
-                # Compute loss with outlier handling if enabled
-                if self.cfg.use_outlier_clip and outlier_mask is not None:
-                    if self.cfg.outlier_loss_mode == "weighted":
-                        # Weighted loss: outlier dims have weight 0
-                        error_sq = (out.sae_out - outputs) ** 2
-                        weight = 1 - outlier_mask
-                        # Compute weighted MSE
-                        weighted_mse = (error_sq * weight).sum() / (weight.sum() + 1e-8)
-                        # Compute per-dimension centered variance (consistent with original FVU)
-                        # Per-dim weighted mean: [d_in]
-                        inlier_mean = (outputs * weight).sum(dim=0) / (weight.sum(dim=0) + 1e-8)
-                        # Weighted variance using per-dim mean
-                        inlier_var = (((outputs - inlier_mean) ** 2) * weight).sum() / (weight.sum() + 1e-8)
-                        fvu_loss = weighted_mse / (inlier_var + 1e-8)
-                    else:  # inlier_only
-                        # Standard FVU on x_inlier. Note: this still penalizes SAE output on
-                        # outlier dims (encouraging them toward 0), unlike weighted mode.
-                        fvu_loss = out.fvu
-                    loss = fvu_loss + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-                else:
-                    loss = (
-                        out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-                    )
-
-                # Distillation loss (if enabled)
-                if hook_name in self.teachers:
-                    from lowrank_encoder import compute_distillation_loss
-
-                    distill_loss = compute_distillation_loss(
-                        student=raw,
-                        teacher=self.teachers[hook_name],
-                        inputs=inputs,
-                        student_output=out.sae_out,
-                        lambda_decode=self.cfg.distill_lambda_decode,
-                        lambda_acts=self.cfg.distill_lambda_acts,
-                    )
-                    loss = loss + distill_loss.total
-
+                # Local backward pass
+                loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                 loss.div(acc_steps).backward()
-
-        k = self.get_current_k()
-        for name, sae in self.saes.items():
-            if hasattr(sae, 'set_k'):
-                sae.set_k(k)  # TiledSparseCoder: propagate to all tiles
-            else:
-                sae.cfg.k = k
 
         for batch in dl:
             x = batch["input_ids"].to(device)
-            tokens_mask = torch.isin(x, self.exclude_tokens, invert=True)
 
             if not maybe_wrapped:
-                # Wrap the SAEs with Distributed Data Parallel. We have to do this
-                # after we set the decoder bias, otherwise DDP will not register
-                # gradients flowing to the bias after the first step.
+                # Wrap the SAEs with DDP. We have to do this after we set the
+                # decoder bias, otherwise DDP will not register gradients
+                # flowing to the bias after the first step.
+                # Use LOCAL_RANK for device_ids (not global rank)
+                local_rank = int(os.environ.get("LOCAL_RANK", 0))
                 maybe_wrapped = (
                     {
-                        name: DDP(sae, device_ids=[dist.get_rank()])
+                        name: DDP(sae, device_ids=[local_rank])
                         for name, sae in self.saes.items()
                     }
                     if ddp
@@ -973,15 +425,7 @@ class Trainer:
                 )
 
             # Bookkeeping for dead feature detection
-            N = tokens_mask.sum().item()
-            num_tokens_in_step += N
-
-            # Compute clean logits if using KL loss
-            clean_probs = (
-                self.model(x).logits.softmax(dim=-1)
-                if self.cfg.loss_fn == "kl"
-                else None
-            )
+            num_tokens_in_step += x.numel()
 
             # Start timing forward pass
             if device.type in ("cuda", "npu"):
@@ -990,94 +434,33 @@ class Trainer:
             else:
                 forward_time_start = time.perf_counter()
 
-            # Forward pass on the model to get the next batch of activations
+            # Forward pass on the model to capture activations via hooks
             handles = [
-                mod.register_forward_hook(hook) for mod in name_to_module.values()
+                mod.register_forward_hook(hook)
+                for mod in name_to_module.values()
             ]
             try:
-                match self.cfg.loss_fn:
-                    case "ce":
-                        ce = self.model(x, labels=x).loss
-
-                        # End forward, start backward timing
-                        if device.type in ("cuda", "npu"):
-                            forward_end.record()
-                            synchronize()
-                            backward_start.record()
-                        else:
-                            forward_time_end = time.perf_counter()
-                            backward_time_start = time.perf_counter()
-
-                        ce.div(acc_steps).backward()
-
-                        # End backward timing
-                        if device.type in ("cuda", "npu"):
-                            backward_end.record()
-                            synchronize()
-                        else:
-                            backward_time_end = time.perf_counter()
-
-                        avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
-                        avg_losses = avg_ce
-
-                    case "kl":
-                        dirty_lps = self.model(x).logits.log_softmax(dim=-1)
-                        kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
-
-                        # End forward, start backward timing
-                        if device.type in ("cuda", "npu"):
-                            forward_end.record()
-                            synchronize()
-                            backward_start.record()
-                        else:
-                            forward_time_end = time.perf_counter()
-                            backward_time_start = time.perf_counter()
-
-                        kl.div(acc_steps).backward()
-
-                        # End backward timing
-                        if device.type in ("cuda", "npu"):
-                            backward_end.record()
-                            synchronize()
-                        else:
-                            backward_time_end = time.perf_counter()
-
-                        avg_kl += float(self.maybe_all_reduce(kl) / denom)
-                        avg_losses = avg_kl
-
-                    case "fvu":
-                        # Use partial forward if possible to save computation
-                        if self._max_layer_for_fvu is not None:
-                            partial_forward_to_layer(self.model, x, self._max_layer_for_fvu)
-                        else:
-                            self.model(x)  # Fallback to full forward
-
-                        # For FVU, backward happens in hook, so end both timings here
-                        if device.type in ("cuda", "npu"):
-                            forward_end.record()
-                            # Record backward events even though there's no separate backward pass
-                            # This ensures elapsed_time() calls don't fail
-                            backward_start.record()
-                            backward_end.record()
-                            synchronize()
-                        else:
-                            forward_time_end = time.perf_counter()
-                            backward_time_start = forward_time_end
-                            backward_time_end = forward_time_end
-
-                        avg_losses = dict(avg_fvu)
-
-                    case other:
-                        raise ValueError(f"Unknown loss function '{other}'")
-
-                # Accumulate timing metrics
-                if device.type in ("cuda", "npu"):
-                    total_forward_time += forward_start.elapsed_time(forward_end) / 1000.0  # ms to s
-                    total_backward_time += backward_start.elapsed_time(backward_end) / 1000.0
+                if self._max_layer_for_fvu is not None:
+                    partial_forward_to_layer(
+                        self.model, x, self._max_layer_for_fvu
+                    )
                 else:
-                    total_forward_time += forward_time_end - forward_time_start
-                    total_backward_time += backward_time_end - backward_time_start
+                    self.model(x)
+
+                # End timing
+                if device.type in ("cuda", "npu"):
+                    forward_end.record()
+                    synchronize()
+                    total_forward_time += (
+                        forward_start.elapsed_time(forward_end) / 1000.0
+                    )
+                else:
+                    total_forward_time += (
+                        time.perf_counter() - forward_time_start
+                    )
                 timing_step_count += 1
+
+                avg_losses = dict(avg_fvu)
 
             finally:
                 for handle in handles:
@@ -1086,7 +469,7 @@ class Trainer:
             # Check if we need to actually do a training step
             step, substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
             if substep == 0:
-                if self.cfg.sae.normalize_decoder and self.cfg.hook_mode != "transcode":
+                if self.cfg.sae.normalize_decoder:
                     for sae in self.saes.values():
                         sae.remove_gradient_parallel_to_decoder_directions()
 
@@ -1094,45 +477,37 @@ class Trainer:
                     optimizer.step()
                     optimizer.zero_grad()
 
-                for scheduler in self.lr_schedulers:
-                    scheduler.step()
-
-                k = self.get_current_k()
-                for name, sae in self.saes.items():
-                    if hasattr(sae, 'set_k'):
-                        sae.set_k(k)  # TiledSparseCoder: propagate to all tiles
-                    else:
-                        sae.cfg.k = k
-
-                ###############
                 with torch.no_grad():
                     # Update the dead feature mask
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
 
-                    # Accumulate total tokens for wandb x-axis
-                    # In DDP mode, we need to sum across all ranks since each rank processes different data
-                    if dist.is_initialized() and not self.cfg.distribute_modules:
-                        # Sum tokens across all ranks
-                        num_tokens_tensor = torch.tensor(num_tokens_in_step, device=device, dtype=torch.long)
-                        dist.all_reduce(num_tokens_tensor, op=dist.ReduceOp.SUM)
+                    # Accumulate total tokens
+                    if dist.is_initialized():
+                        num_tokens_tensor = torch.tensor(
+                            num_tokens_in_step, device=device, dtype=torch.long
+                        )
+                        dist.all_reduce(
+                            num_tokens_tensor, op=dist.ReduceOp.SUM
+                        )
                         self.total_tokens += num_tokens_tensor.item()
                     else:
-                        # Single GPU or distribute_modules mode (each rank already sees all data)
                         self.total_tokens += num_tokens_in_step
 
                     # Check if we've reached the target token count
-                    if self.cfg.max_tokens and self.total_tokens >= self.cfg.max_tokens:
-                        if not dist.is_initialized() or dist.get_rank() == 0:
-                            print(f"\n✓ Reached target token count: {self.total_tokens:,} / {self.cfg.max_tokens:,}")
-                        # Save checkpoint before stopping
+                    if (
+                        self.cfg.max_tokens
+                        and self.total_tokens >= self.cfg.max_tokens
+                    ):
+                        if rank_zero:
+                            logger.info(
+                                f"Reached target token count: "
+                                f"{self.total_tokens:,} / {self.cfg.max_tokens:,}"
+                            )
                         self.save()
-
-                        # Clean up distributed process group
                         if dist.is_initialized():
                             dist.destroy_process_group()
-
                         return
 
                     # Reset stats for this step
@@ -1142,99 +517,66 @@ class Trainer:
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
-
                     if self.cfg.save_best:
                         self.save_best(avg_losses)
 
-                if (
-                    self.cfg.log_to_wandb
-                    and (step + 1) % self.cfg.wandb_log_frequency == 0
-                ):
-                    info = {}
-                    if self.cfg.loss_fn == "ce":
-                        info["ce_loss"] = avg_ce
-                    elif self.cfg.loss_fn == "kl":
-                        info["kl_loss"] = avg_kl
+                if (step + 1) % self.cfg.wandb_log_frequency == 0:
+                    if self.cfg.log_to_wandb:
+                        info = {}
 
-                    # Timing metrics (averaged across all ranks in DDP mode)
-                    if timing_step_count > 0:
-                        avg_forward_time = total_forward_time / timing_step_count
-                        avg_backward_time = total_backward_time / timing_step_count
-
-                        # All-reduce timing metrics across ranks
-                        forward_time_tensor = torch.tensor(avg_forward_time, device=device)
-                        backward_time_tensor = torch.tensor(avg_backward_time, device=device)
-
-                        info["timing/forward_time"] = float(
-                            self.maybe_all_reduce(forward_time_tensor)
-                        )
-                        info["timing/backward_time"] = float(
-                            self.maybe_all_reduce(backward_time_tensor)
-                        )
-
-                        if total_metrics_time > 0:
-                            avg_metrics_time = total_metrics_time / timing_step_count
-                            metrics_time_tensor = torch.tensor(avg_metrics_time, device=device)
-                            info["timing/metrics_time"] = float(
-                                self.maybe_all_reduce(metrics_time_tensor)
+                        # Timing metrics
+                        if timing_step_count > 0:
+                            avg_forward_time = (
+                                total_forward_time / timing_step_count
+                            )
+                            forward_time_tensor = torch.tensor(
+                                avg_forward_time, device=device
+                            )
+                            info["timing/forward_time"] = float(
+                                self.maybe_all_reduce(forward_time_tensor)
                             )
 
-                    for name in self.saes:
-                        mask = (
-                            self.num_tokens_since_fired[name]
-                            > self.cfg.dead_feature_threshold
-                        )
+                            if total_metrics_time > 0:
+                                avg_metrics_time = (
+                                    total_metrics_time / timing_step_count
+                                )
+                                metrics_time_tensor = torch.tensor(
+                                    avg_metrics_time, device=device
+                                )
+                                info["timing/metrics_time"] = float(
+                                    self.maybe_all_reduce(metrics_time_tensor)
+                                )
 
-                        ratio = mask.mean(dtype=torch.float32).item()
-                        info.update({f"{name}/dead_pct": ratio})
-                        if self.cfg.loss_fn == "fvu":
+                        for name in self.saes:
+                            mask = (
+                                self.num_tokens_since_fired[name]
+                                > self.cfg.dead_feature_threshold
+                            )
+                            info[f"{name}/dead_pct"] = mask.mean(
+                                dtype=torch.float32
+                            ).item()
                             info[f"{name}/fvu"] = avg_fvu[name]
 
-                        if self.cfg.auxk_alpha > 0:
-                            info[f"{name}/auxk"] = avg_auxk_loss[name]
-                        if self.cfg.sae.multi_topk:
-                            info[f"{name}/multi_topk_fvu"] = avg_multi_topk_fvu[name]
+                            if self.cfg.auxk_alpha > 0:
+                                info[f"{name}/auxk"] = avg_auxk_loss[name]
 
-                        if self.cfg.use_outlier_clip:
-                            hook_name = name.partition("/")[0]
-                            if hook_name in avg_outlier_ratio:
-                                info[f"{name}/outlier_ratio"] = avg_outlier_ratio[hook_name]
+                            # Exceed metrics
+                            if name in avg_exceed:
+                                for alpha, val in avg_exceed[name].items():
+                                    info[f"{name}/exceed_alpha_{alpha:.2f}"] = val
 
-                        # Exceed metrics
-                        if name in avg_exceed:
-                            for alpha, exceed_val in avg_exceed[name].items():
-                                info[f"{name}/exceed_alpha_{alpha:.2f}"] = exceed_val
+                        if rank_zero:
+                            info["_step"] = step
+                            if wandb is not None:
+                                wandb.log(info, step=self.total_tokens)
 
-                    if self.cfg.distribute_modules:
-                        outputs = [{} for _ in range(dist.get_world_size())]
-                        dist.gather_object(info, outputs if rank_zero else None)
-                        info.update({k: v for out in outputs for k, v in out.items()})
-
-                    if rank_zero:
-                        info["k"] = k
-                        info["_step"] = step  # Keep gradient step count for reference
-
-                        if self.cfg.use_outlier_clip and avg_outlier_ratio:
-                            avg_ratio = sum(avg_outlier_ratio.values()) / len(
-                                avg_outlier_ratio
-                            )
-                            pbar.set_postfix(outlier_ratio=f"{avg_ratio:.6f}")
-
-                        if wandb is not None:
-                            # Use total tokens as x-axis for fair comparison across configs
-                            wandb.log(info, step=self.total_tokens)
-
-                avg_auxk_loss.clear()
-                avg_fvu.clear()
-                avg_multi_topk_fvu.clear()
-                avg_outlier_ratio.clear()
-                avg_exceed.clear()  # NEW
-                avg_ce = 0.0
-                avg_kl = 0.0
-                total_forward_time = 0.0  # NEW
-                total_backward_time = 0.0  # NEW
-                total_metrics_time = 0.0  # NEW
-                timing_step_count = 0  # NEW
+                    # Reset accumulators unconditionally
+                    avg_auxk_loss.clear()
+                    avg_fvu.clear()
+                    avg_exceed.clear()
+                    total_forward_time = 0.0
+                    total_metrics_time = 0.0
+                    timing_step_count = 0
 
             self.global_step += 1
             pbar.update()
@@ -1245,24 +587,19 @@ class Trainer:
 
         pbar.close()
 
-    def local_hookpoints(self) -> list[str]:
-        return (
-            self.module_plan[dist.get_rank()]
-            if self.module_plan
-            else self.cfg.hookpoints
-        )
-
     def maybe_all_cat(self, x: Tensor) -> Tensor:
         """Concatenate a tensor across all processes."""
-        if not dist.is_initialized() or self.cfg.distribute_modules:
+        if not dist.is_initialized():
             return x
 
-        buffer = x.new_empty([dist.get_world_size() * x.shape[0], *x.shape[1:]])
+        buffer = x.new_empty(
+            [dist.get_world_size() * x.shape[0], *x.shape[1:]]
+        )
         dist.all_gather_into_tensor(buffer, x)
         return buffer
 
     def maybe_all_reduce(self, x: Tensor, op: str = "mean") -> Tensor:
-        if not dist.is_initialized() or self.cfg.distribute_modules:
+        if not dist.is_initialized():
             return x
 
         if op == "sum":
@@ -1276,163 +613,6 @@ class Trainer:
             raise ValueError(f"Unknown reduction op '{op}'")
 
         return x
-
-    def distribute_modules(self):
-        """Prepare a plan for distributing modules across ranks."""
-        if not self.cfg.distribute_modules:
-            self.module_plan = []
-            print(f"Training on modules: {self.cfg.hookpoints}")
-            return
-
-        layers_per_rank, rem = divmod(len(self.cfg.hookpoints), dist.get_world_size())
-        assert rem == 0, "Number of modules must be divisible by world size"
-
-        # Each rank gets a subset of the layers
-        self.module_plan = [
-            self.cfg.hookpoints[start : start + layers_per_rank]
-            for start in range(0, len(self.cfg.hookpoints), layers_per_rank)
-        ]
-        for rank, modules in enumerate(self.module_plan):
-            print(f"Rank {rank} modules: {modules}")
-
-    def _checkpoint(self, saes: dict[str, SparseCoder], path: str, rank_zero: bool, save_training_state: bool = True):
-        """Save SAEs and training state to disk.
-
-        Args:
-            saes: Dictionary of SAE models to save
-            path: Path to save checkpoint
-            rank_zero: Whether this is rank 0
-            save_training_state: Whether to save optimizer/scheduler/global state (default True)
-        """
-        print("Saving checkpoint")
-
-        for optimizer in self.optimizers:
-            if isinstance(optimizer, ScheduleFreeWrapper):
-                optimizer.eval()
-
-        for name, sae in saes.items():
-            # Support both SparseCoder and LowRankSparseCoder
-            assert hasattr(sae, "save_to_disk"), f"SAE {name} does not have save_to_disk method"
-
-            sae.save_to_disk(f"{path}/{name}")
-
-        if save_training_state:
-            if rank_zero:
-                for i, scheduler in enumerate(self.lr_schedulers):
-                    torch.save(scheduler.state_dict(), f"{path}/lr_scheduler_{i}.pt")
-
-                for i, optimizer in enumerate(self.optimizers):
-                    torch.save(optimizer.state_dict(), f"{path}/optimizer_{i}.pt")
-
-                torch.save(
-                    {
-                        "global_step": self.global_step,
-                        "total_tokens": self.total_tokens,
-                    },
-                    f"{path}/state.pt",
-                )
-
-                self.cfg.save_json(f"{path}/config.json")
-
-                # Save Hadamard rotation states if enabled
-                if self.cfg.use_hadamard and self.hadamard_rotations:
-                    hadamard_states = {
-                        name: rot.state_dict()
-                        for name, rot in self.hadamard_rotations.items()
-                    }
-                    torch.save(hadamard_states, f"{path}/hadamard_rotations.pt")
-
-                # Save outlier clipper states if enabled
-                if self.cfg.use_outlier_clip and self.outlier_clippers:
-                    clipper_states = {
-                        name: clipper.state_dict()
-                        for name, clipper in self.outlier_clippers.items()
-                    }
-                    torch.save(clipper_states, f"{path}/outlier_clippers.pt")
-
-            rank = 0 if rank_zero else dist.get_rank()
-            torch.save(
-                {
-                    "num_tokens_since_fired": self.num_tokens_since_fired,
-                    "best_loss": self.best_loss,
-                },
-                f"{path}/rank_{rank}_state.pt",
-            )
-
-        for optimizer in self.optimizers:
-            if isinstance(optimizer, ScheduleFreeWrapper):
-                optimizer.train()
-
-    def save(self):
-        """Save the SAEs and training state to disk."""
-        path = f'{self.cfg.save_dir}/{self.full_run_name}'
-
-        rank_zero = not dist.is_initialized() or dist.get_rank() == 0
-
-        if rank_zero or self.cfg.distribute_modules:
-            self._checkpoint(self.saes, path, rank_zero)
-
-        # Barrier to ensure all ranks have saved before continuing
-        if dist.is_initialized():
-            dist.barrier()
-
-    def save_best(self, avg_loss: float | dict[str, float]):
-        """Save individual sparse coders to disk if they have the lowest loss."""
-        base_path = f'{self.cfg.save_dir}/{self.full_run_name}/best'
-        rank_zero = not dist.is_initialized() or dist.get_rank() == 0
-
-        if isinstance(avg_loss, dict):
-            any_improved = False
-            for name in self.saes:
-                if avg_loss[name] < self.best_loss[name]:  # type: ignore
-                    self.best_loss[name] = avg_loss[name]  # type: ignore
-                    any_improved = True
-
-                    if rank_zero or self.cfg.distribute_modules:
-                        # Save only SAE weights per layer, not training state
-                        self._checkpoint(
-                            {name: self.saes[name]}, base_path, rank_zero, save_training_state=False
-                        )
-
-            # Save training state once at the base path if any layer improved
-            if any_improved and rank_zero:
-                import os
-                os.makedirs(base_path, exist_ok=True)
-
-                for i, scheduler in enumerate(self.lr_schedulers):
-                    torch.save(scheduler.state_dict(), f"{base_path}/lr_scheduler_{i}.pt")
-
-                for i, optimizer in enumerate(self.optimizers):
-                    torch.save(optimizer.state_dict(), f"{base_path}/optimizer_{i}.pt")
-
-                torch.save(
-                    {
-                        "global_step": self.global_step,
-                        "total_tokens": self.total_tokens,
-                    },
-                    f"{base_path}/state.pt",
-                )
-
-                self.cfg.save_json(f"{base_path}/config.json")
-
-                rank = 0 if rank_zero else dist.get_rank()
-                torch.save(
-                    {
-                        "num_tokens_since_fired": self.num_tokens_since_fired,
-                        "best_loss": self.best_loss,
-                    },
-                    f"{base_path}/rank_{rank}_state.pt",
-                )
-        else:
-            if avg_loss < self.best_loss:  # type: ignore
-                self.best_loss = avg_loss  # type: ignore
-
-                if rank_zero or self.cfg.distribute_modules:
-                    self._checkpoint(self.saes, base_path, rank_zero)
-
-        # Barrier to ensure all ranks have saved before continuing
-        if dist.is_initialized():
-            dist.barrier()
 
 
 # Support old name for compatibility

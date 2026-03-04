@@ -43,7 +43,7 @@ def test_fused_encoder():
     start = monotonic()
 
     # Forward pass
-    values, indices, _ = fused_encoder(x, W, b, k, "topk")
+    values, indices, _ = fused_encoder(x, W, b, k)
 
     # Dummy loss (sum of top-k values)
     loss = values.sum()

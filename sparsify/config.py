@@ -1,20 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from simple_parsing import Serializable, list_field
-
-OutlierLossMode = Literal["weighted", "inlier_only"]
 
 
 @dataclass
 class SparseCoderConfig(Serializable):
-    """
-    Configuration for training a sparse coder on a language model.
-    """
-
-    activation: Literal["groupmax", "topk"] = "topk"
-    """Activation function to use."""
+    """Configuration for a sparse coder (SAE) architecture."""
 
     expansion_factor: int = 32
     """Multiple of the input dimension to use as the sparse coder dimension."""
@@ -27,15 +19,6 @@ class SparseCoderConfig(Serializable):
 
     k: int = 32
     """Number of nonzero features."""
-
-    multi_topk: bool = False
-    """Use Multi-TopK loss."""
-
-    skip_connection: bool = False
-    """Include a linear skip connection."""
-
-    encoder_rank: int = 0
-    """Low-rank encoder rank. 0 means full-rank (default)."""
 
 
 # Support different naming conventions for the same configuration
@@ -58,27 +41,8 @@ class TrainConfig(Serializable):
     max_tokens: int | None = None
     """Maximum number of tokens to train on. Training stops when this limit is reached."""
 
-    loss_fn: Literal["ce", "fvu", "kl"] = "fvu"
-    """Loss function to use for training the sparse coders.
-
-    - `ce`: Cross-entropy loss of the final model logits.
-    - `fvu`: Fraction of variance explained.
-    - `kl`: KL divergence of the final model logits w.r.t. the original logits.
-    """
-
-    optimizer: Literal["adam", "muon", "signum"] = "signum"
-    """Optimizer to use."""
-
     lr: float | None = None
     """Base LR. If None, it is automatically chosen based on the number of latents."""
-
-    lr_warmup_steps: int = 1000
-    """Number of steps over which to warm up the learning rate. Only used if
-    `optimizer` is `adam`."""
-
-    k_decay_steps: int = 0
-    """Number of steps over which to decay the number of active latents. Starts at
-    input width * 10 and decays to k. Experimental feature."""
 
     auxk_alpha: float = 0.0
     """Weight of the auxiliary loss term."""
@@ -86,24 +50,16 @@ class TrainConfig(Serializable):
     dead_feature_threshold: int = 10_000_000
     """Number of tokens after which a feature is considered dead."""
 
-    exclude_tokens: list[int] = list_field()
-    """List of tokens to ignore during sparse coders training."""
-
+    # Exceed evaluation metrics
     exceed_alphas: list[float] = list_field(0.05, 0.10, 0.25, 0.50)
     """List of alpha coefficients for exceed metrics (error > alpha * elbow_value)."""
 
     elbow_threshold_path: str | None = None
     """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
 
+    # Hookpoint selection
     hookpoints: list[str] = list_field()
     """List of hookpoints to train sparse coders on."""
-
-    hook_mode: Literal["output", "input", "transcode"] = "output"
-    """Activation hook mode:
-    - output: autoencoder on module outputs (default)
-    - input: autoencoder on module inputs
-    - transcode: predict module outputs from inputs
-    """
 
     init_seeds: list[int] = list_field(0)
     """List of random seeds to use for initialization. If more than one, train a sparse
@@ -115,81 +71,40 @@ class TrainConfig(Serializable):
     layer_stride: int = 1
     """Stride between layers to train sparse coders on."""
 
-    distribute_modules: bool = False
-    """Store one copy of each sparse coder, instead of copying them across devices."""
-
+    # Tiling
     num_tiles: int = 1
     """Number of tiles to split input activations. Each tile trains a separate SAE.
     d_in must be divisible by num_tiles. Set to 1 (default) for standard training."""
 
     global_topk: bool = False
     """Use global top-k selection across all tiles instead of per-tile top-k.
-    When enabled, all tiles compete for the same k activation budget, allowing
-    more important tiles to use more capacity. Only effective when num_tiles > 1."""
+    Only effective when num_tiles > 1."""
 
     input_mixing: bool = False
     """Apply learnable T×T mixing matrix on tile dimension before encoding.
-    This allows the model to learn a better coordinate system for tiling.
     Only effective when num_tiles > 1."""
 
-    # Hadamard rotation settings
+    # Hadamard rotation
     use_hadamard: bool = False
-    """Apply block-diagonal Hadamard rotation to activations before SAE.
-    This can help distribute outlier energy across dimensions, potentially
-    improving reconstruction quality."""
+    """Apply block-diagonal Hadamard rotation to activations before SAE."""
 
     hadamard_block_size: int = 128
-    """Block size for Hadamard transform (must be power of 2).
-    Common choices: 64, 128, 256. Smaller blocks are faster but less effective."""
+    """Block size for Hadamard transform (must be power of 2)."""
 
     hadamard_seed: int = 0
     """Random seed for Hadamard permutation."""
 
     hadamard_use_perm: bool = True
-    """Whether to use random permutation before Hadamard transform.
-    Recommended to keep True for better outlier distribution."""
+    """Whether to use random permutation before Hadamard transform."""
 
-    # Outlier clipping settings
-    use_outlier_clip: bool = False
-    """Apply outlier clipping to activations before SAE.
-    Separates outlier dimensions from SAE training, letting SAE focus on main distribution."""
-
-    outlier_k: float = 3.0
-    """Threshold multiplier: threshold_d = k * RMS_d"""
-
-    outlier_ema_alpha: float = 0.01
-    """EMA decay factor for online RMS estimation."""
-
-    outlier_warmup_steps: int = 100
-    """Number of warmup steps with larger alpha for faster EMA convergence."""
-
-    outlier_loss_mode: OutlierLossMode = "weighted"
-    """Loss computation mode:
-    - weighted: Outlier dims have weight 0 in loss. SAE output on outlier dims is unconstrained.
-    - inlier_only: Standard FVU on x_inlier. SAE output on outlier dims (target=0) is still
-      penalized, implicitly encouraging the SAE to output near-zero on those dims.
-    """
-
+    # Saving & logging
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
 
     save_best: bool = False
     """Save the best checkpoint found for each hookpoint."""
 
-    finetune: str | None = None
-    """Finetune the sparse coders from a pretrained checkpoint."""
-
-    distill_from: str | None = None
-    """Path to teacher SAE checkpoint for distillation training."""
-
-    distill_lambda_decode: float = 0.5
-    """Weight for decode distillation loss."""
-
-    distill_lambda_acts: float = 0.1
-    """Weight for top-k activation distillation loss."""
-
-    freeze_decoder: bool = True
-    """Freeze decoder during distillation (use teacher's decoder)."""
+    save_dir: str = "checkpoints"
 
     log_to_wandb: bool = True
     run_name: str | None = None
@@ -197,70 +112,27 @@ class TrainConfig(Serializable):
     """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
     wandb_log_frequency: int = 1
 
-    save_dir: str = "checkpoints"
+    # Lifecycle
+    finetune: str | None = None
+    """Finetune the sparse coders from a pretrained checkpoint."""
 
     def __post_init__(self):
         """Validate the configuration."""
         if self.layers and self.layer_stride != 1:
             raise ValueError("Cannot specify both `layers` and `layer_stride`.")
 
-        if self.distribute_modules and self.loss_fn in ("ce", "kl"):
-            raise ValueError(
-                "Distributing modules across ranks is not compatible with the "
-                "cross-entropy or KL divergence losses."
-            )
-
         if not self.init_seeds:
             raise ValueError("Must specify at least one random seed.")
 
-        # Validate exceed configuration
         if self.exceed_alphas and not all(alpha > 0 for alpha in self.exceed_alphas):
             raise ValueError("All exceed_alphas must be positive.")
 
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
 
-        # Validate distillation configuration
-        if self.distill_from and self.sae.encoder_rank <= 0:
-            raise ValueError(
-                "distill_from requires encoder_rank > 0 in sae config."
-            )
-
-        # Validate tiling configuration
-        if self.num_tiles > 1 and self.hook_mode == "transcode":
-            raise ValueError("Tiled training does not support transcode mode.")
-
-        if self.num_tiles > 1 and self.distill_from:
-            raise ValueError(
-                "Tiled training (num_tiles > 1) does not support distillation mode. "
-                "Use num_tiles=1 for distillation training."
-            )
-
-        # Validate Hadamard configuration
         if self.use_hadamard:
             bs = self.hadamard_block_size
             if bs <= 0 or (bs & (bs - 1)) != 0:
                 raise ValueError(
                     f"hadamard_block_size must be a positive power of 2, got {bs}"
                 )
-            if self.loss_fn in ("ce", "kl"):
-                raise ValueError(
-                    "Hadamard rotation is not supported with ce/kl loss. "
-                    "Use loss_fn='fvu' with use_hadamard=True."
-                )
-
-        # Validate outlier clipping configuration
-        if self.use_outlier_clip:
-            if self.outlier_k <= 0:
-                raise ValueError(f"outlier_k must be positive, got {self.outlier_k}")
-            if self.use_hadamard:
-                raise ValueError(
-                    "use_outlier_clip and use_hadamard are mutually exclusive. "
-                    "Choose one preprocessing method."
-                )
-            if self.loss_fn in ("ce", "kl"):
-                raise ValueError(
-                    "Outlier clipping is not supported with ce/kl loss. "
-                    "Use loss_fn='fvu' with use_outlier_clip=True."
-                )
-

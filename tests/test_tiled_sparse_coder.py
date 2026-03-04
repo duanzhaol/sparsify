@@ -154,36 +154,6 @@ class TestTiledSparseCoder:
             norms = torch.norm(sae.W_dec.data, dim=1)
             assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
 
-    def test_set_k(self, cfg):
-        """Test set_k propagates to all tiles."""
-        d_in = 64
-        num_tiles = 4
-        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu")
-
-        # Initial k per tile
-        assert tiled.cfg.k == 4
-        assert tiled.k_per_tile == 1
-        for sae in tiled.saes:
-            assert sae.cfg.k == 1
-
-        # Update k (must be divisible by num_tiles)
-        new_k = 8
-        tiled.set_k(new_k)
-
-        assert tiled.cfg.k == new_k
-        assert tiled.k_per_tile == new_k // num_tiles
-        for sae in tiled.saes:
-            assert sae.cfg.k == new_k // num_tiles
-
-    def test_set_k_invalid(self, cfg):
-        """Test set_k with non-divisible k raises error."""
-        d_in = 64
-        num_tiles = 4
-        tiled = TiledSparseCoder(d_in, cfg, num_tiles, device="cpu")
-
-        with pytest.raises(AssertionError):
-            tiled.set_k(5)  # 5 not divisible by 4
-
     @requires_accelerator
     def test_gradient_flow(self, cfg, device):
         """Test that gradients flow through all tiles."""
@@ -255,7 +225,7 @@ class TestLoadCheckpointValidation:
     def test_load_tiled_checkpoint_with_regular_sae_fails(self, cfg):
         """Test that loading tiled checkpoint into regular SAE fails."""
         from sparsify.sparse_coder import SparseCoder
-        from sparsify.trainer import load_sae_checkpoint
+        from sparsify.checkpoint import load_sae_checkpoint
 
         d_in = 64
         num_tiles = 4
@@ -274,7 +244,7 @@ class TestLoadCheckpointValidation:
     def test_load_regular_checkpoint_with_tiled_sae_fails(self, cfg):
         """Test that loading regular checkpoint into tiled SAE fails."""
         from sparsify.sparse_coder import SparseCoder
-        from sparsify.trainer import load_sae_checkpoint
+        from sparsify.checkpoint import load_sae_checkpoint
 
         d_in = 64
         num_tiles = 4
@@ -292,7 +262,7 @@ class TestLoadCheckpointValidation:
 
     def test_load_tiled_checkpoint_with_mismatched_tiles_fails(self, cfg):
         """Test that loading tiled checkpoint with different num_tiles fails."""
-        from sparsify.trainer import load_sae_checkpoint
+        from sparsify.checkpoint import load_sae_checkpoint
 
         d_in = 64
 
@@ -307,32 +277,6 @@ class TestLoadCheckpointValidation:
             tiled_2 = TiledSparseCoder(d_in, cfg_2tiles, num_tiles=2, device="cpu")
             with pytest.raises(ValueError, match="num_tiles must match"):
                 load_sae_checkpoint(tiled_2, tmpdir, device="cpu")
-
-
-class TestConfigValidation:
-    """Test configuration validation for tiled training."""
-
-    def test_tiled_with_distillation_fails(self):
-        """Test that num_tiles > 1 with distill_from raises error."""
-        from sparsify.config import TrainConfig
-
-        with pytest.raises(ValueError, match="does not support distillation"):
-            TrainConfig(
-                sae=SparseCoderConfig(expansion_factor=4, k=4, encoder_rank=64),
-                num_tiles=4,
-                distill_from="/some/path",
-            )
-
-    def test_tiled_with_transcode_fails(self):
-        """Test that num_tiles > 1 with transcode mode raises error."""
-        from sparsify.config import TrainConfig
-
-        with pytest.raises(ValueError, match="does not support transcode"):
-            TrainConfig(
-                sae=SparseCoderConfig(expansion_factor=4, k=4),
-                num_tiles=4,
-                hook_mode="transcode",
-            )
 
 
 class TestGlobalTopK:

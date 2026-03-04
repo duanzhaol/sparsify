@@ -1,4 +1,4 @@
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -17,9 +17,7 @@ class EncoderOutput(NamedTuple):
 
 class FusedEncoder(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, input, weight, bias, k: int, activation: Literal["groupmax", "topk"]
-    ):
+    def forward(ctx, input, weight, bias, k: int):
         """
         input:  (N, D)
         weight: (M, D)
@@ -29,20 +27,7 @@ class FusedEncoder(torch.autograd.Function):
         preacts = F.relu(F.linear(input, weight, bias))
 
         # Get top-k values and indices for each row
-        if activation == "topk":
-            values, indices = torch.topk(preacts, k, dim=-1, sorted=False)
-        elif activation == "groupmax":
-            values, indices = preacts.unflatten(-1, (k, -1)).max(dim=-1)
-
-            # torch.max gives us indices into each group, but we want indices into the
-            # flattened tensor. Add the offsets to get the correct indices.
-            num_latents = preacts.shape[1]
-            offsets = torch.arange(
-                0, num_latents, num_latents // k, device=preacts.device
-            )
-            indices = offsets + indices
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
+        values, indices = torch.topk(preacts, k, dim=-1, sorted=False)
 
         # Save tensors needed for the backward pass
         ctx.save_for_backward(input, weight, bias, indices)
@@ -92,7 +77,7 @@ class FusedEncoder(torch.autograd.Function):
             )
 
         # The k parameter is an int, so return None for its gradient.
-        return grad_input, grad_weight, grad_bias, None, None
+        return grad_input, grad_weight, grad_bias, None
 
 
 def fused_encoder(
@@ -100,12 +85,11 @@ def fused_encoder(
     weight,
     bias,
     k: int,
-    activation: Literal["groupmax", "topk"],
 ) -> EncoderOutput:
     """
-    Convenience wrapper that performs an nn.Linear followed by `activation` with
+    Convenience wrapper that performs an nn.Linear followed by top-k with
     a backward pass optimized using index_add.
     """
     return EncoderOutput(
-        *FusedEncoder.apply(input, weight, bias, k, activation)  # type: ignore
+        *FusedEncoder.apply(input, weight, bias, k)  # type: ignore
     )
