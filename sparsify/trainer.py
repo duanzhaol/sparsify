@@ -183,24 +183,46 @@ class Trainer(CheckpointMixin):
             )
 
         wandb = None
-        if self.cfg.log_to_wandb and rank_zero:
+        if self.cfg.log_to_wandb:
             try:
-                import wandb
+                import wandb as _wandb
+            except ImportError:
+                _wandb = None
 
-                project_name = (
-                    self.cfg.wandb_project
-                    or os.environ.get("WANDB_PROJECT", "sparsify")
-                )
-                wandb.init(
-                    entity=os.environ.get("WANDB_ENTITY", None),
-                    name=self.full_run_name,
-                    project=project_name,
-                    config=asdict(self.cfg),
-                    save_code=True,
-                )
-            except (AttributeError, ImportError):
-                logger.warning("Weights & Biases not available, skipping logging.")
+            if _wandb is None:
                 self.cfg.log_to_wandb = False
+                if rank_zero:
+                    logger.warning(
+                        "Weights & Biases not installed, skipping logging."
+                    )
+            elif rank_zero:
+                try:
+                    project_name = (
+                        self.cfg.wandb_project
+                        or os.environ.get("WANDB_PROJECT", "sparsify")
+                    )
+                    _wandb.init(
+                        entity=os.environ.get("WANDB_ENTITY", None),
+                        name=self.full_run_name,
+                        project=project_name,
+                        config=asdict(self.cfg),
+                        save_code=True,
+                    )
+                    wandb = _wandb
+                except Exception:
+                    logger.warning(
+                        "wandb.init() failed, skipping logging."
+                    )
+                    self.cfg.log_to_wandb = False
+
+            # Sync log_to_wandb across ranks so all_reduce calls stay consistent
+            if ddp:
+                flag = torch.tensor(
+                    [self.cfg.log_to_wandb], dtype=torch.int32,
+                    device=self.model.device,
+                )
+                dist.broadcast(flag, src=0)
+                self.cfg.log_to_wandb = bool(flag.item())
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
@@ -552,9 +574,7 @@ class Trainer(CheckpointMixin):
                                 self.num_tokens_since_fired[name]
                                 > self.cfg.dead_feature_threshold
                             )
-                            info[f"{name}/dead_pct"] = mask.mean(
-                                dtype=torch.float32
-                            ).item()
+                            info[f"{name}/dead_pct"] = mask.float().mean().item()
                             info[f"{name}/fvu"] = avg_fvu[name]
 
                             if self.cfg.auxk_alpha > 0:

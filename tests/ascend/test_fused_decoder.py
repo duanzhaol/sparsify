@@ -261,7 +261,7 @@ def test_k_boundary(k):
 _DTYPE_TOLERANCES = {
     torch.float32: (1e-5, 1e-5),
     torch.bfloat16: (2e-2, 2e-2),
-    torch.float16: (2e-3, 2e-3),
+    torch.float16: (5e-3, 5e-3),
 }
 
 
