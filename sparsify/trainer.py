@@ -2,6 +2,7 @@ import os
 import json
 import re
 import time
+from contextlib import nullcontext
 from collections import defaultdict
 from dataclasses import asdict
 from fnmatch import fnmatchcase
@@ -602,6 +603,8 @@ class Trainer:
         }
 
         tokens_mask: torch.Tensor
+        sync_gradients = True
+        should_time = False
 
         acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
         denom = acc_steps * self.cfg.wandb_log_frequency
@@ -669,8 +672,49 @@ class Trainer:
             hook = sae_key.partition("/")[0]
             hook_to_sae_keys[hook].append(sae_key)
 
+        def reduce_scalar_mapping(values: dict[str, float]) -> dict[str, float]:
+            if not values:
+                return {}
+            if not dist.is_initialized() or self.cfg.distribute_modules:
+                return dict(values)
+
+            keys = sorted(values)
+            tensor = torch.tensor([values[key] for key in keys], device=device)
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+            return dict(zip(keys, tensor.tolist(), strict=True))
+
+        def reduce_nested_scalar_mapping(
+            values: dict[str, dict[float, float]]
+        ) -> dict[str, dict[float, float]]:
+            if not values:
+                return {}
+            if not dist.is_initialized() or self.cfg.distribute_modules:
+                return {
+                    outer_key: dict(inner)
+                    for outer_key, inner in values.items()
+                }
+
+            flat_keys = [
+                (outer_key, alpha)
+                for outer_key in sorted(values)
+                for alpha in sorted(values[outer_key])
+            ]
+            tensor = torch.tensor(
+                [values[outer_key][alpha] for outer_key, alpha in flat_keys],
+                device=device,
+            )
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+
+            reduced: dict[str, dict[float, float]] = defaultdict(dict)
+            for (outer_key, alpha), value in zip(flat_keys, tensor.tolist(), strict=True):
+                reduced[outer_key][alpha] = value
+            return dict(reduced)
+
         def hook(module: nn.Module, inputs, outputs):
             nonlocal total_forward_time, total_backward_time, total_metrics_time, timing_step_count
+            nonlocal sync_gradients, should_time
             aux_out = None
 
             # Maybe unpack tuple inputs and outputs
@@ -776,9 +820,7 @@ class Trainer:
 
             if self.cfg.use_outlier_clip and outlier_mask is not None:
                 outlier_ratio = outlier_mask.mean()
-                avg_outlier_ratio[hook_name] += float(
-                    self.maybe_all_reduce(outlier_ratio.detach()) / denom
-                )
+                avg_outlier_ratio[hook_name] += float(outlier_ratio.detach() / denom)
 
             # Pre-compute unrotated target for exceed metrics (avoid repeated unrotate in loop)
             original_target_for_exceed = None
@@ -818,19 +860,24 @@ class Trainer:
                     raw.set_decoder_norm_to_unit_norm()
 
                 wrapped = maybe_wrapped[sae_key]
-                out = wrapped(
-                    x=inputs,
-                    y=outputs,
-                    dead_mask=(
-                        self.num_tokens_since_fired[sae_key] > self.cfg.dead_feature_threshold
-                        if self.cfg.auxk_alpha > 0
-                        else None
-                    ),
+                sync_context = (
+                    nullcontext()
+                    if sync_gradients or not isinstance(wrapped, DDP)
+                    else wrapped.no_sync()
                 )
+                with sync_context:
+                    out = wrapped(
+                        x=inputs,
+                        y=outputs,
+                        dead_mask=(
+                            self.num_tokens_since_fired[sae_key] > self.cfg.dead_feature_threshold
+                            if self.cfg.auxk_alpha > 0
+                            else None
+                        ),
+                    )
 
                 # Update the did_fire mask
                 did_fire[sae_key][out.latent_indices.flatten()] = True
-                self.maybe_all_reduce(did_fire[sae_key], "max")  # max is boolean "any"
 
                 if self.cfg.loss_fn in ("ce", "kl"):
                     # Replace the normal output with the SAE output
@@ -840,111 +887,85 @@ class Trainer:
                     return (output, *aux_out) if aux_out is not None else output
 
                 # Metrics that only make sense for local
-                avg_fvu[sae_key] += float(self.maybe_all_reduce(out.fvu.detach()) / denom)
+                avg_fvu[sae_key] += float(out.fvu.detach() / denom)
                 if self.cfg.auxk_alpha > 0:
-                    avg_auxk_loss[sae_key] += float(
-                        self.maybe_all_reduce(out.auxk_loss.detach()) / denom
-                    )
+                    avg_auxk_loss[sae_key] += float(out.auxk_loss.detach() / denom)
                 if self.cfg.sae.multi_topk:
                     avg_multi_topk_fvu[sae_key] += float(
-                        self.maybe_all_reduce(out.multi_topk_fvu.detach()) / denom
+                        out.multi_topk_fvu.detach() / denom
                     )
 
-                # Compute exceed metrics if elbow thresholds available
-                # Use hook_name (bare name) to look up thresholds, not sae_key
-                if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
-                    # Start metrics timing
-                    if device.type == "cuda":
-                        metrics_start.record()
-                    else:
-                        metrics_time_start = time.perf_counter()
+                    # Compute exceed metrics if elbow thresholds available
+                    # Use hook_name (bare name) to look up thresholds, not sae_key
+                    if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
+                        # Start metrics timing
+                        if should_time and device.type == "cuda":
+                            metrics_start.record()
+                        elif should_time:
+                            metrics_time_start = time.perf_counter()
 
-                    # CRITICAL: Compute in ORIGINAL space
-                    if self.cfg.use_outlier_clip and outlier_residual is not None:
-                        # Full reconstruction strategy depends on loss mode:
-                        # - weighted: SAE output on outlier dims is unconstrained, must zero out
-                        # - inlier_only: SAE is encouraged to output ~0 on outlier dims, keep it
+                        # CRITICAL: Compute in ORIGINAL space
+                        if self.cfg.use_outlier_clip and outlier_residual is not None:
+                            if self.cfg.outlier_loss_mode == "weighted":
+                                original_recon = out.sae_out * (1 - outlier_mask) + outlier_residual
+                            else:
+                                original_recon = out.sae_out + outlier_residual
+                            original_target = original_outputs
+                        elif self.cfg.use_hadamard and name in self.hadamard_rotations:
+                            original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
+                            original_recon = self.hadamard_rotations[name].unrotate(out.sae_out)
+                        else:
+                            original_target = outputs
+                            original_recon = out.sae_out
+
+                        error_magnitude = torch.abs(original_target - original_recon)
+                        elbow_value = self.elbow_thresholds[hook_name]
+                        num_elements = error_magnitude.numel()
+                        for alpha in self.cfg.exceed_alphas:
+                            threshold = alpha * elbow_value
+                            exceed_count = (error_magnitude > threshold).sum().float()
+                            exceed_ratio = exceed_count / num_elements
+                            avg_exceed[sae_key][alpha] += float(exceed_ratio.detach() / denom)
+
+                        if should_time and device.type == "cuda":
+                            metrics_end.record()
+                            metrics_end.synchronize()
+                            total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
+                        elif should_time:
+                            metrics_time_end = time.perf_counter()
+                            total_metrics_time += metrics_time_end - metrics_time_start
+
+                    # Do a "local" backward pass if we're not training end-to-end
+                    if self.cfg.use_outlier_clip and outlier_mask is not None:
                         if self.cfg.outlier_loss_mode == "weighted":
-                            original_recon = out.sae_out * (1 - outlier_mask) + outlier_residual
-                        else:  # inlier_only
-                            original_recon = out.sae_out + outlier_residual
-                        # Original target = inlier + residual = original_outputs
-                        original_target = original_outputs
-                    elif self.cfg.use_hadamard and name in self.hadamard_rotations:
-                        # Use pre-computed unrotated target
-                        original_target = original_target_for_exceed if original_target_for_exceed is not None else outputs
-                        original_recon = self.hadamard_rotations[name].unrotate(out.sae_out)
+                            error_sq = (out.sae_out - outputs) ** 2
+                            weight = 1 - outlier_mask
+                            weighted_mse = (error_sq * weight).sum() / (weight.sum() + 1e-8)
+                            inlier_mean = (outputs * weight).sum(dim=0) / (weight.sum(dim=0) + 1e-8)
+                            inlier_var = (((outputs - inlier_mean) ** 2) * weight).sum() / (weight.sum() + 1e-8)
+                            fvu_loss = weighted_mse / (inlier_var + 1e-8)
+                        else:
+                            fvu_loss = out.fvu
+                        loss = fvu_loss + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
                     else:
-                        original_target = outputs
-                        original_recon = out.sae_out
-
-                    # Compute absolute reconstruction error
-                    error_magnitude = torch.abs(original_target - original_recon)
-
-                    # Get elbow threshold for this hookpoint (use bare hook name)
-                    elbow_value = self.elbow_thresholds[hook_name]
-
-                    # Count exceedances for each alpha
-                    num_elements = error_magnitude.numel()
-                    for alpha in self.cfg.exceed_alphas:
-                        threshold = alpha * elbow_value
-                        exceed_count = (error_magnitude > threshold).sum().float()
-                        exceed_ratio = exceed_count / num_elements
-
-                        # Accumulate (average over steps)
-                        avg_exceed[sae_key][alpha] += float(
-                            self.maybe_all_reduce(exceed_ratio.detach()) / denom
+                        loss = (
+                            out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
                         )
 
-                    # End metrics timing
-                    if device.type == "cuda":
-                        metrics_end.record()
-                        torch.cuda.synchronize()
-                        total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
-                    else:
-                        metrics_time_end = time.perf_counter()
-                        total_metrics_time += metrics_time_end - metrics_time_start
+                    if hook_name in self.teachers:
+                        from lowrank_encoder import compute_distillation_loss
 
-                # Do a "local" backward pass if we're not training end-to-end
-                # Compute loss with outlier handling if enabled
-                if self.cfg.use_outlier_clip and outlier_mask is not None:
-                    if self.cfg.outlier_loss_mode == "weighted":
-                        # Weighted loss: outlier dims have weight 0
-                        error_sq = (out.sae_out - outputs) ** 2
-                        weight = 1 - outlier_mask
-                        # Compute weighted MSE
-                        weighted_mse = (error_sq * weight).sum() / (weight.sum() + 1e-8)
-                        # Compute per-dimension centered variance (consistent with original FVU)
-                        # Per-dim weighted mean: [d_in]
-                        inlier_mean = (outputs * weight).sum(dim=0) / (weight.sum(dim=0) + 1e-8)
-                        # Weighted variance using per-dim mean
-                        inlier_var = (((outputs - inlier_mean) ** 2) * weight).sum() / (weight.sum() + 1e-8)
-                        fvu_loss = weighted_mse / (inlier_var + 1e-8)
-                    else:  # inlier_only
-                        # Standard FVU on x_inlier. Note: this still penalizes SAE output on
-                        # outlier dims (encouraging them toward 0), unlike weighted mode.
-                        fvu_loss = out.fvu
-                    loss = fvu_loss + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-                else:
-                    loss = (
-                        out.fvu + self.cfg.auxk_alpha * out.auxk_loss + out.multi_topk_fvu / 8
-                    )
+                        distill_loss = compute_distillation_loss(
+                            student=raw,
+                            teacher=self.teachers[hook_name],
+                            inputs=inputs,
+                            student_output=out.sae_out,
+                            lambda_decode=self.cfg.distill_lambda_decode,
+                            lambda_acts=self.cfg.distill_lambda_acts,
+                        )
+                        loss = loss + distill_loss.total
 
-                # Distillation loss (if enabled)
-                if hook_name in self.teachers:
-                    from lowrank_encoder import compute_distillation_loss
-
-                    distill_loss = compute_distillation_loss(
-                        student=raw,
-                        teacher=self.teachers[hook_name],
-                        inputs=inputs,
-                        student_output=out.sae_out,
-                        lambda_decode=self.cfg.distill_lambda_decode,
-                        lambda_acts=self.cfg.distill_lambda_acts,
-                    )
-                    loss = loss + distill_loss.total
-
-                loss.div(acc_steps).backward()
+                    loss.div(acc_steps).backward()
 
         k = self.get_current_k()
         for name, sae in self.saes.items():
@@ -981,12 +1002,20 @@ class Trainer:
                 else None
             )
 
+            next_step, next_substep = divmod(self.global_step + 1, self.cfg.grad_acc_steps)
+            should_time = (
+                self.cfg.log_to_wandb
+                and next_substep == 0
+                and (next_step + 1) % self.cfg.wandb_log_frequency == 0
+            )
+
             # Start timing forward pass
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+            if should_time and device.type == "cuda":
                 forward_start.record()
-            else:
+            elif should_time:
                 forward_time_start = time.perf_counter()
+
+            sync_gradients = (self.global_step + 1) % self.cfg.grad_acc_steps == 0
 
             # Forward pass on the model to get the next batch of activations
             handles = [
@@ -998,21 +1027,19 @@ class Trainer:
                         ce = self.model(x, labels=x).loss
 
                         # End forward, start backward timing
-                        if device.type == "cuda":
+                        if should_time and device.type == "cuda":
                             forward_end.record()
-                            torch.cuda.synchronize()
                             backward_start.record()
-                        else:
+                        elif should_time:
                             forward_time_end = time.perf_counter()
                             backward_time_start = time.perf_counter()
 
                         ce.div(acc_steps).backward()
 
                         # End backward timing
-                        if device.type == "cuda":
+                        if should_time and device.type == "cuda":
                             backward_end.record()
-                            torch.cuda.synchronize()
-                        else:
+                        elif should_time:
                             backward_time_end = time.perf_counter()
 
                         avg_ce += float(self.maybe_all_reduce(ce.detach()) / denom)
@@ -1023,21 +1050,19 @@ class Trainer:
                         kl = -torch.sum(clean_probs * dirty_lps, dim=-1).mean()
 
                         # End forward, start backward timing
-                        if device.type == "cuda":
+                        if should_time and device.type == "cuda":
                             forward_end.record()
-                            torch.cuda.synchronize()
                             backward_start.record()
-                        else:
+                        elif should_time:
                             forward_time_end = time.perf_counter()
                             backward_time_start = time.perf_counter()
 
                         kl.div(acc_steps).backward()
 
                         # End backward timing
-                        if device.type == "cuda":
+                        if should_time and device.type == "cuda":
                             backward_end.record()
-                            torch.cuda.synchronize()
-                        else:
+                        elif should_time:
                             backward_time_end = time.perf_counter()
 
                         avg_kl += float(self.maybe_all_reduce(kl) / denom)
@@ -1051,14 +1076,13 @@ class Trainer:
                             self.model(x)  # Fallback to full forward
 
                         # For FVU, backward happens in hook, so end both timings here
-                        if device.type == "cuda":
+                        if should_time and device.type == "cuda":
                             forward_end.record()
                             # Record backward events even though there's no separate backward pass
                             # This ensures elapsed_time() calls don't fail
                             backward_start.record()
                             backward_end.record()
-                            torch.cuda.synchronize()
-                        else:
+                        elif should_time:
                             forward_time_end = time.perf_counter()
                             backward_time_start = forward_time_end
                             backward_time_end = forward_time_end
@@ -1069,13 +1093,15 @@ class Trainer:
                         raise ValueError(f"Unknown loss function '{other}'")
 
                 # Accumulate timing metrics
-                if device.type == "cuda":
+                if should_time and device.type == "cuda":
+                    backward_end.synchronize()
                     total_forward_time += forward_start.elapsed_time(forward_end) / 1000.0  # ms to s
                     total_backward_time += backward_start.elapsed_time(backward_end) / 1000.0
-                else:
+                elif should_time:
                     total_forward_time += forward_time_end - forward_time_start
                     total_backward_time += backward_time_end - backward_time_start
-                timing_step_count += 1
+                if should_time:
+                    timing_step_count += 1
 
             finally:
                 for handle in handles:
@@ -1104,10 +1130,27 @@ class Trainer:
 
                 ###############
                 with torch.no_grad():
+                    if dist.is_initialized() and not self.cfg.distribute_modules:
+                        for did_fire_mask in did_fire.values():
+                            dist.all_reduce(did_fire_mask, op=dist.ReduceOp.MAX)
+
                     # Update the dead feature mask
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
                         counts[did_fire[name]] = 0
+
+                    reduced_avg_fvu = reduce_scalar_mapping(dict(avg_fvu))
+                    reduced_avg_auxk_loss = reduce_scalar_mapping(dict(avg_auxk_loss))
+                    reduced_avg_multi_topk_fvu = reduce_scalar_mapping(
+                        dict(avg_multi_topk_fvu)
+                    )
+                    reduced_avg_outlier_ratio = reduce_scalar_mapping(
+                        dict(avg_outlier_ratio)
+                    )
+                    reduced_avg_exceed = reduce_nested_scalar_mapping(dict(avg_exceed))
+
+                    if self.cfg.loss_fn == "fvu":
+                        avg_losses = reduced_avg_fvu
 
                     # Accumulate total tokens for wandb x-axis
                     # In DDP mode, we need to sum across all ranks since each rank processes different data
@@ -1186,21 +1229,21 @@ class Trainer:
                         ratio = mask.mean(dtype=torch.float32).item()
                         info.update({f"{name}/dead_pct": ratio})
                         if self.cfg.loss_fn == "fvu":
-                            info[f"{name}/fvu"] = avg_fvu[name]
+                            info[f"{name}/fvu"] = reduced_avg_fvu[name]
 
                         if self.cfg.auxk_alpha > 0:
-                            info[f"{name}/auxk"] = avg_auxk_loss[name]
+                            info[f"{name}/auxk"] = reduced_avg_auxk_loss[name]
                         if self.cfg.sae.multi_topk:
-                            info[f"{name}/multi_topk_fvu"] = avg_multi_topk_fvu[name]
+                            info[f"{name}/multi_topk_fvu"] = reduced_avg_multi_topk_fvu[name]
 
                         if self.cfg.use_outlier_clip:
                             hook_name = name.partition("/")[0]
-                            if hook_name in avg_outlier_ratio:
-                                info[f"{name}/outlier_ratio"] = avg_outlier_ratio[hook_name]
+                            if hook_name in reduced_avg_outlier_ratio:
+                                info[f"{name}/outlier_ratio"] = reduced_avg_outlier_ratio[hook_name]
 
                         # Exceed metrics
-                        if name in avg_exceed:
-                            for alpha, exceed_val in avg_exceed[name].items():
+                        if name in reduced_avg_exceed:
+                            for alpha, exceed_val in reduced_avg_exceed[name].items():
                                 info[f"{name}/exceed_alpha_{alpha:.2f}"] = exceed_val
 
                     if self.cfg.distribute_modules:
@@ -1212,9 +1255,9 @@ class Trainer:
                         info["k"] = k
                         info["_step"] = step  # Keep gradient step count for reference
 
-                        if self.cfg.use_outlier_clip and avg_outlier_ratio:
-                            avg_ratio = sum(avg_outlier_ratio.values()) / len(
-                                avg_outlier_ratio
+                        if self.cfg.use_outlier_clip and reduced_avg_outlier_ratio:
+                            avg_ratio = sum(reduced_avg_outlier_ratio.values()) / len(
+                                reduced_avg_outlier_ratio
                             )
                             pbar.set_postfix(outlier_ratio=f"{avg_ratio:.6f}")
 
