@@ -197,6 +197,10 @@ class TrainConfig(Serializable):
     """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
     wandb_log_frequency: int = 1
 
+    compile_model: bool = False
+    """Compile transformer layers with torch.compile to fuse small kernels.
+    Reduces kernel launch overhead from elementwise/layernorm/dtype ops."""
+
     save_dir: str = "checkpoints"
 
     def __post_init__(self):

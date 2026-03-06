@@ -519,6 +519,17 @@ class Trainer:
         # Make sure the model is frozen
         self.model.requires_grad_(False)
 
+        # Compile individual transformer layers to fuse small kernels.
+        if self.cfg.compile_model:
+            # KV cache state varies per layer on first forward, causing recompilation.
+            # Raise limit to allow all variants to compile; graphs stabilize after step 1.
+            import torch._dynamo as _dynamo
+            _dynamo.config.cache_size_limit = 128
+            _, layer_list = get_layer_list(self.model)
+            for i in range(len(layer_list)):
+                layer_list[i] = torch.compile(layer_list[i])
+            print(f"Compiled {len(layer_list)} transformer layers with torch.compile")
+
         rank_zero = not dist.is_initialized() or dist.get_rank() == 0
         ddp = dist.is_initialized() and not self.cfg.distribute_modules
 
