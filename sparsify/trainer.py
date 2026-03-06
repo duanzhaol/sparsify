@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset as HfDataset
 from natsort import natsorted
-from schedulefree import ScheduleFreeWrapper
+from schedulefree import ScheduleFreeWrapperReference
 from torch import Tensor, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
@@ -125,7 +125,7 @@ class Trainer(CheckpointMixin):
         ]
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
-        opt = ScheduleFreeWrapper(SignSGD(pgs), momentum=0.95)
+        opt = ScheduleFreeWrapperReference(SignSGD(pgs), momentum=0.95)
         opt.train()
         self.optimizers = [opt]
 

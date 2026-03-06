@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 from safetensors.torch import load_model
-from schedulefree import ScheduleFreeWrapper
+from schedulefree import ScheduleFreeWrapperReference
 
 from .hadamard import HadamardRotation
 from .sparse_coder import SparseCoder
@@ -203,7 +203,7 @@ class CheckpointMixin:
         logger.info("Saving checkpoint")
 
         for optimizer in self.optimizers:
-            if isinstance(optimizer, ScheduleFreeWrapper):
+            if isinstance(optimizer, ScheduleFreeWrapperReference):
                 optimizer.eval()
 
         for name, sae in saes.items():
@@ -240,7 +240,7 @@ class CheckpointMixin:
             )
 
         for optimizer in self.optimizers:
-            if isinstance(optimizer, ScheduleFreeWrapper):
+            if isinstance(optimizer, ScheduleFreeWrapperReference):
                 optimizer.train()
 
     def save(self):
