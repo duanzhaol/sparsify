@@ -637,12 +637,11 @@ class Trainer:
             forward_end = torch.cuda.Event(enable_timing=True)
             backward_start = torch.cuda.Event(enable_timing=True)
             backward_end = torch.cuda.Event(enable_timing=True)
-            metrics_start = torch.cuda.Event(enable_timing=True)
-            metrics_end = torch.cuda.Event(enable_timing=True)
+            pending_metrics_events = []  # Deferred (start, end) event pairs
         else:
             forward_start = forward_end = None
             backward_start = backward_end = None
-            metrics_start = metrics_end = None
+            pending_metrics_events = []
 
         if self.cfg.loss_fn == "ce":
             batch = next(iter(dl))
@@ -770,7 +769,8 @@ class Trainer:
             mask = mask.flatten(0, 1)
 
             # Remove tokens not used for training
-            all_outputs = outputs.detach().clone()
+            if self.cfg.loss_fn in ("ce", "kl"):
+                all_outputs = outputs.detach().clone()
             outputs = outputs[mask]
             inputs = inputs[mask]
 
@@ -808,8 +808,9 @@ class Trainer:
                     )
 
                 clipper = self.outlier_clippers[name]
-                # Store original outputs for exceed calculation
-                original_outputs = outputs.detach().clone()
+                # Store original outputs for exceed calculation (only if needed)
+                if name in self.elbow_thresholds and self.cfg.exceed_alphas:
+                    original_outputs = outputs.detach().clone()
                 # Clip outputs (update stats during training)
                 outputs, outlier_residual, outlier_mask = clipper.clip(outputs, update_stats=True)
                 # Clip inputs with same threshold (no stats update)
@@ -900,7 +901,8 @@ class Trainer:
                     if hook_name in self.elbow_thresholds and self.cfg.exceed_alphas:
                         # Start metrics timing
                         if should_time and device.type == "cuda":
-                            metrics_start.record()
+                            m_start = torch.cuda.Event(enable_timing=True)
+                            m_start.record()
                         elif should_time:
                             metrics_time_start = time.perf_counter()
 
@@ -928,9 +930,10 @@ class Trainer:
                             avg_exceed[sae_key][alpha] += float(exceed_ratio.detach() / denom)
 
                         if should_time and device.type == "cuda":
-                            metrics_end.record()
-                            metrics_end.synchronize()
-                            total_metrics_time += metrics_start.elapsed_time(metrics_end) / 1000.0
+                            m_end = torch.cuda.Event(enable_timing=True)
+                            m_end.record()
+                            # Defer sync — resolve after backward_end.synchronize()
+                            pending_metrics_events.append((m_start, m_end))
                         elif should_time:
                             metrics_time_end = time.perf_counter()
                             total_metrics_time += metrics_time_end - metrics_time_start
@@ -1097,6 +1100,10 @@ class Trainer:
                     backward_end.synchronize()
                     total_forward_time += forward_start.elapsed_time(forward_end) / 1000.0  # ms to s
                     total_backward_time += backward_start.elapsed_time(backward_end) / 1000.0
+                    # Resolve deferred metrics events (already synced by backward_end)
+                    for m_start, m_end in pending_metrics_events:
+                        total_metrics_time += m_start.elapsed_time(m_end) / 1000.0
+                    pending_metrics_events.clear()
                 elif should_time:
                     total_forward_time += forward_time_end - forward_time_start
                     total_backward_time += backward_time_end - backward_time_start
@@ -1131,8 +1138,15 @@ class Trainer:
                 ###############
                 with torch.no_grad():
                     if dist.is_initialized() and not self.cfg.distribute_modules:
-                        for did_fire_mask in did_fire.values():
-                            dist.all_reduce(did_fire_mask, op=dist.ReduceOp.MAX)
+                        # Batch all did_fire masks into a single all_reduce
+                        did_fire_keys = list(did_fire.keys())
+                        all_masks = torch.cat([did_fire[k] for k in did_fire_keys])
+                        dist.all_reduce(all_masks, op=dist.ReduceOp.MAX)
+                        offset = 0
+                        for k in did_fire_keys:
+                            n = did_fire[k].shape[0]
+                            did_fire[k].copy_(all_masks[offset:offset + n])
+                            offset += n
 
                     # Update the dead feature mask
                     for name, counts in self.num_tokens_since_fired.items():
