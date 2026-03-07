@@ -2,6 +2,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from contextlib import nullcontext
 from dataclasses import asdict
 from fnmatch import fnmatchcase
 from typing import Sized
@@ -283,6 +284,51 @@ class Trainer(CheckpointMixin):
         else:
             forward_start = forward_end = None
 
+        # Deferred metrics events (optimization: avoid per-hookpoint sync)
+        pending_metrics_events: list[tuple] = []
+
+        # Batched reduce helpers for metrics (optimization: one allreduce
+        # per log step instead of per-hookpoint per-microbatch)
+        def reduce_scalar_mapping(
+            values: dict[str, float],
+        ) -> dict[str, float]:
+            if not values:
+                return {}
+            if not dist.is_initialized():
+                return dict(values)
+            keys = sorted(values)
+            tensor = torch.tensor(
+                [values[key] for key in keys], device=device
+            )
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+            return dict(zip(keys, tensor.tolist()))
+
+        def reduce_nested_scalar_mapping(
+            values: dict[str, dict[float, float]],
+        ) -> dict[str, dict[float, float]]:
+            if not values:
+                return {}
+            if not dist.is_initialized():
+                return {
+                    outer_key: dict(inner)
+                    for outer_key, inner in values.items()
+                }
+            flat_keys = [
+                (outer_key, alpha)
+                for outer_key in sorted(values)
+                for alpha in sorted(values[outer_key])
+            ]
+            tensor = torch.tensor(
+                [values[ok][ak] for ok, ak in flat_keys], device=device
+            )
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+            result: dict[str, dict[float, float]] = defaultdict(dict)
+            for (ok, ak), v in zip(flat_keys, tensor.tolist()):
+                result[ok][ak] = v
+            return dict(result)
+
         name_to_module = {
             name: self.model.base_model.get_submodule(name)
             for name in self.cfg.hookpoints
@@ -298,6 +344,7 @@ class Trainer(CheckpointMixin):
 
         def hook(module: nn.Module, inputs, outputs):
             nonlocal total_forward_time, total_metrics_time, timing_step_count
+            nonlocal should_time, sync_gradients
 
             if isinstance(inputs, tuple):
                 inputs = inputs[0]
@@ -350,84 +397,85 @@ class Trainer(CheckpointMixin):
                     raw.set_decoder_norm_to_unit_norm()
 
                 wrapped = maybe_wrapped[sae_key]
-                out = wrapped(
-                    x=acts,
-                    dead_mask=(
-                        self.num_tokens_since_fired[sae_key]
-                        > self.cfg.dead_feature_threshold
-                        if self.cfg.auxk_alpha > 0
-                        else None
-                    ),
+                sync_context = (
+                    nullcontext()
+                    if sync_gradients or not isinstance(wrapped, DDP)
+                    else wrapped.no_sync()
                 )
-
-                # Update the did_fire mask
-                indices = out.latent_indices.flatten()
-                did_fire[sae_key].scatter_(0, indices, torch.ones_like(indices, dtype=torch.bool))
-                self.maybe_all_reduce(did_fire[sae_key], "max")
-
-                # Accumulate metrics
-                avg_fvu[sae_key] += float(
-                    self.maybe_all_reduce(out.fvu.detach()) / denom
-                )
-                if self.cfg.auxk_alpha > 0:
-                    avg_auxk_loss[sae_key] += float(
-                        self.maybe_all_reduce(out.auxk_loss.detach()) / denom
+                with sync_context:
+                    out = wrapped(
+                        x=acts,
+                        dead_mask=(
+                            self.num_tokens_since_fired[sae_key]
+                            > self.cfg.dead_feature_threshold
+                            if self.cfg.auxk_alpha > 0
+                            else None
+                        ),
                     )
 
-                # Compute exceed metrics if elbow thresholds available
-                if name in self.elbow_thresholds and self.cfg.exceed_alphas:
-                    if device.type in ("cuda", "npu"):
-                        metrics_start_evt = create_event(enable_timing=True)
-                        metrics_end_evt = create_event(enable_timing=True)
-                        metrics_start_evt.record()
-                    else:
-                        metrics_time_start = time.perf_counter()
+                    # Update the did_fire mask (allreduce deferred to optimizer step)
+                    indices = out.latent_indices.flatten()
+                    did_fire[sae_key].scatter_(0, indices, torch.ones_like(indices, dtype=torch.bool))
 
-                    if (
-                        self.cfg.use_hadamard
-                        and name in self.hadamard_rotations
-                    ):
-                        original_target = (
-                            original_target_for_exceed
-                            if original_target_for_exceed is not None
-                            else acts
-                        )
-                        original_recon = self.hadamard_rotations[
-                            name
-                        ].unrotate(out.sae_out)
-                    else:
-                        original_target = acts
-                        original_recon = out.sae_out
-
-                    error_magnitude = torch.abs(original_target - original_recon)
-                    elbow_value = self.elbow_thresholds[name]
-                    num_elements = error_magnitude.numel()
-
-                    for alpha in self.cfg.exceed_alphas:
-                        threshold = alpha * elbow_value
-                        exceed_count = (
-                            (error_magnitude > threshold).sum().float()
-                        )
-                        exceed_ratio = exceed_count / num_elements
-                        avg_exceed[sae_key][alpha] += float(
-                            self.maybe_all_reduce(exceed_ratio.detach()) / denom
+                    # Accumulate metrics locally (allreduce deferred to log step)
+                    avg_fvu[sae_key] += float(out.fvu.detach() / denom)
+                    if self.cfg.auxk_alpha > 0:
+                        avg_auxk_loss[sae_key] += float(
+                            out.auxk_loss.detach() / denom
                         )
 
-                    if device.type in ("cuda", "npu"):
-                        metrics_end_evt.record()
-                        synchronize()
-                        total_metrics_time += (
-                            metrics_start_evt.elapsed_time(metrics_end_evt)
-                            / 1000.0
-                        )
-                    else:
-                        total_metrics_time += (
-                            time.perf_counter() - metrics_time_start
-                        )
+                    # Compute exceed metrics if elbow thresholds available
+                    if name in self.elbow_thresholds and self.cfg.exceed_alphas:
+                        if should_time and device.type in ("cuda", "npu"):
+                            metrics_start_evt = create_event(enable_timing=True)
+                            metrics_start_evt.record()
+                        elif device.type not in ("cuda", "npu"):
+                            metrics_time_start = time.perf_counter()
 
-                # Local backward pass
-                loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
-                loss.div(acc_steps).backward()
+                        if (
+                            self.cfg.use_hadamard
+                            and name in self.hadamard_rotations
+                        ):
+                            original_target = (
+                                original_target_for_exceed
+                                if original_target_for_exceed is not None
+                                else acts
+                            )
+                            original_recon = self.hadamard_rotations[
+                                name
+                            ].unrotate(out.sae_out)
+                        else:
+                            original_target = acts
+                            original_recon = out.sae_out
+
+                        error_magnitude = torch.abs(original_target - original_recon)
+                        elbow_value = self.elbow_thresholds[name]
+                        num_elements = error_magnitude.numel()
+
+                        for alpha in self.cfg.exceed_alphas:
+                            threshold = alpha * elbow_value
+                            exceed_count = (
+                                (error_magnitude > threshold).sum().float()
+                            )
+                            exceed_ratio = exceed_count / num_elements
+                            avg_exceed[sae_key][alpha] += float(
+                                exceed_ratio.detach() / denom
+                            )
+
+                        if should_time and device.type in ("cuda", "npu"):
+                            m_end = create_event(enable_timing=True)
+                            m_end.record()
+                            pending_metrics_events.append(
+                                (metrics_start_evt, m_end)
+                            )
+                        elif device.type not in ("cuda", "npu"):
+                            total_metrics_time += (
+                                time.perf_counter() - metrics_time_start
+                            )
+
+                    # Local backward pass (inside sync_context for DDP no_sync)
+                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    loss.div(acc_steps).backward()
 
         for batch in dl:
             x = batch["input_ids"].to(device)
@@ -450,11 +498,22 @@ class Trainer(CheckpointMixin):
             # Bookkeeping for dead feature detection
             num_tokens_in_step += x.numel()
 
-            # Start timing forward pass
-            if device.type in ("cuda", "npu"):
+            # Determine if this step needs timing and gradient sync
+            step_candidate, substep_candidate = divmod(
+                self.global_step + 1, self.cfg.grad_acc_steps
+            )
+            sync_gradients = substep_candidate == 0
+            should_time = (
+                self.cfg.log_to_wandb
+                and sync_gradients
+                and (step_candidate + 1) % self.cfg.wandb_log_frequency == 0
+            )
+
+            # Start timing forward pass (only when logging)
+            if should_time and device.type in ("cuda", "npu"):
                 synchronize()
                 forward_start.record()
-            else:
+            elif should_time:
                 forward_time_start = time.perf_counter()
 
             # Forward pass on the model to capture activations via hooks
@@ -470,18 +529,24 @@ class Trainer(CheckpointMixin):
                 else:
                     self.model(x)
 
-                # End timing
-                if device.type in ("cuda", "npu"):
+                # End timing (only when logging, single sync resolves all)
+                if should_time and device.type in ("cuda", "npu"):
                     forward_end.record()
                     synchronize()
                     total_forward_time += (
                         forward_start.elapsed_time(forward_end) / 1000.0
                     )
-                else:
+                    for m_start, m_end in pending_metrics_events:
+                        total_metrics_time += (
+                            m_start.elapsed_time(m_end) / 1000.0
+                        )
+                    pending_metrics_events.clear()
+                elif should_time:
                     total_forward_time += (
                         time.perf_counter() - forward_time_start
                     )
-                timing_step_count += 1
+                if should_time:
+                    timing_step_count += 1
 
                 avg_losses = dict(avg_fvu)
 
@@ -501,6 +566,19 @@ class Trainer(CheckpointMixin):
                     optimizer.zero_grad()
 
                 with torch.no_grad():
+                    # Batch all did_fire allreduces into one call
+                    if dist.is_initialized():
+                        did_fire_keys = list(did_fire.keys())
+                        all_masks = torch.cat(
+                            [did_fire[k] for k in did_fire_keys]
+                        )
+                        dist.all_reduce(all_masks, op=dist.ReduceOp.MAX)
+                        offset = 0
+                        for k in did_fire_keys:
+                            n = did_fire[k].shape[0]
+                            did_fire[k].copy_(all_masks[offset : offset + n])
+                            offset += n
+
                     # Update the dead feature mask
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
@@ -545,6 +623,15 @@ class Trainer(CheckpointMixin):
 
                 if (step + 1) % self.cfg.wandb_log_frequency == 0:
                     if self.cfg.log_to_wandb:
+                        # Batch reduce all metrics in one allreduce each
+                        reduced_fvu = reduce_scalar_mapping(dict(avg_fvu))
+                        reduced_auxk = reduce_scalar_mapping(
+                            dict(avg_auxk_loss)
+                        )
+                        reduced_exceed = reduce_nested_scalar_mapping(
+                            dict(avg_exceed)
+                        )
+
                         info = {}
 
                         # Timing metrics
@@ -576,14 +663,16 @@ class Trainer(CheckpointMixin):
                                 > self.cfg.dead_feature_threshold
                             )
                             info[f"{name}/dead_pct"] = mask.float().mean().item()
-                            info[f"{name}/fvu"] = avg_fvu[name]
+                            info[f"{name}/fvu"] = reduced_fvu.get(name, 0.0)
 
                             if self.cfg.auxk_alpha > 0:
-                                info[f"{name}/auxk"] = avg_auxk_loss[name]
+                                info[f"{name}/auxk"] = reduced_auxk.get(
+                                    name, 0.0
+                                )
 
                             # Exceed metrics
-                            if name in avg_exceed:
-                                for alpha, val in avg_exceed[name].items():
+                            if name in reduced_exceed:
+                                for alpha, val in reduced_exceed[name].items():
                                     info[f"{name}/exceed_alpha_{alpha:.2f}"] = val
 
                         if rank_zero:
