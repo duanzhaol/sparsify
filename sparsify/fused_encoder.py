@@ -45,17 +45,23 @@ class FusedEncoder(torch.autograd.Function):
         N, d_in = input.shape
         M = weight.shape[0]
 
+        use_matmul = M * N * input.element_size() <= _MATMUL_THRESHOLD
+
         # --- Grad w.r.t. input ---
         if ctx.needs_input_grad[0]:
-            grad_input = F.embedding_bag(
-                indices,
-                weight,
-                mode="sum",
-                per_sample_weights=grad_values.type_as(weight),
-            )
+            if use_matmul:
+                # Build sparse coefficient matrix (M, N) and dense matmul
+                S = torch.zeros(N, M, dtype=grad_values.dtype, device=grad_values.device)
+                S.scatter_add_(1, indices.long(), grad_values)
+                grad_input = (S @ weight).type_as(input)
+            else:
+                # Fallback: gather + bmm for memory-constrained cases
+                selected = weight[indices]  # (N, k, d_in)
+                grad_input = torch.bmm(
+                    grad_values.type_as(selected).unsqueeze(1), selected
+                ).squeeze(1).type_as(input)
 
         # --- Grad w.r.t. weight (and bias via shared S matrix) ---
-        use_matmul = M * N * input.element_size() <= _MATMUL_THRESHOLD
         S = None
 
         if ctx.needs_input_grad[1]:

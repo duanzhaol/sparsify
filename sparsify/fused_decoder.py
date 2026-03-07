@@ -1,9 +1,14 @@
-"""Fused decoder with custom backward pass for NPU compatibility.
+"""Fused decoder with custom forward and backward pass for NPU compatibility.
 
-The standard F.embedding_bag backward (aten::_embedding_bag_backward) is not
-natively supported on Ascend NPU and falls back to CPU. This module provides
-FusedDecoder, a custom autograd Function that replaces the backward pass with
-NPU-native operations.
+The standard F.embedding_bag forward runs on AI_VECTOR_CORE and its backward
+(aten::_embedding_bag_backward) is not natively supported on Ascend NPU,
+falling back to CPU. This module provides FusedDecoder, a custom autograd
+Function that replaces both passes with NPU-native operations.
+
+Forward strategy (when N*M fits in memory):
+  - scatter activations into (N, M) coefficient matrix, then dense matmul
+    S @ W_T (AI_CORE Cube)
+  Falls back to embedding_bag when N*M exceeds threshold.
 
 Backward strategy (when M*N fits in memory):
   - grad_acts:  full matmul grad_output @ W_T.T then scalar gather (AI_CORE)
@@ -29,9 +34,21 @@ class FusedDecoder(torch.autograd.Function):
 
         Returns:     (N, d_in)      reconstructed output
         """
-        out = F.embedding_bag(
-            top_indices, W_T, per_sample_weights=top_acts, mode="sum"
-        )
+        N, k = top_indices.shape
+        M, d_in = W_T.shape
+        use_matmul = M * N * top_acts.element_size() <= _MATMUL_THRESHOLD
+
+        if use_matmul:
+            # Build sparse coefficient matrix and use dense matmul (AI_CORE Cube)
+            S = torch.zeros(N, M, dtype=top_acts.dtype, device=top_acts.device)
+            S.scatter_add_(1, top_indices.long(), top_acts)
+            out = S @ W_T
+        else:
+            # Fallback: embedding_bag for memory-constrained cases
+            out = F.embedding_bag(
+                top_indices, W_T, per_sample_weights=top_acts, mode="sum"
+            )
+
         ctx.save_for_backward(top_indices, top_acts, W_T)
         return out
 

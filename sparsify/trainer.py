@@ -361,7 +361,8 @@ class Trainer(CheckpointMixin):
                 )
 
                 # Update the did_fire mask
-                did_fire[sae_key][out.latent_indices.flatten()] = True
+                indices = out.latent_indices.flatten()
+                did_fire[sae_key].scatter_(0, indices, torch.ones_like(indices, dtype=torch.bool))
                 self.maybe_all_reduce(did_fire[sae_key], "max")
 
                 # Accumulate metrics
@@ -503,7 +504,7 @@ class Trainer(CheckpointMixin):
                     # Update the dead feature mask
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
-                        counts[did_fire[name]] = 0
+                        counts.mul_(~did_fire[name])
 
                     # Accumulate total tokens
                     if dist.is_initialized():

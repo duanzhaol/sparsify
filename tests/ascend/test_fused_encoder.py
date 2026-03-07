@@ -3,6 +3,7 @@
 import torch
 import torch.nn.functional as F
 
+import sparsify.fused_encoder as _fe_mod
 from sparsify.fused_encoder import fused_encoder
 
 
@@ -81,3 +82,59 @@ def test_large_batch():
 
     assert x.grad.shape == (N, D)
     assert W.grad.shape == (M, D)
+
+
+def test_scatter_matmul_grad_input():
+    """Verify scatter+matmul path for grad_input matches naive implementation."""
+    N, D, M, k = 16, 64, 128, 8
+
+    # Force the scatter+matmul path by setting a very high threshold
+    orig_threshold = _fe_mod._MATMUL_THRESHOLD
+    _fe_mod._MATMUL_THRESHOLD = 10**18
+    try:
+        x = torch.randn(N, D, requires_grad=True, device="npu")
+        W = torch.randn(M, D, requires_grad=True, device="npu")
+        b = torch.randn(M, requires_grad=True, device="npu")
+
+        # Naive reference
+        preacts = F.relu(F.linear(x, W, b))
+        vals_naive, _ = preacts.topk(k, sorted=False)
+        vals_naive.sum().backward()
+        gx_naive = x.grad.clone()
+        x.grad, W.grad, b.grad = None, None, None
+
+        # Fused (scatter+matmul path)
+        vals, _, _ = fused_encoder(x, W, b, k)
+        vals.sum().backward()
+
+        torch.testing.assert_close(x.grad, gx_naive, atol=1e-5, rtol=1e-5)
+    finally:
+        _fe_mod._MATMUL_THRESHOLD = orig_threshold
+
+
+def test_embedding_bag_fallback_grad_input():
+    """Verify embedding_bag fallback path for grad_input matches naive."""
+    N, D, M, k = 16, 64, 128, 8
+
+    # Force the embedding_bag fallback by setting threshold to 0
+    orig_threshold = _fe_mod._MATMUL_THRESHOLD
+    _fe_mod._MATMUL_THRESHOLD = 0
+    try:
+        x = torch.randn(N, D, requires_grad=True, device="npu")
+        W = torch.randn(M, D, requires_grad=True, device="npu")
+        b = torch.randn(M, requires_grad=True, device="npu")
+
+        # Naive reference
+        preacts = F.relu(F.linear(x, W, b))
+        vals_naive, _ = preacts.topk(k, sorted=False)
+        vals_naive.sum().backward()
+        gx_naive = x.grad.clone()
+        x.grad, W.grad, b.grad = None, None, None
+
+        # Fused (embedding_bag fallback)
+        vals, _, _ = fused_encoder(x, W, b, k)
+        vals.sum().backward()
+
+        torch.testing.assert_close(x.grad, gx_naive, atol=1e-5, rtol=1e-5)
+    finally:
+        _fe_mod._MATMUL_THRESHOLD = orig_threshold
