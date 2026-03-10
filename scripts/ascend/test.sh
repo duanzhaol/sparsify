@@ -29,3 +29,8 @@ torchrun --nproc_per_node 16 --master_port 29501 -m sparsify \
         --log_to_wandb True \
         --wandb_log_frequency 1 \
         --max_tokens 200000000 --elbow_threshold_path ./thresholds/Qwen3-0.6B/thresholds_q.json
+
+
+#profiling
+
+msprof --output=./prof_output --task-time=on --ai-core=on --ascendcl=on --application="xxxx"

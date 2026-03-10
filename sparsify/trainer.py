@@ -253,9 +253,11 @@ class Trainer(CheckpointMixin):
             total=num_batches,
         )
 
-        did_fire = {
-            name: torch.zeros(sae.num_latents, device=device, dtype=torch.bool)
-            for name, sae in self.saes.items()
+        # Buffer to collect fired latent indices during each step.
+        # Replaces the old did_fire bool mask + per-forward scatter_ with a
+        # single cat+unique at step end, avoiding expensive AI_CPU fallback.
+        fired_indices: dict[str, list[torch.Tensor]] = {
+            name: [] for name in self.saes
         }
 
         acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
@@ -413,9 +415,8 @@ class Trainer(CheckpointMixin):
                         ),
                     )
 
-                    # Update the did_fire mask (allreduce deferred to optimizer step)
-                    indices = out.latent_indices.flatten()
-                    did_fire[sae_key].scatter_(0, indices, torch.ones_like(indices, dtype=torch.bool))
+                    # Collect fired latent indices (deferred update at optimizer step)
+                    fired_indices[sae_key].append(out.latent_indices.flatten())
 
                     # Accumulate metrics locally (allreduce deferred to log step)
                     avg_fvu[sae_key] += float(out.fvu.detach() / denom)
@@ -566,23 +567,35 @@ class Trainer(CheckpointMixin):
                     optimizer.zero_grad()
 
                 with torch.no_grad():
-                    # Batch all did_fire allreduces into one call
-                    if dist.is_initialized():
-                        did_fire_keys = list(did_fire.keys())
-                        all_masks = torch.cat(
-                            [did_fire[k] for k in did_fire_keys]
-                        )
-                        dist.all_reduce(all_masks, op=dist.ReduceOp.MAX)
-                        offset = 0
-                        for k in did_fire_keys:
-                            n = did_fire[k].shape[0]
-                            did_fire[k].copy_(all_masks[offset : offset + n])
-                            offset += n
-
-                    # Update the dead feature mask
+                    # Update dead feature counts: increment all, then zero
+                    # locally-fired latents.  A subsequent allreduce with MIN
+                    # propagates zeros from any GPU so the result is equivalent
+                    # to the old did_fire bool mask approach, but avoids the
+                    # expensive per-forward scatter_ (AI_CPU fallback on NPU).
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
-                        counts.mul_(~did_fire[name])
+                        if fired_indices[name]:
+                            idx = torch.cat(fired_indices[name])
+                            # No unique() needed: writing 0 to duplicate
+                            # indices is idempotent, and unique() falls back
+                            # to AI_CPU on NPU (~181ms per step).
+                            counts[idx] = 0
+
+                    # Sync counts across GPUs: MIN ensures any GPU's zero
+                    # (latent fired) propagates to all replicas.
+                    if dist.is_initialized():
+                        count_keys = list(self.num_tokens_since_fired.keys())
+                        all_counts = torch.cat(
+                            [self.num_tokens_since_fired[k] for k in count_keys]
+                        )
+                        dist.all_reduce(all_counts, op=dist.ReduceOp.MIN)
+                        offset = 0
+                        for k in count_keys:
+                            n = self.num_tokens_since_fired[k].shape[0]
+                            self.num_tokens_since_fired[k].copy_(
+                                all_counts[offset : offset + n]
+                            )
+                            offset += n
 
                     # Accumulate total tokens
                     if dist.is_initialized():
@@ -611,10 +624,10 @@ class Trainer(CheckpointMixin):
                             dist.destroy_process_group()
                         return
 
-                    # Reset stats for this step
+                    # Reset fired indices buffer for next step
                     num_tokens_in_step = 0
-                    for mask in did_fire.values():
-                        mask.zero_()
+                    for buf in fired_indices.values():
+                        buf.clear()
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
