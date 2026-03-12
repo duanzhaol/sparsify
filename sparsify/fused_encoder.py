@@ -53,7 +53,7 @@ class FusedEncoder(torch.autograd.Function):
                 # Build sparse coefficient matrix (M, N) and dense matmul
                 S = torch.zeros(N, M, dtype=grad_values.dtype, device=grad_values.device)
                 S.scatter_add_(1, indices.long(), grad_values)
-                grad_input = (S @ weight).type_as(input)
+                grad_input = (S @ weight.type_as(S)).type_as(input)
             else:
                 # Fallback: gather + bmm for memory-constrained cases
                 selected = weight[indices]  # (N, k, d_in)

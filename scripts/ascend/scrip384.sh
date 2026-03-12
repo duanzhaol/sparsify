@@ -1,6 +1,6 @@
 # 在ascend上测试一下能不能跑通，目前性能大概是a100的1/4，需要profile一下看看
 
-torchrun --nproc_per_node 16 --master_port 29501 -m sparsify \
+torchrun --nproc_per_node 4 --master_port 29501 -m sparsify \
         /mnt/model/Qwen3-0.6B \
         /tmp/fineweb/sample/10BT \
         --split "train" \
