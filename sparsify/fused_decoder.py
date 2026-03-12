@@ -42,7 +42,7 @@ class FusedDecoder(torch.autograd.Function):
             # Build sparse coefficient matrix and use dense matmul (AI_CORE Cube)
             S = torch.zeros(N, M, dtype=top_acts.dtype, device=top_acts.device)
             S.scatter_add_(1, top_indices.long(), top_acts)
-            out = S @ W_T
+            out = S @ W_T.type_as(S)
         else:
             # Fallback: embedding_bag for memory-constrained cases
             out = F.embedding_bag(
@@ -64,10 +64,10 @@ class FusedDecoder(torch.autograd.Function):
         # --- Grad w.r.t. top_acts ---
         if ctx.needs_input_grad[1]:
             if use_matmul:
-                full_scores = grad_output @ W_T.t()
+                full_scores = grad_output @ W_T.type_as(grad_output).t()
                 grad_acts = full_scores.gather(1, top_indices.long())
             else:
-                selected = W_T[top_indices]
+                selected = W_T[top_indices].type_as(grad_output)
                 grad_acts = torch.bmm(
                     grad_output.unsqueeze(1),
                     selected.transpose(1, 2)

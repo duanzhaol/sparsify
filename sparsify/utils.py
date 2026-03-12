@@ -184,23 +184,16 @@ def triton_decode(top_indices: Tensor, top_acts: Tensor, W_dec: Tensor):
 
 from .device import get_device_type
 
-if get_device_type() == "npu":
+if get_device_type() in ("npu", "cuda"):
     from .fused_decoder import fused_decode
 
     decoder_impl = fused_decode
-    print("Using fused decoder with NPU-native backward (no CPU fallback).")
-else:
-    try:
-        from .xformers import xformers_embedding_bag
-    except ImportError:
-        decoder_impl = eager_decode
-        print("Triton not installed, using eager implementation of sparse decoder.")
+    if get_device_type() == "npu":
+        print("Using fused decoder with NPU-native backward (no CPU fallback).")
     else:
-        if os.environ.get("SPARSIFY_DISABLE_TRITON") == "1":
-            print("Triton disabled, using eager implementation of sparse decoder.")
-            decoder_impl = eager_decode
-        else:
-            decoder_impl = triton_decode
+        print("Using fused decoder on CUDA.")
+else:
+    decoder_impl = eager_decode
 
 
 def handle_arg_string(arg):
