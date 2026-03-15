@@ -97,6 +97,11 @@ class TrainConfig(Serializable):
     hadamard_use_perm: bool = True
     """Whether to use random permutation before Hadamard transform."""
 
+    # Compilation
+    compile_model: bool = False
+    """Compile transformer layers with torch.compile to fuse small kernels.
+    Reduces kernel launch overhead from elementwise/layernorm/dtype ops."""
+
     # Saving & logging
     save_every: int = 1000
     """Save sparse coders every `save_every` steps."""
@@ -129,6 +134,11 @@ class TrainConfig(Serializable):
 
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        if self.compile_model:
+            from .device import get_device_type
+            if get_device_type() != "cuda":
+                self.compile_model = False
 
         if self.use_hadamard:
             bs = self.hadamard_block_size

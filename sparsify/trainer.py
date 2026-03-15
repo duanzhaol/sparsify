@@ -344,7 +344,7 @@ class Trainer(CheckpointMixin):
             hook = sae_key.partition("/")[0]
             hook_to_sae_keys[hook].append(sae_key)
 
-        def hook(module: nn.Module, inputs, outputs):
+        def _hook_impl(module: nn.Module, inputs, outputs):
             nonlocal total_forward_time, total_metrics_time, timing_step_count
             nonlocal should_time, sync_gradients
 
@@ -477,6 +477,23 @@ class Trainer(CheckpointMixin):
                     # Local backward pass (inside sync_context for DDP no_sync)
                     loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
                     loss.div(acc_steps).backward()
+
+        # Prevent dynamo from tracing the hook body when torch.compile is used
+        # on transformer layers. Without this, DDP's autograd hooks don't fire
+        # properly inside dynamo resume functions.
+        if self.cfg.compile_model:
+            import torch._dynamo as _dynamo
+            hook = _dynamo.disable(_hook_impl)
+        else:
+            hook = _hook_impl
+
+        # Compile individual transformer layers to fuse elementwise kernels
+        if self.cfg.compile_model:
+            _dynamo.config.cache_size_limit = 128
+            _, layer_list = get_layer_list(self.model)
+            for i in range(len(layer_list)):
+                layer_list[i] = torch.compile(layer_list[i])
+            print(f"Compiled {len(layer_list)} transformer layers with torch.compile")
 
         for batch in dl:
             x = batch["input_ids"].to(device)
