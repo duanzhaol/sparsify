@@ -39,6 +39,8 @@ experiments/
 
 ## Key Paths
 
+> 完整路径配置见 `LUTurbo-doc/resources.md`（单一事实来源，换机器时只改该文件）。
+
 | Resource | Path |
 |----------|------|
 | Models | `/root/models/<ModelName>/` |
@@ -200,3 +202,7 @@ Before writing experiment code, verify:
 - [ ] Exact baseline included for validation?
 - [ ] Results separated by model name?
 - [ ] Hookpoints capture INPUT (not output)?
+
+## Post-Experiment Documentation
+
+实验完成后，用 `/update-research` 命令更新 LUTurbo-doc 中的研究文档（research-log.md、decision-tree.md、experiments/ 文档）。
