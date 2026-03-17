@@ -26,58 +26,112 @@ def collect_activations(model, sae_dict, dataset, num_samples, seq_len):
     """
     收集各层 SAE 激活的 top-K 索引和值。
 
-    返回：
+    返回（逐层落盘，内存峰值 = 单层缓存）：
       per_layer[layer_name] = {
-          'indices': Tensor[total_tokens, K],  # int64
-          'values':  Tensor[total_tokens, K],  # float32
-          'seq_boundaries': List[int],          # 序列边界（用于重叠率分析）
+          'top_k_indices': Tensor[total_tokens, K],    # int32, top-K 索引
+          'top_k_values':  Tensor[total_tokens, K],    # float32, top-K 激活值
+          'top_2k_indices': Tensor[total_tokens, 2K],  # int32, top-2K 索引（用于 topL 变体）
+          'top_2k_values':  Tensor[total_tokens, 2K],  # float32, top-2K 激活值
+          'token_pos':      Tensor[total_tokens],      # int32, 每个 token 在序列中的位置
+          'seq_boundaries': List[int],                  # 序列边界
       }
     """
-    # batch 化 encode，一次处理 [batch, seq_len, h] → [batch*seq_len, K]
+    # batch 化 encode，一次处理 [batch, seq_len, h] → [batch*seq_len, 2K]
+    # 用 forward hook 流式捕获单层 hidden states：拿到一层就立刻做 SAE encode，
+    # 然后将 top-K / top-2K 结果落盘（mmap/npz）并释放该层缓存
     # 记录序列边界以区分同一序列内的 token 对 vs 跨序列的 token 对
 ```
 
 **实现要点**：
 - batch 化 `sae.encode()` 处理整个序列，不逐 token 循环
-- 内存估计：2048 samples × 512 seq_len × 128 K × 2 (indices + values) × 4 bytes ≈ 1GB，可接受
-- 多层在一次 model forward 中同时采集
-- 记录每个 token 的序列内位置（用于区分 prefill/decode 阶段分析）
+- **内存策略**：逐层处理，每层 encode 后立即落盘（mmap/npz），索引使用 int32、激活值使用 float32，内存峰值 ≈ 单层缓存 ~2GB（2048×512×256×(4+4) bytes）。不同时驻留所有层，避免总内存随层数线性增长。
+- **hidden state 采集方式**：用 forward hook 流式处理单层输出，捕获到某层 hidden states 后立即 SAE encode 并释放，不先把所有层的 hidden states 全部驻留内存
+- 记录每个 token 的序列内位置 `token_pos`（用于区分 prefill/decode 阶段、union2 边界条件过滤）
+- 增量选择需要 top-L（L=2K）候选：encode 时取 top-2K 而非 top-K，前 K 个作为 top-K，前 1.5K/2K 作为 top-L 保留集
 
 ### 3.2 Oracle Baseline A：增量选择（C1e 上限）
 
 ```python
-def oracle_incremental(indices, values, seq_boundaries):
+def oracle_incremental(layer_data):
     """
-    模拟：保留前一 token 的 top-K，只允许替换 m 个位置。
+    模拟：保留前一 token 的选择结果，只允许替换 m 个位置。
     替换策略：oracle（从真实 top-K 中选不在旧集合里的、激活值最大的 m 个）。
 
-    参数扫描：m = 4, 8, 16, 32, 64, K
+    输入：
+    - layer_data['top_k_indices'], layer_data['top_k_values']
+    - layer_data['top_2k_indices'], layer_data['top_2k_values']
+    - layer_data['token_pos'], layer_data['seq_boundaries']
 
-    输出（每个 m 值）：
+    参数扫描：m = 0, 4, 8, 16, 32, 64, K
+
+    三种保留集变体：
+    - variant='topK':   保留 S_{t-1}（前一 token 的 top-K，K 个元素）
+    - variant='topL':   保留前一 token 的 top-L 候选池（L = 1.5K, 2K）
+    - variant='union2':  保留 S_{t-1} ∪ S_{t-2}（前两步 top-K 并集）
+
+    注意：不同变体的保留集大小不同（topK=K, topL=1.5K/2K, union2≤2K），
+    因此同一个 m 下的 recall 不可直接比较。跨变体对比时应使用"总候选集大小"
+    （= |retained| + m）作为 X 轴，在相同总候选预算下比较 recall。
+    跨变体比较统一限制到 pos≥2 的 token 子集，避免边界退化行为污染统计。
+
+    边界条件（union2）：
+    - pos=0：无前序 token，退化为全搜索基线，不参与增量统计
+    - pos=1：S_{t-2} 不存在，退化为 topK 变体
+    - pos≥2：正常使用 S_{t-1} ∪ S_{t-2}
+    - 不跨序列边界：不使用上一序列的激活
+
+    输出（每个 (variant, m) 组合）：
     - recall: 命中真实 top-K 的比例（均值 + P50/P90/P99 分布）
     - recall_weighted: 按激活值加权的 recall
+    - new_mass_ratio: Σ_{i ∈ S_t \\ retained} |α_i| / Σ_{i ∈ S_t} |α_i|
+      （新进入基向量的激活质量占比，比 overlap count 更直接反映漏选代价）
     - mse_c2a: 用命中的基向量 + C2a 内积系数重构的 MSE
     - mse_c2c: 用命中的基向量 + C2c CG 系数（t=5）重构的 MSE
     注意：不使用"完全 oracle 最优系数"（完整最小二乘），因为实际推理中只会用 C2a 或 C2c。
     用完全最优系数会高估 C1 方案的实际价值。
     - replacement_count_dist: 实际需要替换多少个才能 100% recall 的分布
+    - burstiness: 替换数 > 阈值的连续 token 段长度分布（run length distribution）
     """
-    for each consecutive token pair (t, t+1) within same sequence:
-        S_old = set(indices[t])
-        S_true = set(indices[t+1])
-        overlap = S_old & S_true
-        need_replace = S_true - S_old  # 真正需要替换的
+    top_k_indices = layer_data['top_k_indices']
+    top_k_values = layer_data['top_k_values']
+    top_2k_indices = layer_data['top_2k_indices']
+    token_pos = layer_data['token_pos']
+    seq_boundaries = layer_data['seq_boundaries']
 
-        for m in [4, 8, 16, 32, 64, K]:
-            # oracle：从 need_replace 中取激活值最大的 min(m, |need_replace|) 个
-            # 候选集 = overlap ∪ oracle_new
-            # recall = |候选集 ∩ S_true| / K
+    for variant in ['topK', 'topL_1.5', 'topL_2.0', 'union2']:
+        for each consecutive token pair (t, t+1) within same sequence:
+            if variant == 'topK':
+                S_retained = set(top_k_indices[t])                 # |S| = K
+            elif variant == 'topL_1.5':
+                S_retained = set(top_2k_indices[t][:int(1.5*K)])   # |S| = 1.5K
+            elif variant == 'topL_2.0':
+                S_retained = set(top_2k_indices[t])                # |S| = 2K
+            elif variant == 'union2':
+                if token_pos[t] == 0: continue  # 跳过序列首 token
+                if token_pos[t] == 1:
+                    S_retained = set(top_k_indices[t])             # 退化为 topK
+                else:
+                    S_retained = set(top_k_indices[t]) | set(top_k_indices[t-1])  # |S| ≤ 2K
+
+            S_true = set(top_k_indices[t+1])
+            overlap = S_retained & S_true
+            need_replace = S_true - S_retained
+
+            for m in [0, 4, 8, 16, 32, 64, K]:
+                # oracle：从 need_replace 中取激活值最大的 min(m, |need_replace|) 个
+                # 候选集 = overlap ∪ oracle_new
+                # recall = |候选集 ∩ S_true| / K
 ```
 
 **关键输出**：
 - replacement_count 的**分布直方图**（不只是均值），尤其 P90/P99
-- m vs recall 曲线（这就是"候选集大小 → recall"曲线的增量版本）
+- m vs recall 曲线（含 m=0 和 m=K 两个锚点，完整展示从纯复用到全搜索的趋势）
+- **new-mass ratio 分布**：new_mass = Σ_{i ∈ S_t \ retained} |α_i| / Σ_{i ∈ S_t} |α_i|，作为主指标之一
 - value-aware recall：被漏掉的基向量的激活值有多大
+- **三种保留集的对比**：以"总候选集大小 = |retained| + m"为 X 轴，在相同总预算下比较 topK vs topL vs union2 的 recall，判断更大记忆深度的边际收益
+- **burstiness**：run length 分布直方图，关注连续坏段。使用两类阈值：
+  - 固定阈值：replacement_count > K/4, K/2（跨层跨变体可比，对接工程预算）
+  - 相对阈值：replacement_count > median+1σ（单方案内部异常检测）
 
 ### 3.3 Oracle Baseline B：热集选择（C1h 上限）
 
@@ -256,12 +310,19 @@ python scripts/analyze_activation_patterns.py \
 
 ### 5.1 Oracle A：增量选择
 
-| 指标 | 含义 | 关键阈值 |
-|------|------|----------|
-| recall@m=16 | 允许替换 16 个时的 recall | >90% 说明 C1e 高度可行 |
-| recall_weighted@m=16 | value-aware 版本 | >95% 说明漏掉的都是弱激活 |
-| replacement_count_P90 | 90% 的 token 需要替换多少个 | <32 可操作 |
-| replacement_count_P99 | 99% 的 token 需要替换多少个 | <64 可操作 |
+> go/no-go 阈值基于 **topK 基线变体**（最保守场景）。topL 和 union2 是"额外记忆预算能换多少收益"的探索，不影响 go/no-go 判定。
+
+| 指标 | 变体 | 含义 | 关键阈值 |
+|------|------|------|----------|
+| recall@m=0 | topK | 纯复用（不替换任何基向量）的 recall | 基线锚点 |
+| recall@m=16 | topK | 允许替换 16 个时的 recall | >90% 说明 C1e 高度可行 |
+| recall_weighted@m=16 | topK | value-aware 版本 | >95% 说明漏掉的都是弱激活 |
+| new_mass_ratio | topK | 新进入基向量的激活质量占比 | <10% 说明漏选代价低 |
+| replacement_count_P90 | topK | 90% 的 token 需要替换多少个 | <32 可操作 |
+| replacement_count_P99 | topK | 99% 的 token 需要替换多少个 | <64 可操作 |
+| burstiness_max_run | topK | 替换数超 K/4 的最长连续段 | <5 tokens 可操作 |
+| recall@budget=1.5K | 跨变体(pos≥2) | 总候选预算=1.5K 时各变体的 recall | topL/union2 是否优于 topK+m |
+| recall@budget=2K | 跨变体(pos≥2) | 总候选预算=2K 时各变体的 recall | topL/union2 是否优于 topK+m |
 
 ### 5.2 Oracle B：热集选择
 
