@@ -1,6 +1,12 @@
 ---
 name: luturbo_experiment
-description: LUTurbo 实验开发指南。在用户要求实现新实验、运行评估、或在 experiments/ 目录下工作时自动应用。提供 LUT 权重加载、数据集使用、指标计算等关键上下文。
+description: >-
+  LUTurbo 实验开发指南。**必须**在以下场景主动调用（不需要用户手动触发）：
+  (1) 用户要求实现新实验、写实验代码
+  (2) 用户要求运行评估或测试某个 idea
+  (3) 需要在 experiments/ 目录下创建或修改文件
+  (4) /update-research 完成规划后进入实现阶段。
+  提供 LUT 权重加载、数据集路径、结果保存规范、hookpoint 映射等关键上下文。
 keywords:
   - experiment
   - experiments
@@ -11,6 +17,9 @@ keywords:
   - CG
   - evaluation
   - eval
+  - 测试
+  - 实现
+  - 验证
 ---
 
 # LUTurbo Experiment Development Guide
@@ -206,3 +215,20 @@ Before writing experiment code, verify:
 ## Post-Experiment Documentation
 
 实验完成后，用 `/update-research` 命令更新 LUTurbo-doc 中的研究文档（research-log.md、decision-tree.md、experiments/ 文档）。
+
+## Workflow Integration
+
+本 skill 与 `/update-research` 命令形成双向衔接：
+
+```
+/update-research（规划实验）
+    ↓ 用户说"开始实现" / "测试一下"
+luturbo_experiment（获取实现规范，按 Pre-Implementation Checklist 检查）
+    ↓ 编码、运行
+/update-research（记录结果）
+```
+
+**关键**：在从"规划"转入"编码"时，必须先加载本 skill，确保：
+1. 路径配置正确（数据集、LUT、阈值文件）
+2. 代码结构符合规范（目录结构、结果分 model 存放）
+3. 不犯 Critical Rules 中列举的已知错误

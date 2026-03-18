@@ -5,6 +5,7 @@
 > 辅助文档：[decision-tree.md](decision-tree.md) — 决策树与耦合关系矩阵
 > Idea 文档：[ideas/cg-coefficients.md](ideas/cg-coefficients.md) — CG 最优系数方案（解耦选择与系数）
 > Idea 文档：[ideas/activation-patterns.md](ideas/activation-patterns.md) — 激活模式分析（C1 方案筛选的数据支撑）
+> Idea 文档：[ideas/structured-sae.md](ideas/structured-sae.md) — 结构化 SAE（训练时引入分组约束，联合解决 B 和 C1）
 > 实验计划：[experiments/](experiments/) — 每次实验的详细计划与结果（[模板](experiments/_template.md)）
 
 ## 1. 项目概述
@@ -247,10 +248,39 @@ p=0.1 时：总访存 ≈ K×n + 0.1×h×n + 选择开销
 
 9. **两个瓶颈能否联合解决？** 是否存在一种 SAE 架构，其编码过程天然就是低开销的（即编码器本身就是稀疏/结构化的），同时保持高重构精度？
 
+10. **能否通过修改 SAE 训练目标来引入分组结构？** C1c 实验显示当前 SAE 的激活模式缺乏聚类结构（全子库 90-100%N），这是纯重构训练目标的自然结果。如果在训练时加入分组约束（Group TopK、共激活正则、分块对角编码器），能否在保持重构精度的同时让激活具备可利用的分组结构？这是问题 9 的一个具体实例化方向。详见 [ideas/structured-sae.md](ideas/structured-sae.md)
+
 ## 6. 实验记录
 
 > 按时间倒序排列。每次实验记录：日期、方法、结果、结论。
 > 详细的实验计划与数据见 [experiments/](experiments/) 目录下对应文档。
+
+### 2026-03-18 | 激活模式分析 Phase 2 完结（C1c 条件子库 oracle baseline）
+
+- **方法**：在 Qwen3-0.6B 上用 1.31M token 的 SAE 激活进行 KMeans 聚类（G=8,16,32,64），为每簇构建子库并测量 oracle routing recall。覆盖 2 层（7, 14）× 3 算子（mlp, qkv, o_proj）
+- **结果**：
+  - 全子库大小 90-100%N（聚类高度重叠，各簇子库覆盖几乎全部基向量）
+  - 25%N 截断：mlp 57-73%，qkv 57-73%，o_proj 71-84% recall
+  - Cross-route gap 极小（0.001-0.06），但原因是子库本身几乎相同
+  - 增加 G（8→64）仅带来 5-8pp 改善
+- **结论**：C1c 单独不可行。SAE 激活缺乏聚类结构——全子库 ≈ 全库。C1h+C1i 在更小候选集下达到更高 recall。Phase 2（C1i + C1c）全部完成。激活结构缺失暗示需从 SAE 训练端（B1-constrained）引入分组约束。详见 [实验文档](experiments/20260316-activation-patterns.md)
+
+### 2026-03-18 | 激活模式分析 Phase 2 — C1i（种子扩展 oracle baseline）
+
+- **方法**：在 Qwen3-0.6B 上采集 1.31M token 的 SAE 激活，构建 PMI 共激活近邻表，测试 oracle seeds 和 hotset-as-seeds 两种种子扩展策略的 recall。覆盖 2 层（7, 14）× 3 算子（mlp, qkv, o_proj）
+- **结果**：
+  - C1i 独立：oracle seeds s=32,n=64 仅 44-55% recall，共激活结构不够紧密，独立不可行
+  - C1h+C1i 组合：o_proj L7 表现最佳——20% 热集种子（~92 个）+ n=32 邻居 → 88% recall（recall_w=92%），候选仅 12.5%N；mlp/qkv 中等，66-74% recall@15-16%N
+  - PMI 近邻表极其稳定（CV gap < 0.001），可离线预计算
+- **结论**：C1i 独立不可行。C1h+C1i 组合对 o_proj 高度可行（12.5%N → 88% recall），mlp/qkv 中等。o_proj 的 C1h+C1i 方案已达实用水平，可进入在线算法实现。MLP/QKV 仍需结构化 SAE（B1-constrained）、更大热集或其他补充方案。详见 [实验文档](experiments/20260316-activation-patterns.md)
+
+### 2026-03-17 | 激活模式分析 Phase 1（C1e + C1h oracle baselines）
+
+- **方法**：在 Qwen3-0.6B 上采集 1.31M token 的 SAE top-K 激活，分析相邻 token 重叠（C1e 增量选择）和全局热集命中率（C1h 热集选择）。覆盖 5 层 × 3 算子（mlp, qkv, o_proj）
+- **结果**：
+  - C1e：自然重叠率仅 20-37%（o_proj 最好 37%），每步替换 80-102/128 个基向量，oracle m=64 recall 仅 70-86%，burstiness 极严重
+  - C1h：o_proj Gini 0.58-0.88（中深层），20% 热集 recall 在中深层（L7/21/27）达 72-94%（Layer21 o_proj 达 94%），浅层及其他算子 43-63%。MLP/QKV Gini 0.35-0.56，recall 43-60%
+- **结论**：C1e 单独不可行（oracle 上限不足）。C1h 对 o_proj 中深层高度可行（L7/21/27），MLP/QKV 需配合其他方案。新增 C1h 节点到决策树。详见 [实验文档](experiments/20260316-activation-patterns.md)
 
 ### 2026-03-16 | CG 最优系数 Phase 1 验证
 
