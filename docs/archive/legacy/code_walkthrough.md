@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # Sparsify 代码走读文档
 
 本文档将带你深入理解 sparsify 代码库的结构和实现原理。

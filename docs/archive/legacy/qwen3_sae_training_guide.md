@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # Qwen3-8B SAE 训练完整配置指南
 
 ## 1. Qwen3-8B 模型结构

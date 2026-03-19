@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # Sparsify Trainer 代码走读
 
 本文档详细分析 `sparsify/trainer.py` 的代码结构和训练流程。

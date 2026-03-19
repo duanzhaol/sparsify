@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # SAE + LLM 联合训练 Profiling 报告（Ascend，2026-03-06）
 
 本文档整理当前 SAE 训练在 Ascend NPU 上的 profiling 结果，覆盖：

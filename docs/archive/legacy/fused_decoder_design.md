@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # FusedDecoder：Ascend NPU 自定义解码器算子设计文档
 
 ## 1. 问题背景

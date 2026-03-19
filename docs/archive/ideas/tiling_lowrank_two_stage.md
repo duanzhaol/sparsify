@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # ANNS + 精算 的 SAE 编码器推理方案（面向 LUT，CPU）
 
 ## 1. 问题背景与现状

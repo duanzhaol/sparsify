@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 全局耗时分布（rank 2，总计 4604 ms）
 
   | 类别 | 耗时 | 占比 | 调用次数 | 说明 |

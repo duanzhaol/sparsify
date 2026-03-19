@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 ❯ 请你再帮我分析下，在我这个流程下，如何极致的压缩推理阶段encoder的开销？ 
 
 ● 好问题！让我系统分析一下。

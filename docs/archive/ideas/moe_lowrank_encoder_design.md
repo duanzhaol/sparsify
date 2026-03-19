@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # MoE-LowRank SAE Encoder 设计方案
 
 本文档描述一种基于 MoE（Mixture of Experts）和低秩分解的 SAE Encoder 架构，旨在大幅降低在线推理时的访存量，同时保持与标准 SAE 兼容的输出格式。

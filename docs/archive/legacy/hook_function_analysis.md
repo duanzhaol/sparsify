@@ -1,3 +1,6 @@
+> Archived document: this file is kept for historical reference and may not match the current codebase.
+> For current guidance, start from `docs/README.md` and the active docs under `docs/`.
+
 # Sparsify Hook 函数逻辑分析
 
 本文档详细分析 `trainer.py` 中 `hook` 函数的实现逻辑及其使用方式。
