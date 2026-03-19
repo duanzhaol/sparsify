@@ -79,7 +79,7 @@ class SparseCoder(nn.Module):
 
         if layers is not None:
             return {
-                layer: SparseCoder.load_from_disk(
+                layer: SparseCoder.load_any(
                     repo_path / layer, device=device, decoder=decoder
                 )
                 for layer in natsorted(layers)
@@ -90,7 +90,7 @@ class SparseCoder(nn.Module):
             if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
         ]
         return {
-            f.name: SparseCoder.load_from_disk(f, device=device, decoder=decoder)
+            f.name: SparseCoder.load_any(f, device=device, decoder=decoder)
             for f in natsorted(files, key=lambda f: f.name)
         }
 
@@ -116,10 +116,11 @@ class SparseCoder(nn.Module):
         elif not repo_path.joinpath("cfg.json").exists():
             raise FileNotFoundError("No config file found; try specifying a layer.")
 
-        return SparseCoder.load_from_disk(repo_path, device=device, decoder=decoder)
+        return SparseCoder.load_any(repo_path, device=device, decoder=decoder)
 
-    @staticmethod
+    @classmethod
     def load_from_disk(
+        cls,
         path: Path | str,
         device: str | torch.device = "cpu",
         *,
@@ -138,7 +139,7 @@ class SparseCoder(nn.Module):
             first_key = next(iter(f.keys()))
             reference_dtype = f.get_tensor(first_key).dtype
 
-        sae = SparseCoder(
+        sae = cls(
             d_in, cfg, device=device, decoder=decoder, dtype=reference_dtype
         )
 
@@ -150,6 +151,23 @@ class SparseCoder(nn.Module):
             strict=decoder,
         )
         return sae
+
+    @staticmethod
+    def load_any(
+        path: Path | str,
+        device: str | torch.device = "cpu",
+        *,
+        decoder: bool = True,
+    ) -> "SparseCoder":
+        """Factory: load any SAE variant by reading architecture from cfg.json."""
+        path = Path(path)
+
+        with open(path / "cfg.json", "r") as f:
+            cfg_dict = json.load(f)
+
+        architecture = cfg_dict.get("architecture", "topk")
+        cls = _get_sae_class(architecture)
+        return cls.load_from_disk(path, device=device, decoder=decoder)
 
     def save_to_disk(self, path: Path | str):
         path = Path(path)
@@ -167,11 +185,15 @@ class SparseCoder(nn.Module):
 
     @property
     def device(self):
-        return self.encoder.weight.device
+        return self.b_dec.device
 
     @property
     def dtype(self):
-        return self.encoder.weight.dtype
+        return self.b_dec.dtype
+
+    def get_param_groups(self, base_lr: float) -> list[dict]:
+        """Return optimizer parameter groups. Subclasses can override for per-component LR."""
+        return [{"params": self.parameters(), "lr": base_lr}]
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
@@ -262,6 +284,22 @@ class SparseCoder(nn.Module):
             self.W_dec.data,
             "d_sae, d_sae d_in -> d_sae d_in",
         )
+
+
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "gated":
+        from .gated_sparse_coder import GatedSparseCoder
+        return GatedSparseCoder
+    if architecture == "jumprelu":
+        from .jumprelu_sparse_coder import JumpReLUSparseCoder
+        return JumpReLUSparseCoder
+    if architecture == "group_topk":
+        from .group_topk_sparse_coder import GroupTopKSparseCoder
+        return GroupTopKSparseCoder
+    raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
 # Allow for alternate naming conventions

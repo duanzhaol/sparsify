@@ -23,8 +23,9 @@ from .config import TrainConfig
 from .data import MemmapDataset
 from .device import create_event, synchronize
 from .hadamard import HadamardRotation
+from .metrics_logger import MetricsLogger
 from .sign_sgd import SignSGD
-from .sparse_coder import SparseCoder
+from .sparse_coder import SparseCoder, _get_sae_class
 from .tiled_sparse_coder import TiledSparseCoder
 from .utils import (
     get_layer_list,
@@ -107,7 +108,8 @@ class Trainer(CheckpointMixin):
                         input_mixing=cfg.input_mixing,
                     )
                 else:
-                    self.saes[name] = SparseCoder(
+                    sae_cls = _get_sae_class(cfg.sae.architecture)
+                    self.saes[name] = sae_cls(
                         input_widths[hook],
                         cfg.sae,
                         device,
@@ -116,17 +118,19 @@ class Trainer(CheckpointMixin):
 
         assert isinstance(dataset, Sized)
 
-        # Optimizer: Signum with schedule-free wrapper
-        pgs = [
-            dict(
-                params=sae.parameters(),
-                lr=cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5,
-            )
-            for sae in self.saes.values()
-        ]
+        # Optimizer with configurable backend and get_param_groups interface
+        pgs = []
+        for sae in self.saes.values():
+            base_lr = cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5
+            pgs.extend(sae.get_param_groups(base_lr))
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
-        opt = ScheduleFreeWrapperReference(SignSGD(pgs), momentum=0.95)
+        if cfg.optimizer == "adam":
+            base_opt = torch.optim.Adam(pgs)
+        else:
+            # signum (default)
+            base_opt = SignSGD(pgs)
+        opt = ScheduleFreeWrapperReference(base_opt, momentum=0.95)
         opt.train()
         self.optimizers = [opt]
 
@@ -158,6 +162,19 @@ class Trainer(CheckpointMixin):
                 f"Hadamard rotation enabled: block_size={cfg.hadamard_block_size}, "
                 f"seed={cfg.hadamard_seed}, use_perm={cfg.hadamard_use_perm}"
             )
+
+        # Residual SAE: preload frozen Level 1 checkpoints
+        self.residual_saes: dict[str, SparseCoder] = {}
+        if cfg.residual_from:
+            from pathlib import Path as _Path
+
+            logger.info(f"Residual training from: {cfg.residual_from}")
+            for hook in cfg.hookpoints:
+                l1_path = _Path(cfg.residual_from) / hook
+                self.residual_saes[hook] = (
+                    SparseCoder.load_any(l1_path, device=device).eval()
+                )
+                self.residual_saes[hook].requires_grad_(False)
 
     def fit(self):
         # Use Tensor Cores even for fp32 matmuls
@@ -224,6 +241,23 @@ class Trainer(CheckpointMixin):
                 )
                 dist.broadcast(flag, src=0)
                 self.cfg.log_to_wandb = bool(flag.item())
+
+        # Initialize MetricsLogger for structured local result saving
+        metrics_logger = None
+        if self.cfg.save_metrics_jsonl and rank_zero:
+            from pathlib import Path as _Path
+
+            log_dir = _Path(self.cfg.save_dir) / self.full_run_name
+            run_meta = {
+                "run_name": self.full_run_name,
+                "architecture": self.cfg.sae.architecture,
+                "hookpoints": self.cfg.hookpoints,
+                "init_seeds": self.cfg.init_seeds,
+                "residual_from": self.cfg.residual_from,
+            }
+            metrics_logger = MetricsLogger(
+                log_dir, asdict(self.cfg), run_meta
+            )
 
         num_sae_params = sum(
             p.numel() for s in self.saes.values() for p in s.parameters()
@@ -370,6 +404,13 @@ class Trainer(CheckpointMixin):
                     )
                 acts = self.hadamard_rotations[name].rotate(acts)
 
+            # Residual SAE: subtract frozen Level 1 reconstruction.
+            # Must be AFTER Hadamard so L1 operates in the same space it was trained in.
+            if self.residual_saes and name in self.residual_saes:
+                with torch.no_grad():
+                    l1_out = self.residual_saes[name](acts).sae_out
+                acts = acts - l1_out
+
             # Pre-compute unrotated target for exceed metrics
             original_target_for_exceed = None
             if (
@@ -476,6 +517,40 @@ class Trainer(CheckpointMixin):
 
                     # Local backward pass (inside sync_context for DDP no_sync)
                     loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+
+                    # Matryoshka multi-K loss
+                    if self.cfg.matryoshka_ks:
+                        total_var = (acts - acts.mean(0)).pow(2).sum()
+                        weights = (
+                            self.cfg.matryoshka_weights
+                            or [1.0] * len(self.cfg.matryoshka_ks)
+                        )
+                        # Sort by activation magnitude so [:mk] gets strongest
+                        sorted_acts, sort_idx = out.latent_acts.sort(
+                            dim=-1, descending=True
+                        )
+                        sorted_indices = out.latent_indices.gather(-1, sort_idx)
+                        for mk, mw in zip(self.cfg.matryoshka_ks, weights):
+                            sub_recon = raw.decode(
+                                sorted_acts[:, :mk], sorted_indices[:, :mk]
+                            )
+                            sub_e = (acts - sub_recon).pow(2).sum()
+                            loss = loss + mw * sub_e / total_var
+
+                    # Orthogonality regularization on active decoder columns
+                    if self.cfg.ortho_lambda > 0 and raw.W_dec is not None:
+                        D_S = raw.W_dec[out.latent_indices]  # [batch, K, d_in]
+                        gram = torch.bmm(
+                            D_S, D_S.transpose(1, 2)
+                        )  # [batch, K, K]
+                        eye = torch.eye(
+                            gram.shape[-1],
+                            device=gram.device,
+                            dtype=gram.dtype,
+                        )
+                        ortho_loss = (gram - eye).pow(2).sum() / gram.shape[0]
+                        loss = loss + self.cfg.ortho_lambda * ortho_loss
+
                     loss.div(acc_steps).backward()
 
         # Prevent dynamo from tracing the hook body when torch.compile is used
@@ -637,6 +712,19 @@ class Trainer(CheckpointMixin):
                                 f"{self.total_tokens:,} / {self.cfg.max_tokens:,}"
                             )
                         self.save()
+                        if metrics_logger is not None:
+                            metrics_logger.save_summary(
+                                {
+                                    "total_steps": step,
+                                    "total_tokens": self.total_tokens,
+                                    "final_fvu": {
+                                        name: avg_fvu.get(name, 0.0)
+                                        for name in self.saes
+                                    },
+                                    "best_fvu": dict(self.best_loss),
+                                }
+                            )
+                            metrics_logger.close()
                         if dist.is_initialized():
                             dist.destroy_process_group()
                         return
@@ -652,7 +740,10 @@ class Trainer(CheckpointMixin):
                         self.save_best(avg_losses)
 
                 if (step + 1) % self.cfg.wandb_log_frequency == 0:
-                    if self.cfg.log_to_wandb:
+                    should_log = (
+                        self.cfg.log_to_wandb or metrics_logger is not None
+                    )
+                    if should_log:
                         # Batch reduce all metrics in one allreduce each
                         reduced_fvu = reduce_scalar_mapping(dict(avg_fvu))
                         reduced_auxk = reduce_scalar_mapping(
@@ -709,6 +800,10 @@ class Trainer(CheckpointMixin):
                             info["_step"] = step
                             if wandb is not None:
                                 wandb.log(info, step=self.total_tokens)
+                            if metrics_logger is not None:
+                                metrics_logger.log_step(
+                                    step, self.total_tokens, info
+                                )
 
                     # Reset accumulators unconditionally
                     avg_auxk_loss.clear()
@@ -724,6 +819,20 @@ class Trainer(CheckpointMixin):
         self.save()
         if self.cfg.save_best:
             self.save_best(avg_losses)
+
+        # Write final summary and close metrics logger
+        if metrics_logger is not None:
+            metrics_logger.save_summary(
+                {
+                    "total_steps": step if 'step' in dir() else self.global_step,
+                    "total_tokens": self.total_tokens,
+                    "final_fvu": {
+                        name: avg_fvu.get(name, 0.0) for name in self.saes
+                    },
+                    "best_fvu": dict(self.best_loss),
+                }
+            )
+            metrics_logger.close()
 
         pbar.close()
 

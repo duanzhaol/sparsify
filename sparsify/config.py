@@ -20,6 +20,24 @@ class SparseCoderConfig(Serializable):
     k: int = 32
     """Number of nonzero features."""
 
+    # Architecture selection
+    architecture: str = "topk"
+    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk'."""
+
+    # JumpReLU parameters (only used when architecture='jumprelu')
+    jumprelu_init_threshold: float = 0.001
+    """Initial per-feature threshold for JumpReLU activation."""
+
+    jumprelu_bandwidth: float = 0.001
+    """Bandwidth for STE approximation in JumpReLU backward."""
+
+    # Group TopK parameters (only used when architecture='group_topk')
+    num_groups: int = 0
+    """Number of groups for Group TopK. Must divide num_latents evenly."""
+
+    active_groups: int = 0
+    """Number of groups to select per input in Group TopK."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -121,6 +139,29 @@ class TrainConfig(Serializable):
     finetune: str | None = None
     """Finetune the sparse coders from a pretrained checkpoint."""
 
+    # Optimizer selection
+    optimizer: str = "signum"
+    """Optimizer: 'signum' | 'adam'."""
+
+    # Matryoshka multi-K training
+    matryoshka_ks: list[int] = list_field()
+    """List of K values for Matryoshka multi-K loss. Empty = disabled."""
+
+    matryoshka_weights: list[float] = list_field()
+    """Weights for each Matryoshka K. Must match len(matryoshka_ks). Empty = uniform."""
+
+    # Orthogonality regularization
+    ortho_lambda: float = 0.0
+    """Weight for orthogonality regularization on active decoder columns."""
+
+    # Residual SAE training
+    residual_from: str | None = None
+    """Level 1 SAE checkpoint path. When set, trains Level 2 SAE on residual."""
+
+    # Local metrics saving
+    save_metrics_jsonl: bool = True
+    """Save per-step metrics to JSONL file alongside W&B."""
+
     def __post_init__(self):
         """Validate the configuration."""
         if self.layers and self.layer_stride != 1:
@@ -145,4 +186,56 @@ class TrainConfig(Serializable):
             if bs <= 0 or (bs & (bs - 1)) != 0:
                 raise ValueError(
                     f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = ("topk", "gated", "jumprelu", "group_topk")
+        if self.sae.architecture not in valid_archs:
+            raise ValueError(
+                f"Unknown architecture: {self.sae.architecture!r}. "
+                f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.architecture == "group_topk":
+            if self.sae.num_groups <= 0:
+                raise ValueError("num_groups must be > 0 for group_topk architecture")
+            if self.sae.active_groups <= 0:
+                raise ValueError("active_groups must be > 0 for group_topk architecture")
+            if self.sae.active_groups > self.sae.num_groups:
+                raise ValueError("active_groups must be <= num_groups")
+            # Ensure enough selectable latents for k
+            num_latents = self.sae.num_latents or 1  # actual value depends on d_in
+            if self.sae.num_latents > 0:
+                group_size = self.sae.num_latents // self.sae.num_groups
+                selectable = self.sae.active_groups * group_size
+                if self.sae.k > selectable:
+                    raise ValueError(
+                        f"k ({self.sae.k}) > active_groups * group_size "
+                        f"({self.sae.active_groups} * {group_size} = {selectable}). "
+                        f"This would select -inf values from masked groups."
+                    )
+
+        # Optimizer validation
+        valid_opts = ("signum", "adam")
+        if self.optimizer not in valid_opts:
+            raise ValueError(
+                f"Unknown optimizer: {self.optimizer!r}. Must be one of {valid_opts}"
+            )
+
+        # JumpReLU validation
+        if self.sae.architecture == "jumprelu":
+            if self.sae.jumprelu_bandwidth <= 0:
+                raise ValueError("jumprelu_bandwidth must be > 0")
+
+        # Matryoshka validation
+        if self.matryoshka_ks:
+            for mk in self.matryoshka_ks:
+                if mk <= 0 or mk > self.sae.k:
+                    raise ValueError(
+                        f"Each matryoshka K must be in (0, sae.k={self.sae.k}], got {mk}"
+                    )
+        if self.matryoshka_ks and self.matryoshka_weights:
+            if len(self.matryoshka_ks) != len(self.matryoshka_weights):
+                raise ValueError(
+                    "matryoshka_ks and matryoshka_weights must have same length"
                 )
