@@ -1,5 +1,7 @@
 # 训练流程
 
+> 说明：本文按 Phase 2 目标设计描述训练流程，重点覆盖 SAE 架构分发、训练增强和结构化 artifact 输出。
+
 本文说明当前代码主线中的训练流程，对应实现在 `sparsify/__main__.py` 和 `sparsify/trainer.py`。
 
 关键结论：Sparsify 采用在线训练。系统不会先把激活值整体缓存到磁盘，而是在 Transformer 前向过程中通过 hookpoint 实时获取激活并更新 SAE。
@@ -38,17 +40,20 @@
 
 随后按 `hookpoint × seed` 组合创建 SAE：
 
-- `num_tiles == 1` 时使用 `SparseCoder`
+- `num_tiles == 1` 时根据 `sae.architecture` 选择 `SparseCoder` 或其他 SAE 变体
 - `num_tiles > 1` 时使用 `TiledSparseCoder`
 
 因此当 `init_seeds` 包含多个值时，一个 hookpoint 会对应多个 SAE 实例。
 
 ## 4. 优化器与训练步长
 
-当前主线只保留一条优化器路径：
+Phase 2 中，训练器通过 `sae.get_param_groups(base_lr)` 收集各 SAE 的参数组，再按 `optimizer` 选择基础优化器。支持路径包括：
 
-- `SignSGD`
-- 外层包 `ScheduleFreeWrapperReference`
+- `signum`
+- `adam`
+- `muon`
+
+随后统一由 `ScheduleFreeWrapperReference` 包装。
 
 若未显式设置 `lr`，则按潜在维度规模应用默认缩放规则。
 
@@ -64,10 +69,13 @@
 - 取模块输入并展平为 `[batch * seq, hidden]`
 - 按配置决定是否执行 Hadamard 旋转
 - 首步（且非 finetune）用激活均值初始化 `b_dec`
+- 如果设置了 `residual_from`，先用 Level 1 SAE 计算残差，再把残差作为当前 SAE 的训练目标
 - 执行 SAE 前向，得到重建输出与稀疏索引
 - 记录激活 latent 索引，用于后续死特征统计
 - 累积 FVU / AuxK / exceed 指标
-- 立即执行局部反向：`out.fvu + auxk_alpha * out.auxk_loss`
+- 可选叠加 Matryoshka 多 K 损失
+- 可选叠加解码器正交性正则
+- 立即执行局部反向：基础损失 + 可选训练增强项
 
 DDP 场景下，非同步边界会使用 `no_sync()` 降低不必要的梯度通信。
 
@@ -95,9 +103,16 @@ DDP 场景下，非同步边界会使用 `no_sync()` 降低不必要的梯度通
 
 - 常规 checkpoint 保存（`CheckpointMixin`）
 - 可选 best checkpoint 保存
+- 本地结构化 artifact 写入（`MetricsLogger`）
 - Weights & Biases 指标上报
 
-保存内容包括 SAE 权重、优化器状态、`global_step`、`total_tokens`、死特征计数、最佳损失，以及可选的 Hadamard 状态。
+保存内容包括 SAE 权重、优化器状态、`global_step`、`total_tokens`、死特征计数、最佳损失，以及可选的 Hadamard 状态。与此同时，运行目录还会写入：
+
+- `manifest.json`
+- `metrics.jsonl`
+- `summary.json`
+
+因此训练结果既可在 W&B 中查看，也可由后续脚本直接扫描本地 artifact 做横向比较。
 
 ## 9. 推荐阅读顺序
 
@@ -107,5 +122,7 @@ DDP 场景下，非同步边界会使用 `no_sync()` 降低不必要的梯度通
 2. `sparsify/config.py`
 3. `sparsify/trainer.py`
 4. `sparsify/sparse_coder.py`
-5. `sparsify/tiled_sparse_coder.py`
-6. `sparsify/checkpoint.py`
+5. `sparsify/gated_sparse_coder.py` / `sparsify/jumprelu_sparse_coder.py` / `sparsify/group_topk_sparse_coder.py`
+6. `sparsify/tiled_sparse_coder.py`
+7. `sparsify/checkpoint.py`
+8. `sparsify/metrics_logger.py`

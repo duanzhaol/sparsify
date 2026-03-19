@@ -1,5 +1,7 @@
 # 训练快速开始
 
+> 说明：本文按 Phase 2 训练框架的使用方式编写，示例展示标准 TopK SAE 与架构变体共享的运行入口。
+
 本文档介绍 Sparsify 在 NVIDIA/CUDA 平台训练 SAE 的主线流程，目标是先跑通训练，再完成阈值统计与 LUT 导出。
 
 ## 1. 安装
@@ -24,7 +26,9 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
   --batch_size 1 \
   --grad_acc_steps 8 \
   --ctx_len 2048 \
+  --optimizer signum \
   --sae.expansion_factor 8 \
+  --sae.architecture topk \
   --sae.k 128 \
   --save_dir checkpoints \
   --run_name qwen3-oproj-demo
@@ -36,6 +40,25 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 - 当前实现使用模块输入作为 SAE 训练激活值。
 - 如果数据集尚未分词，CLI 会在运行中调用分词逻辑。
 - 示例中的 `o_proj` 名称用于匹配模块，实际训练的是该模块的输入。
+- 若要切换架构变体，只需替换 `--sae.architecture` 及对应子参数。
+
+例如，训练一个 Gated SAE：
+
+```bash
+python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
+  --data_args "name=sample-10BT" \
+  --text_column text \
+  --hookpoints "layers.[7,14].self_attn.o_proj" \
+  --batch_size 1 \
+  --grad_acc_steps 8 \
+  --ctx_len 2048 \
+  --optimizer signum \
+  --sae.architecture gated \
+  --sae.expansion_factor 8 \
+  --sae.k 32 \
+  --save_dir checkpoints \
+  --run_name qwen3-oproj-gated
+```
 
 ## 3. 预期输出
 
@@ -48,6 +71,9 @@ checkpoints/<run_name>_dp1_bs1_ga8_ef8_k128_<timestamp>/
 典型内容包括：
 
 - `config.json`：序列化的训练配置
+- `manifest.json`：运行身份证，记录架构、模型、数据集和 git 信息
+- `metrics.jsonl`：逐步训练指标
+- `summary.json`：训练结束摘要
 - `state.pt`：训练器状态，如 `global_step` 和 `total_tokens`
 - `optimizer_0.pt`：优化器状态
 - `<hookpoint>/cfg.json`：单个 hookpoint 对应的 SAE 配置
@@ -74,6 +100,18 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 ```
 
 `resume` 用于接着同一次训练继续跑（包括优化器状态和 token 计数）；`finetune` 用于加载旧权重后开启一轮新训练。
+
+如果要训练残差 SAE（二级 SAE），可额外提供：
+
+```bash
+python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
+  --hookpoints "layers.[7,14].self_attn.o_proj" \
+  --sae.architecture topk \
+  --sae.k 32 \
+  --residual_from checkpoints/level1_run
+```
+
+这里要求 `residual_from` 下的 hookpoint 命名与当前训练目标一致。
 
 ## 5. 生成肘部阈值
 
@@ -135,6 +173,7 @@ python convert_sae_to_lut.py Qwen/Qwen3-0.6B checkpoints \
 
 - 使用 `compute_elbow_thresholds.py` 生成肘部阈值
 - 使用 `convert_sae_to_lut.py` 转换选定的 SAE 检查点
+- 用脚本扫描 `metrics.jsonl` / `summary.json` 做多 run 横向比较
 - 在 `docs/architecture/training-pipeline.md` 中查看训练流程
 
 如果你不确定接下来阅读什么：

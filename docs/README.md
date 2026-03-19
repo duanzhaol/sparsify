@@ -1,11 +1,11 @@
 # Sparsify 文档
 
-Sparsify 是 LUTurbo 的 SAE 训练与导出模块，本仓库文档聚焦当前精简后的训练主线：面向 NVIDIA/CUDA，Ascend/NPU 仅保留兼容支持和历史参考。
+Sparsify 是 LUTurbo 的 SAE 训练与导出模块。当前文档同步 Phase 2 SAE 架构实验的设计方向：在保留主训练路径的同时，引入可扩展的 SAE 架构变体与结构化实验产物。默认平台仍以 NVIDIA/CUDA 为主，Ascend/NPU 仅保留兼容支持和历史参考。
 
 ## 本仓库的功能
 
 - 在 Transformer 模块输入上训练稀疏自编码器
-- 保存 SAE 检查点供后续分析和导出
+- 保存 SAE 检查点与结构化训练 artifact，供后续分析和导出
 - 计算 LUTurbo 在线补偿逻辑使用的肘部阈值
 - 将训练好的 SAE 检查点转换为 LUT 友好的产物
 
@@ -29,4 +29,5 @@ Sparsify 是 LUTurbo 的 SAE 训练与导出模块，本仓库文档聚焦当前
 ## 当前文档策略
 
 - 主文档仅描绘当前代码主线，历史设计笔记和性能分析保留在 [archive/](archive/README.md)。
+- Phase 2 文档中的核心边界是：`sparsify/` 负责产出结构化 artifact，`scripts/` 负责消费 artifact 做横向比较。
 - 当文档与代码产生差异，以 `sparsify/__main__.py`、`sparsify/config.py` 和 `sparsify/trainer.py` 为准。

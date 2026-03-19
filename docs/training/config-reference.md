@@ -1,5 +1,7 @@
 # 配置参考
 
+> 说明：本文同步 Phase 2 SAE 架构实验的配置设计，覆盖架构选择、训练增强和结构化 artifact 输出。
+
 本文对应 `sparsify/config.py` 和 `sparsify/__main__.py` 的当前配置定义。
 
 涉及两层配置：
@@ -41,13 +43,22 @@
 
 | 参数 | 含义 |
 | --- | --- |
+| `sae.architecture` | 编码架构：`topk`、`gated`、`jumprelu`、`group_topk` |
 | `sae.expansion_factor` | 当 `num_latents == 0` 时隐变量（latent）维度的扩展因子 |
 | `sae.normalize_decoder` | 将解码器行归一化为单位范数 |
 | `sae.num_latents` | 显式隐变量数；`0` 表示从扩展因子派生 |
 | `sae.k` | 每个样本保留的隐变量数 |
+| `sae.jumprelu_init_threshold` | JumpReLU-fixedK 的阈值初始值 |
+| `sae.jumprelu_bandwidth` | JumpReLU STE 的平滑带宽 |
+| `sae.num_groups` | Group TopK 的分组数 |
+| `sae.active_groups` | Group TopK 中每个输入激活的组数 |
 
 - `num_latents` 默认为 `d_in * expansion_factor`。
 - `sae.k` 在标准 SAE 中表示每个样本可激活的特征总数。
+- `sae.architecture` 决定 `Trainer` 在 `num_tiles == 1` 时实例化哪一种 SAE 实现。
+- `jumprelu_*` 只在 `sae.architecture="jumprelu"` 时生效。
+- `num_groups` 与 `active_groups` 只在 `sae.architecture="group_topk"` 时生效。
+- `group_topk` 当前的 v0 设计是 hard routing 原型，主要用于验证训练框架与指标结构，不应作为结构化 SAE 可行性的正式判据。
 - 分块模式下 `sae.k` 仍是全局预算，`TiledSparseCoder` 会均分成 `k_per_tile = k / num_tiles`。
 
 ## 训练参数
@@ -61,16 +72,25 @@
 | `micro_acc_steps` | 微批次拆分因子 |
 | `max_tokens` | 可选的总令牌预算 |
 | `lr` | 基础学习率；`None` 使用 `Trainer.__init__()` 中的缩放规则 |
+| `optimizer` | 优化器类型：`signum`、`adam`、`muon` |
 | `auxk_alpha` | AuxK 死特征损失的权重 |
 | `dead_feature_threshold` | 特征被判定为失活（dead）前，自上次激活以来的令牌数 |
+| `matryoshka_ks` | 启用 Multi-K 重构损失时使用的 K 列表 |
+| `matryoshka_weights` | 对应 `matryoshka_ks` 的损失权重 |
+| `ortho_lambda` | 解码器正交性正则权重 |
+| `residual_from` | Level 1 SAE checkpoint 路径；设置后训练残差 SAE |
+| `save_metrics_jsonl` | 是否在运行目录中写入 `metrics.jsonl` |
 
 说明：
 
-- 训练器目前使用 `SignSGD` 配合 `ScheduleFreeWrapperReference` 为所有 SAE 参数组构建一个优化器。
+- 训练器通过 `sae.get_param_groups(base_lr)` 收集参数组，因此不同 SAE 变体可以自行决定参数分组策略。
+- `optimizer` 选择基础优化器，外层统一包 `ScheduleFreeWrapperReference`。
 - 如果省略 `lr`，每个 SAE 参数组获得 `5e-3 / sqrt(num_latents / 2^14)`。
 - `grad_acc_steps` 控制优化器步骤何时发生。
 - `micro_acc_steps` 目前主要参与损失缩放和日志分母计算。当前实现不会在 hook 内显式拆分激活张量做微批训练。
 - `max_tokens` 在累积令牌计数器超过预算后停止训练，然后在返回前保存检查点。
+- `matryoshka_ks` 为空时禁用 Matryoshka；启用后会对 top-k 子集重构附加损失。
+- `residual_from` 要求 Level 1 checkpoint 的 hookpoint 目录命名与当前训练目标一致，或由调用方自行保证映射关系。
 
 ## 超出指标
 
@@ -153,6 +173,7 @@
 - `save_every` 以优化器步骤边界衡量，而非原始前向钩子调用。
 - `save_best` 在 `<run>/best/` 下保存各 hookpoint 的当前最优检查点。
 - `finetune` 在 `fit()` 开始前加载现有 SAE 权重；`resume` 恢复 SAE 状态和训练器/优化器状态。
+- `save_metrics_jsonl=True` 时，训练目录会额外写入 `manifest.json`、`metrics.jsonl` 和 `summary.json`。
 - 如果 W&B 不可用或初始化失败，日志会自动禁用，且该标志会在各 rank 间同步。
 
 ## 值得记住的验证规则
@@ -164,6 +185,8 @@
 - `exceed_alphas` 必须为正
 - `elbow_threshold_path` 在提供时必须存在
 - `hadamard_block_size` 必须是正的 2 的幂
+- `matryoshka_weights` 若提供，其长度应与 `matryoshka_ks` 一致
+- `group_topk` 模式下应保证 `num_groups > 0`、`active_groups > 0`
 - `compile_model` 在非 CUDA 后端上被静默禁用
 
 ## 检查点命名和布局
@@ -177,6 +200,9 @@
 保存运行中的重要文件：
 
 - `config.json`：序列化的训练配置
+- `manifest.json`：运行身份证，包含架构、模型、数据集、git 信息等元数据
+- `metrics.jsonl`：逐步训练指标
+- `summary.json`：训练结束后的摘要指标
 - `state.pt`：`global_step` 和 `total_tokens`
 - `optimizer_0.pt`：优化器状态
 - `rank_0_state.pt`：死特征计数器和最佳损失元数据
