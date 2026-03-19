@@ -572,7 +572,7 @@ python scripts/analyze_activation_patterns.py \
 
 5. **C1c 单独不如 C1h+C1i**：C1c 在 25%N 时 mlp recall 57-73%，而 C1h+C1i 在 16%N 时就达到 74%。C1h+C1i 用更小的候选集达到更高的 recall。
 
-6. **根因假设**：缺乏聚类结构最可能的解释是当前训练目标（FVU + auxk_loss）没有显式鼓励分组结构，基向量倾向于学成通用表示。这暗示从训练端（B1-constrained）引入分组约束可能有效，但尚未排除激活空间本身不具备可利用分组结构的可能性。详见 [ideas/structured-sae.md](../ideas/structured-sae.md)。
+6. **根因假设**：缺乏聚类结构最可能的解释是当前训练目标（FVU + auxk_loss）没有显式鼓励分组结构，基向量倾向于学成通用表示。这暗示从训练端（B1-constrained）引入分组约束可能有效，但尚未排除激活空间本身不具备可利用分组结构的可能性。详见 [ideas/sae-improvement.md](../ideas/sae-improvement.md)。
 
 ## 8. 结论与影响
 
@@ -597,6 +597,6 @@ python scripts/analyze_activation_patterns.py \
 ### 8.3 下一步建议
 
 1. **o_proj 组合方案原型**：o_proj 的 C1h+C1i 组合在 12.5%N 候选下达到 88% recall（recall_w=92%），已达到实用水平。可进入在线算法实现阶段：(1) 离线预计算热集表+PMI 近邻表；(2) 在线：热集打分→提取种子→查近邻表扩展→候选精排。
-2. **MLP/QKV 方案探索**：Phase 2 全部完成后，MLP/QKV 在候选集 ≤25%N 预算下最高仅 74% recall（C1h+C1i@n=32, 15-16%N）；C1c@50%N 可达 80-89% 但候选集过大。剩余可行路径：(a) 扩大热集到 30%N；(b) **结构化 SAE 训练（B1-constrained）**，从 SAE 训练端引入分组约束使激活具备聚类结构，让 C1c 在更小候选集下变得可行。详见 [ideas/structured-sae.md](../ideas/structured-sae.md)
+2. **MLP/QKV 方案探索**：Phase 2 全部完成后，MLP/QKV 在候选集 ≤25%N 预算下最高仅 74% recall（C1h+C1i@n=32, 15-16%N）；C1c@50%N 可达 80-89% 但候选集过大。剩余可行路径：(a) 扩大热集到 30%N；(b) **结构化 SAE 训练（B1-constrained）**，从 SAE 训练端引入分组约束使激活具备聚类结构，让 C1c 在更小候选集下变得可行。详见 [ideas/sae-improvement.md](../ideas/sae-improvement.md)
 3. **结构化 SAE 探索**（新方向）：C1c 失败的根本原因是 SAE 激活缺乏分组结构（全子库 90-100%N），这是纯重构训练目标的自然结果。训练时加入分组约束（Group TopK、共激活正则、分块对角编码器）可能同时解决 B（基向量库质量）和 C1（选择开销）两个瓶颈。
 4. **扩展模型验证**：在 Qwen3-4B 或更大模型上复测，验证 C1h+C1i 的算子差异模式及 C1c 的聚类缺失是否跨模型成立。

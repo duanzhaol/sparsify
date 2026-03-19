@@ -5,7 +5,7 @@
 > 辅助文档：[decision-tree.md](decision-tree.md) — 决策树与耦合关系矩阵
 > Idea 文档：[ideas/cg-coefficients.md](ideas/cg-coefficients.md) — CG 最优系数方案（解耦选择与系数）
 > Idea 文档：[ideas/activation-patterns.md](ideas/activation-patterns.md) — 激活模式分析（C1 方案筛选的数据支撑）
-> Idea 文档：[ideas/structured-sae.md](ideas/structured-sae.md) — 结构化 SAE（训练时引入分组约束，联合解决 B 和 C1）
+> Idea 文档：[ideas/sae-improvement.md](ideas/sae-improvement.md) — SAE 改进（降低 K 需求 + 引入分组结构，联合解决 B 和 C1）
 > 实验计划：[experiments/](experiments/) — 每次实验的详细计划与结果（[模板](experiments/_template.md)）
 
 ## 1. 项目概述
@@ -248,7 +248,7 @@ p=0.1 时：总访存 ≈ K×n + 0.1×h×n + 选择开销
 
 9. **两个瓶颈能否联合解决？** 是否存在一种 SAE 架构，其编码过程天然就是低开销的（即编码器本身就是稀疏/结构化的），同时保持高重构精度？
 
-10. **能否通过修改 SAE 训练目标来引入分组结构？** C1c 实验显示当前 SAE 的激活模式缺乏聚类结构（全子库 90-100%N），这是纯重构训练目标的自然结果。如果在训练时加入分组约束（Group TopK、共激活正则、分块对角编码器），能否在保持重构精度的同时让激活具备可利用的分组结构？这是问题 9 的一个具体实例化方向。详见 [ideas/structured-sae.md](ideas/structured-sae.md)
+10. **能否通过修改 SAE 训练目标来引入分组结构？** C1c 实验显示当前 SAE 的激活模式缺乏聚类结构（全子库 90-100%N），这是纯重构训练目标的自然结果。如果在训练时加入分组约束（Group TopK、共激活正则、分块对角编码器），能否在保持重构精度的同时让激活具备可利用的分组结构？这是问题 9 的一个具体实例化方向。详见 [ideas/sae-improvement.md](ideas/sae-improvement.md)
 
 ## 6. 实验记录
 
