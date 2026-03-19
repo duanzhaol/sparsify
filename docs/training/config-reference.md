@@ -1,17 +1,17 @@
 # 配置参考
 
-本参考反映 `sparsify/config.py` 和 `sparsify/__main__.py` 中的活跃配置接口。
+本文对应 `sparsify/config.py` 和 `sparsify/__main__.py` 的当前配置定义。
 
 涉及两层配置：
 
 - `SparseCoderConfig`：架构级 SAE 参数
 - `TrainConfig` / `RunConfig`：训练循环、日志、数据集和运行时参数
 
-`RunConfig` 继承自 `TrainConfig`，因此 CLI 接口实际上是两者的并集。
+`RunConfig` 继承 `TrainConfig`，所以 CLI 参数集合等于两者并集。
 
 ## 运行参数
 
-在 `sparsify/__main__.py` 中的 `RunConfig` 中定义。
+`RunConfig` 在 `sparsify/__main__.py` 中定义。
 
 | 参数 | 含义 |
 | --- | --- |
@@ -28,29 +28,27 @@
 | `data_preprocessing_num_proc` | 分词工作进程数 |
 | `data_args` | 编码为 `k=v,k=v` 的额外 `load_dataset()` 参数 |
 
-行为说明：
+说明：
 
 - `dataset` 可以指向 Hugging Face 数据集、本地 `load_from_disk()` 数据集或由 `MemmapDataset` 处理的 memmap `.bin` 文件。
 - 如果加载的数据集尚未包含 `input_ids`，CLI 会使用 `sparsify/data.py` 中的 `chunk_and_tokenize()` 进行分词。
-- 在 DDP 模式下，rank 0 首先加载制品，然后其他 rank 在屏障后加载。数据集还会被额外修剪和分片，以确保每个 rank 看到相同数量的样本。
+- 在 DDP 模式下，rank 0 先加载模型和数据，其他 rank 在同步屏障（barrier）后再加载。数据集还会被裁剪和分片，保证每个 rank 的样本数一致。
 - `resume=True` 尝试通过直接匹配 `save_dir/run_name` 或通过 glob 自动生成的运行名称后缀来恢复之前的运行。
 
 ## SAE 参数
 
-在 `SparseCoderConfig` 中定义。
+`SparseCoderConfig` 定义了 SAE 相关架构参数。
 
 | 参数 | 含义 |
 | --- | --- |
-| `sae.expansion_factor` | 当 `num_latents == 0` 时潜在维度的扩展因子 |
+| `sae.expansion_factor` | 当 `num_latents == 0` 时隐变量（latent）维度的扩展因子 |
 | `sae.normalize_decoder` | 将解码器行归一化为单位范数 |
-| `sae.num_latents` | 显式潜在变量计数；`0` 表示从扩展因子派生 |
-| `sae.k` | 每个样本的活跃潜在变量数 |
-
-行为说明：
+| `sae.num_latents` | 显式隐变量数；`0` 表示从扩展因子派生 |
+| `sae.k` | 每个样本保留的隐变量数 |
 
 - `num_latents` 默认为 `d_in * expansion_factor`。
-- `sae.k` 是标准 SAE 情况下的总活跃特征预算。
-- 在分块模式下，`sae.k` 仍是全局预算，但 `TiledSparseCoder` 将其均匀划分为 `k_per_tile = k / num_tiles`。
+- `sae.k` 在标准 SAE 中表示每个样本可激活的特征总数。
+- 分块模式下 `sae.k` 仍是全局预算，`TiledSparseCoder` 会均分成 `k_per_tile = k / num_tiles`。
 
 ## 训练参数
 
@@ -64,45 +62,45 @@
 | `max_tokens` | 可选的总令牌预算 |
 | `lr` | 基础学习率；`None` 使用 `Trainer.__init__()` 中的缩放规则 |
 | `auxk_alpha` | AuxK 死特征损失的权重 |
-| `dead_feature_threshold` | 特征被认为死亡前自上次激活以来的令牌数 |
+| `dead_feature_threshold` | 特征被判定为失活（dead）前，自上次激活以来的令牌数 |
 
-行为说明：
+说明：
 
 - 训练器目前使用 `SignSGD` 配合 `ScheduleFreeWrapperReference` 为所有 SAE 参数组构建一个优化器。
 - 如果省略 `lr`，每个 SAE 参数组获得 `5e-3 / sqrt(num_latents / 2^14)`。
 - `grad_acc_steps` 控制优化器步骤何时发生。
-- `micro_acc_steps` 目前贡献于有效损失规模和日志分母的标准化，即使当前训练器并未在钩子体内显式将激活张量拆分为单独的微批次。
+- `micro_acc_steps` 目前主要参与损失缩放和日志分母计算。当前实现不会在 hook 内显式拆分激活张量做微批训练。
 - `max_tokens` 在累积令牌计数器超过预算后停止训练，然后在返回前保存检查点。
 
 ## 超出指标
 
 | 参数 | 含义 |
 | --- | --- |
-| `exceed_alphas` | 计算超出比率时应用于肘部值的乘数 |
+| `exceed_alphas` | 计算 exceed 比率时应用于肘部值的乘数 |
 | `elbow_threshold_path` | 包含预计算肘部值的 JSON 文件 |
 
-行为说明：
+说明：
 
-- 超出指标仅为可以匹配到肘部值的钩入点计算。
-- `CheckpointMixin._load_elbow_thresholds()` 首先尝试精确匹配钩入点，然后回退到层/组件启发式方法。
+- exceed 指标只会在能够匹配到肘部值的 hookpoint 上计算。
+- `CheckpointMixin._load_elbow_thresholds()` 先做精确匹配，再按层号/组件名做启发式匹配。
 - 训练期间，超出比率基于绝对重建误差计算，并记录为 `exceed_alpha_<alpha>`。
 
-## 钩入点选择
+## hookpoint 选择
 
 | 参数 | 含义 |
 | --- | --- |
 | `hookpoints` | 模块名称或模式的显式列表 |
-| `init_seeds` | 用于每个钩入点初始化一个或多个 SAE 的随机种子 |
-| `layers` | 未提供钩入点时使用的层索引 |
-| `layer_stride` | 在已解析钩入点上的子采样步幅 |
+| `init_seeds` | 初始化每个 hookpoint SAE 时使用的随机种子 |
+| `layers` | 未提供 hookpoints 时使用的层索引 |
+| `layer_stride` | 对已解析 hookpoint 列表的下采样步幅 |
 
-当前训练器行为：
+当前实现行为：
 
-- 钩入点针对 `model.base_model.named_modules()` 解析
+- hookpoint 基于 `model.base_model.named_modules()` 解析
 - 如果省略 `hookpoints`，则从模型层列表推断层模块
 - 训练在 `Trainer._hook_impl()` 中使用模块输入作为激活值
 - 范围语法如 `layers.[7,14].self_attn.o_proj` 由 `sparsify/checkpoint.py` 中的 `expand_range_pattern()` 扩展
-- 如果提供多个 `init_seeds`，训练器为每个种子每个钩入点创建一个 SAE，命名为 `<hookpoint>/seed<seed>`
+- 如果提供多个 `init_seeds`，训练器会按 `<hookpoint>/seed<seed>` 为每个 seed 创建一套 SAE
 
 ## 分块
 
@@ -129,9 +127,9 @@
 | `hadamard_seed` | 置换的种子 |
 | `hadamard_use_perm` | 是否在变换前应用置换 |
 
-行为说明：
+说明：
 
-- Hadamard 旋转在训练器看到实际激活宽度后，按钩入点延迟创建。
+- Hadamard 旋转会在训练器首次看到实际激活维度后，为对应 hookpoint 延迟创建。
 - 当 Hadamard 激活且启用超出指标时，训练器在测量超出比率前对目标值和重建值都进行反旋转。
 - Hadamard 状态在检查点中保存为 `hadamard_rotations.pt`。
 
@@ -141,7 +139,7 @@
 | --- | --- |
 | `compile_model` | 使用 `torch.compile` 编译 Transformer 层；仅在 CUDA 上激活 |
 | `save_every` | 每 N 个优化器步骤保存 |
-| `save_best` | 保存每个钩入点的最佳检查点 |
+| `save_best` | 保存每个 hookpoint 的最佳检查点 |
 | `save_dir` | 基础输出目录 |
 | `log_to_wandb` | 启用 Weights & Biases 日志 |
 | `run_name` | 可选的运行名称前缀 |
@@ -149,11 +147,11 @@
 | `wandb_log_frequency` | 日志频率 |
 | `finetune` | 用于初始化 SAE 的检查点树路径 |
 
-行为说明：
+说明：
 
 - `compile_model` 编译 Transformer 层，而非 SAE 模块本身。
 - `save_every` 以优化器步骤边界衡量，而非原始前向钩子调用。
-- `save_best` 在 `<run>/best/` 下存储改进的每个钩入点检查点。
+- `save_best` 在 `<run>/best/` 下保存各 hookpoint 的当前最优检查点。
 - `finetune` 在 `fit()` 开始前加载现有 SAE 权重；`resume` 恢复 SAE 状态和训练器/优化器状态。
 - 如果 W&B 不可用或初始化失败，日志会自动禁用，且该标志会在各 rank 间同步。
 

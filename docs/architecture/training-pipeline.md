@@ -1,151 +1,107 @@
-# 训练流水线
+# 训练流程
 
-本页描述由 `sparsify/__main__.py` 和 `sparsify/trainer.py` 实现的当前端到端训练流程。
+本文说明当前代码主线中的训练流程，对应实现在 `sparsify/__main__.py` 和 `sparsify/trainer.py`。
 
-最重要的实践细节是 SAE 训练是钩子驱动和在线的：Sparsify 在训练前不会预计算和缓存激活值到磁盘。相反，Transformer 前向和 SAE 更新在每个训练步骤中交错进行。
+关键结论：Sparsify 采用在线训练。系统不会先把激活值整体缓存到磁盘，而是在 Transformer 前向过程中通过 hookpoint 实时获取激活并更新 SAE。
 
-## 1. CLI 入口和制品加载
+## 1. CLI 入口与数据准备
 
-`python -m sparsify` 通过 `sparsify/__main__.py` 进入。
+命令 `python -m sparsify` 从 `sparsify/__main__.py` 进入，主流程如下：
 
-高层步骤：
-
-1. 如果存在 `LOCAL_RANK`，初始化分布式运行时
+1. 检查 `LOCAL_RANK`，按需初始化 DDP
 2. 解析 `RunConfig`
-3. 使用 `AutoModel.from_pretrained()` 加载模型
-4. 加载 Hugging Face 数据集或 memmap 数据集
-5. 如需要，即时分词
-6. 构建 `Trainer` 并启动 `fit()`
+3. 用 `AutoModel.from_pretrained()` 加载模型
+4. 加载数据集（Hugging Face 或 memmap）
+5. 数据未分词时做在线分词
+6. 创建 `Trainer`，执行 `fit()`
 
-额外运行时细节：
+补充细节：
 
-- 模型使用 `AutoModel.from_pretrained()` 加载，而非 `AutoModelForCausalLM`
-- 当 `is_bf16_supported()` 表明当前后端支持时，请求 bf16
-- 在 DDP 模式下，样本在分片前被修剪，以便所有 rank 看到相等的工作量且不会死锁
+- 模型加载使用 `AutoModel`，不是 `AutoModelForCausalLM`
+- 若后端支持，模型优先使用 bf16 dtype
+- DDP 模式下会先裁剪样本再分片，避免不同 rank 工作量不一致导致死锁
 
-## 2. 钩入点解析
+## 2. hookpoint 解析
 
-在 `Trainer.__init__()` 中：
+在 `Trainer.__init__()` 中，hookpoint 的处理顺序是：
 
-- 显式钩入点模式使用 `expand_range_pattern()` 扩展
-- 模式与 `model.base_model.named_modules()` 匹配
-- 如果未提供钩入点，训练器从模型层列表推断层模块
-- 钩入点解析后应用 `layer_stride`
+- 先展开范围语法（`expand_range_pattern()`）
+- 再用 `model.base_model.named_modules()` 做模式匹配
+- 若未显式传入 hookpoint，则按模型层列表自动生成
+- 最后再应用 `layer_stride`
 
-如果也未提供显式 `layers`，训练器默认为所有 Transformer 层。
+如果 `layers` 和 `hookpoints` 都未提供，默认覆盖全部 Transformer 层。
 
-## 3. 宽度解析和 SAE 构建
+## 3. 宽度探测与 SAE 初始化
 
-在创建 SAE 之前，训练器使用 `hook_mode="input"` 语义调用 `resolve_widths()`。这很重要：当前训练由模块输入驱动。
+训练前会调用 `resolve_widths(..., hook_mode="input")` 探测输入维度。当前实现路径明确使用模块输入训练 SAE。
 
-然后，对于每个已解析的钩入点和每个初始化种子：
+随后按 `hookpoint × seed` 组合创建 SAE：
 
-- 构建 `SparseCoder`，或
-- 当 `num_tiles > 1` 时构建 `TiledSparseCoder`
+- `num_tiles == 1` 时使用 `SparseCoder`
+- `num_tiles > 1` 时使用 `TiledSparseCoder`
 
-这意味着当 `init_seeds` 包含多个值时，一个钩入点可以映射到多个 SAE 实例。
+因此当 `init_seeds` 包含多个值时，一个 hookpoint 会对应多个 SAE 实例。
 
-## 4. 优化器设置
+## 4. 优化器与训练步长
 
-当前主线优化器路径是：
+当前主线只保留一条优化器路径：
 
 - `SignSGD`
-- 由 `ScheduleFreeWrapperReference` 包装
+- 外层包 `ScheduleFreeWrapperReference`
 
-如果省略 `lr`，训练器使用基于潜在变量计数的缩放规则。
+若未显式设置 `lr`，则按潜在维度规模应用默认缩放规则。
 
-活跃训练器中不再有多优化器分支。当前路径有意精简。
+补充说明：
 
-## 5. 批次处理
+- 进度条按 batch 计数
+- 真正的优化器 `step` 按 `grad_acc_steps` 触发
 
-在 `fit()` 中，训练器：
+## 5. hook 回调内训练逻辑
 
-- 冻结 Transformer 主干
-- 创建 `DataLoader`
-- 如果分布式训练激活，在首次使用时用 DDP 包装 SAE
-- 跟踪令牌计数、时间和聚合指标
+每个 batch 都会临时注册 forward hook。回调中的核心步骤如下：
 
-进度条计数批次，但优化器更新仅在每 `grad_acc_steps` 发生。
+- 取模块输入并展平为 `[batch * seq, hidden]`
+- 按配置决定是否执行 Hadamard 旋转
+- 首步（且非 finetune）用激活均值初始化 `b_dec`
+- 执行 SAE 前向，得到重建输出与稀疏索引
+- 记录激活 latent 索引，用于后续死特征统计
+- 累积 FVU / AuxK / exceed 指标
+- 立即执行局部反向：`out.fvu + auxk_alpha * out.auxk_loss`
 
-## 6. 前向钩子和 SAE 更新
+DDP 场景下，非同步边界会使用 `no_sync()` 降低不必要的梯度通信。
 
-对于每个批次，训练器在所有选定模块上注册前向钩子。
+## 6. 部分前向优化
 
-在钩子实现内部：
+训练器会根据选定 hookpoint 计算最远目标层。若目标层不是最后一层，会调用 `partial_forward_to_layer()` 提前截断前向，减少无关层计算。
 
-- 解包模块输入张量
-- 展平批次和序列维度
-- 可选应用 Hadamard 旋转
-- 在非微调情况下，在第一步初始化解码器偏置
-- 运行 SAE 前向传播
-- 收集激活的潜在变量索引用于死特征跟踪
-- 累积 FVU、AuxK 和可选的超出指标
-- 在 `out.fvu + auxk_alpha * out.auxk_loss` 上执行局部反向传播
+这个优化在只训练前层或中层 hookpoint 时效果最明显。
 
-值得记住的细节：
+## 7. 优化器更新与死特征统计
 
-- 激活从 `[batch, seq, hidden]` 展平为 `[batch * seq, hidden]`
-- 解码器偏置初始化使用第一个观察到的批次的平均激活，可选跨 rank 全归约
-- 启用时，每次前向前重新应用解码器归一化
-- 启用 Hadamard 预处理时，超出指标在未旋转的张量上计算
-- 当 DDP 激活时，钩子在 `no_sync()` 下运行，除同步边界外
+在梯度累积边界，训练器会执行以下操作：
 
-这意味着 SAE 优化在 Transformer 前向期间内联发生，而非在单独的离线激活缓存阶段。
-
-## 7. 部分前向优化
-
-`Trainer` 计算所选钩入点所需的最大层索引。如果可能，它使用 `sparsify/utils.py` 中的 `partial_forward_to_layer()` 在所有所需钩子触发后提前停止 Transformer 前向。
-
-这在早期或中层子集上训练 SAE 时特别有用。
-
-## 8. 优化器步骤和死特征簿记
-
-在梯度累积边界，训练器：
-
-- 启用解码器归一化时，移除解码器平行梯度分量
-- 运行 `optimizer.step()` 和 `optimizer.zero_grad()`
+- 处理与解码器方向相关的梯度投影
+- 执行 `optimizer.step()` 和 `zero_grad()`
 - 更新 `num_tokens_since_fired`
-- 将步骤中激活的潜在变量计数器归零
-- 使用 `MIN` 全归约跨 rank 同步这些计数器
+- 把本步激活过的 latent 计数清零
+- 使用 `MIN` all-reduce 在多卡间同步计数状态
 
-簿记流程有意与旧版本不同：
+当前实现采用“先收集索引、步末集中清零”，避免历史版本逐次 bool scatter 的高开销路径。
 
-- 训练器在钩子执行期间收集潜在变量索引
-- 在步骤结束时，连接这些索引并直接归零计数器
-- 它避免了在某些后端上昂贵的旧每前向 bool-scatter 路径
+## 8. 保存与日志
 
-死特征簿记后，训练器：
+训练过程中会周期性执行：
 
-- 更新 `total_tokens`
-- 如果达到 `max_tokens`，提前停止
-- 保存周期性检查点
-- 将聚合指标记录到 Weights & Biases
+- 常规 checkpoint 保存（`CheckpointMixin`）
+- 可选 best checkpoint 保存
+- Weights & Biases 指标上报
 
-当前实现使用收集的潜在变量索引，而非旧的每前向 bool-scatter 路径。
+保存内容包括 SAE 权重、优化器状态、`global_step`、`total_tokens`、死特征计数、最佳损失，以及可选的 Hadamard 状态。
 
-## 9. 保存和日志
+## 9. 推荐阅读顺序
 
-训练器定期：
-
-- 通过 `CheckpointMixin` 保存检查点
-- 可选保存每个钩入点的最佳检查点
-- 将指标记录到 Weights & Biases
-
-检查点辅助函数位于 `sparsify/checkpoint.py`，也处理分块检查点加载。
-
-保存的状态包括：
-
-- SAE 权重
-- 优化器状态
-- `global_step`
-- `total_tokens`
-- 死特征计数器
-- 最佳损失值
-- 可选 Hadamard 旋转状态
-
-## 10. 实用阅读地图
-
-如果你想在代码中理解当前训练路径，按此顺序阅读：
+如需快速理解当前训练路径，建议按以下顺序阅读代码：
 
 1. `sparsify/__main__.py`
 2. `sparsify/config.py`
@@ -153,14 +109,3 @@
 4. `sparsify/sparse_coder.py`
 5. `sparsify/tiled_sparse_coder.py`
 6. `sparsify/checkpoint.py`
-
-## 11. 心智模型
-
-如果你想要当前流水线的一个紧凑心智模型，它是：
-
-1. 运行 Transformer 刚好足够触发选定的钩子
-2. 在每个钩子内部，将模块输入视为 SAE 训练数据
-3. 立即计算局部重建损失
-4. 在几个批次上累积梯度
-5. 步进一个共享的 SAE 优化器
-6. 持久化检查点供后续阈值计算和 LUT 导出

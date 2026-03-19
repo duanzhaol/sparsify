@@ -1,74 +1,71 @@
 # 性能说明
 
-本页总结 Sparsify 当前与性能相关的部分。它有意反映当前代码路径，而非历史实验。
+本文仅讨论当前实现路径中仍然有效的性能要点，不覆盖历史实验分支。
 
-## 主要性能杠杆
+## 主要优化点
 
-### BF16 自动类型转换
+### BF16 自动混合精度
 
-`sparsify/device.py` 中的 `device_autocast()` 在后端支持时使用 bf16 自动类型转换包装关键前向路径。这是现代 CUDA 和 NPU 加速器上的默认快速路径。
+`sparsify/device.py` 中的 `device_autocast()` 会在后端支持时启用 bf16 自动混合精度。这是当前训练加速的基础能力之一。
 
-### 融合编码器和解码器
+### 融合编码器与解码器
 
-编码器和解码器都使用自定义自动微分路径：
+当前编码与解码都采用自定义 autograd：
 
 - `sparsify/fused_encoder.py`
 - `sparsify/fused_decoder.py`
 
-两种实现都优先使用 scatter-plus-matmul，当密集中间结果仍在内存阈值内时；否则回退到更节省内存的逻辑。
+两者的共同策略是：
 
-### 部分 Transformer 前向
+- 内存允许时优先使用 scatter + matmul
+- 超出阈值时回退到更省内存的实现
 
-当所有选定的钩入点位于最终模型层之前时，`Trainer` 可以通过调用 `sparsify/utils.py` 中的 `partial_forward_to_layer()` 提前停止 Transformer 前向。
+### 部分前向执行
 
-这避免了为不贡献训练激活值的后续层付出代价。
+如果目标 hookpoint 不在最后一层，`Trainer` 会通过 `partial_forward_to_layer()` 提前截断前向，减少无关层开销。
 
 ### `torch.compile`
 
-`compile_model=True` 在 `Trainer.fit()` 中单独编译 Transformer 层。
+`compile_model=True` 时会在 `Trainer.fit()` 中按层编译 Transformer。
 
-当前状态：
+当前行为：
 
-- 旨在减少 CUDA 的内核启动开销
-- 由 `TrainConfig.__post_init__()` 在非 CUDA 后端上自动禁用
+- 主要用于降低 CUDA 小算子启动开销
+- 在非 CUDA 后端会被 `TrainConfig.__post_init__()` 自动关闭
 
-### 分块 SAE 权衡
+### 分块 SAE 的收益与代价
 
-`TiledSparseCoder` 引入宽激活的结构化分解。
+`TiledSparseCoder` 适用于宽激活的结构化拆分，但并非零成本优化。
 
-潜在收益：
+常见收益：
 
-- 更小的每分块编码器和解码器操作
-- 对激活结构更多控制
+- 单个 tile 上的编码/解码规模更小
+- 可以更细粒度地控制激活结构
 
-成本：
+常见代价：
 
-- 额外的分块开销
-- 更复杂的潜在变量统计
-- 全局 top-k 模式可能构建大型块对角解码器
+- 额外的分块与拼接开销
+- latent 统计与调参更复杂
+- `global_topk` 模式可能引入较大的块对角解码矩阵
 
-### Hadamard 旋转
+### Hadamard 预处理
 
-当前主线支持 Hadamard 预处理，可以帮助处理激活结构和异常值行为。它在钩子路径中增加了额外工作，因此应被视为精度/性能权衡，而非免费优化。
+Hadamard 旋转可以改善激活分布，但会增加 hook 内计算量。它更接近“精度与速度的可调开关”，不是无成本加速项。
 
-## CUDA 与 NPU 定位
+## CUDA 与 NPU 的定位
 
 ### CUDA
 
-CUDA 是当前开发的主要运行时路径。
+CUDA 是当前主线环境。默认建议：
 
-推荐默认值：
-
-- 首先在 CUDA 上开始
-- 仅在 CUDA 上启用 `compile_model`
-- 将 CUDA 上的性能调试视为主线工作流
+- 优先在 CUDA 上运行主实验
+- `compile_model` 仅在 CUDA 开启
+- 性能分析与调优优先围绕 CUDA 路径展开
 
 ### NPU
 
-NPU 兼容性仍通过 `sparsify/device.py` 和融合解码路径保留在代码库中，但它不再是主要文档目标。
+NPU 兼容能力仍保留在代码中（`device.py` 和融合解码路径），但不再是文档主线。历史 NPU 分析材料已迁至 `docs/archive/ascend/`。
 
-历史 NPU 性能分析材料现存放于 `docs/archive/ascend/` 下。
+## 为什么要收敛到这套说明
 
-## 有意移出的内容
-
-旧文档强调了许多历史分支和性能分析快照。这些已被归档，以便本页保持聚焦于活跃实现接口。
+旧文档包含大量历史分支与阶段性性能分析结论，容易干扰当前调优判断。本文只保留当前代码主线仍然生效的优化点，便于直接落地。
