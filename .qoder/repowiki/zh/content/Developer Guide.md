@@ -263,14 +263,14 @@ TiledSparseCoder 实现了分块训练策略：
 
 ```mermaid
 flowchart TD
-A[输入激活] --> B[分割为T个块]
-B --> C[独立SAE处理每个块]
-C --> D[合并激活(Per-Tile)]
-D --> E[全局Top-K选择]
-E --> F[块对角解码器]
-F --> G[重建输出]
-H[输入混合] --> A
-I[全局Top-K] --> C
+A["输入激活"] --> B["分割为T个块"]
+B --> C["独立SAE处理每个块"]
+C --> D["合并激活(Per-Tile)"]
+D --> E["全局Top-K选择"]
+E --> F["块对角解码器"]
+F --> G["重建输出"]
+H["输入混合"] --> A
+I["全局Top-K"] --> C
 I --> E
 ```
 

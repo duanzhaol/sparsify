@@ -5,7 +5,6 @@ import torch
 from torch import Tensor
 
 from ..sparse_coder import ForwardOutput, SparseCoder
-from lowrank_encoder import LowRankSparseCoder
 
 
 @dataclass
@@ -19,7 +18,7 @@ class TwoStageConfig:
 
 
 class TwoStageEncoder:
-    def __init__(self, sae: SparseCoder | LowRankSparseCoder, cfg: TwoStageConfig):
+    def __init__(self, sae: SparseCoder, cfg: TwoStageConfig):
         if sae.cfg.activation != "topk":
             raise ValueError("two-stage encoder only supports activation='topk'")
         if cfg.low_dim <= 0:
@@ -36,7 +35,6 @@ class TwoStageEncoder:
         self.device = sae.device
         self.dtype = sae.dtype
         self.low_dim = min(cfg.low_dim, sae.d_in)
-        self.is_lowrank = isinstance(sae, LowRankSparseCoder)
 
         self.pca_mean = None
         self.proj = None
@@ -71,22 +69,13 @@ class TwoStageEncoder:
                     raise ValueError("pca_mean must be shape [d_in]")
                 self.pca_mean = mean
 
-        if self.is_lowrank:
-            B = sae.encoder_B.weight
-            if self.proj is None:
-                self.B_low = B[:, : self.low_dim]
-            else:
-                self.B_low = B @ self.proj
-            self.A = sae.encoder_A.weight
-            self.bias = sae.encoder_A.bias
+        W = sae.encoder.weight
+        if self.proj is None:
+            self.W_low = W[:, : self.low_dim]
         else:
-            W = sae.encoder.weight
-            if self.proj is None:
-                self.W_low = W[:, : self.low_dim]
-            else:
-                self.W_low = W @ self.proj
-            self.W_full = W
-            self.bias = sae.encoder.bias
+            self.W_low = W @ self.proj
+        self.W_full = W
+        self.bias = sae.encoder.bias
 
     def _center_input(self, x: Tensor) -> Tensor:
         x = x.to(self.dtype)
@@ -104,23 +93,13 @@ class TwoStageEncoder:
         else:
             x_low = x_proj @ self.proj
 
-        if self.is_lowrank:
-            intermediate = x_low @ self.B_low.T
-            scores = intermediate @ self.A.T + self.bias
-        else:
-            scores = x_low @ self.W_low.T + self.bias
+        scores = x_low @ self.W_low.T + self.bias
         return torch.relu(scores)
 
     def _refine_scores(self, x_centered: Tensor, candidates: Tensor) -> Tensor:
-        if self.is_lowrank:
-            xB = x_centered @ self.sae.encoder_B.weight.T
-            A_cand = self.A[candidates]
-            b_cand = self.bias[candidates]
-            scores = torch.einsum("nkr,nr->nk", A_cand, xB) + b_cand
-        else:
-            W_cand = self.W_full[candidates]
-            b_cand = self.bias[candidates]
-            scores = torch.einsum("nkd,nd->nk", W_cand, x_centered) + b_cand
+        W_cand = self.W_full[candidates]
+        b_cand = self.bias[candidates]
+        scores = torch.einsum("nkd,nd->nk", W_cand, x_centered) + b_cand
         return torch.relu(scores)
 
     def forward(self, x: Tensor, y: Tensor | None = None) -> ForwardOutput:

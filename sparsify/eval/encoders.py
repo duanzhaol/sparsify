@@ -4,7 +4,6 @@ from typing import Literal, Protocol
 import torch
 from torch import Tensor, nn
 
-from lowrank_encoder import LowRankSparseCoder
 from ..sparse_coder import ForwardOutput, SparseCoder
 from ..tiled_sparse_coder import TiledSparseCoder
 from .two_stage import TwoStageConfig, TwoStageEncoder
@@ -25,7 +24,7 @@ class FullEncoderStrategy:
 
 
 class TwoStageEncoderStrategy:
-    def __init__(self, sae: SparseCoder | LowRankSparseCoder, cfg: TwoStageConfig):
+    def __init__(self, sae: SparseCoder, cfg: TwoStageConfig):
         self.encoder = TwoStageEncoder(sae, cfg)
 
     def forward(self, x: Tensor, y: Tensor | None) -> ForwardOutput:
@@ -53,7 +52,7 @@ def build_encoder_strategies(
     for key, sae in saes.items():
         if isinstance(sae, TiledSparseCoder):
             raise ValueError("two_stage encoder does not support TiledSparseCoder")
-        if not isinstance(sae, (SparseCoder, LowRankSparseCoder)):
+        if not isinstance(sae, SparseCoder):
             raise ValueError(f"Unsupported SAE type for two_stage: {type(sae)}")
 
         cfg = two_stage_cfg

@@ -4,9 +4,7 @@ from dataclasses import dataclass
 from multiprocessing import cpu_count
 from pathlib import Path
 
-# 添加 lowrank_encoder 到路径，修复 tiled_sparse_coder.py 的导入问题
 sys.path.insert(0, str(Path(__file__).parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent / "lowrank_encoder"))
 
 import datasets
 from datasets import Dataset, load_dataset

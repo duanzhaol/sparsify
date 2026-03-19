@@ -37,7 +37,6 @@ from sparsify.utils import (
     partial_forward_to_layer,
     simple_parse_args_string,
 )
-from lowrank_encoder import LowRankSparseCoder
 
 
 @dataclass
@@ -217,12 +216,9 @@ def load_sae_from_disk(path: Path, device: str | torch.device):
     with open(path / "cfg.json", "r") as f:
         cfg = json.load(f)
     num_tiles = cfg.get("num_tiles", 1)
-    encoder_rank = cfg.get("encoder_rank", 0)
 
     if num_tiles > 1:
         return TiledSparseCoder.load_from_disk(path, device=device)
-    if encoder_rank > 0:
-        return LowRankSparseCoder.load_from_disk(path, device=device)
     return SparseCoder.load_from_disk(path, device=device)
 
 
@@ -259,8 +255,6 @@ def load_outlier_clippers(
     print(f"Loaded outlier clippers for {len(clippers)} hookpoints")
     return clippers
 
-
-from lowrank_encoder import LowRankSparseCoder
 
 
 def main() -> None:
