@@ -1598,8 +1598,14 @@ def main() -> int:
     parser.add_argument("--max-session-failures", type=int, default=DEFAULT_MAX_SESSION_FAILURES)
     args = parser.parse_args()
 
-    ensure_setup()
     auto_commit_enabled = not args.no_commit_experiments
+
+    # Clean-worktree check must run BEFORE ensure_setup(), which creates/modifies
+    # git-tracked history files (state.json, frontier.json, timeline.jsonl, etc.).
+    if auto_commit_enabled:
+        ensure_clean_worktree_for_auto_commit()
+
+    ensure_setup()
     start_time = time.time()
     append_timeline_event(
         "loop_started",
@@ -1655,7 +1661,6 @@ def main() -> int:
         return 1
 
     if auto_commit_enabled:
-        ensure_clean_worktree_for_auto_commit()
         state = load_state()
         research_branch = args.research_branch or default_research_branch_name()
         ensure_research_branch(research_branch, state)
