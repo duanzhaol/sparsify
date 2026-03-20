@@ -1,6 +1,7 @@
 __version__ = "2.0.0"
 
 from .config import SaeConfig, SparseCoderConfig, TrainConfig
+from .adaptive_threshold_topk_sparse_coder import AdaptiveThresholdTopKSparseCoder
 from .factorized_topk_sparse_coder import FactorizedTopKSparseCoder
 from .gated_sparse_coder import GatedSparseCoder
 from .group_topk_sparse_coder import GroupTopKSparseCoder
@@ -14,6 +15,7 @@ from .trainer import SaeTrainer, Trainer
 
 __all__ = [
     "FactorizedTopKSparseCoder",
+    "AdaptiveThresholdTopKSparseCoder",
     "GatedSparseCoder",
     "GroupTopKSparseCoder",
     "JumpReLUSparseCoder",

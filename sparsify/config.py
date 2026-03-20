@@ -22,7 +22,7 @@ class SparseCoderConfig(Serializable):
 
     # Architecture selection
     architecture: str = "topk"
-    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk' | 'routed_group_topk' | 'residual_topk' | 'factorized_topk' | 'mixture_topk' | 'hybrid_topk'."""
+    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk' | 'routed_group_topk' | 'residual_topk' | 'factorized_topk' | 'mixture_topk' | 'hybrid_topk' | 'adaptive_threshold_topk'."""
 
     # JumpReLU parameters (only used when architecture='jumprelu')
     jumprelu_init_threshold: float = 0.001
@@ -199,6 +199,7 @@ class TrainConfig(Serializable):
             "factorized_topk",
             "mixture_topk",
             "hybrid_topk",
+            "adaptive_threshold_topk",
         )
         if self.sae.architecture not in valid_archs:
             raise ValueError(

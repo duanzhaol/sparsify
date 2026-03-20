@@ -314,6 +314,11 @@ def _get_sae_class(architecture: str) -> type:
     if architecture == "hybrid_topk":
         from .hybrid_topk_sparse_coder import HybridTopKSparseCoder
         return HybridTopKSparseCoder
+    if architecture == "adaptive_threshold_topk":
+        from .adaptive_threshold_topk_sparse_coder import (
+            AdaptiveThresholdTopKSparseCoder,
+        )
+        return AdaptiveThresholdTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
