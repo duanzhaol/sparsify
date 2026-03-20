@@ -8,6 +8,7 @@ from .group_topk_sparse_coder import GroupTopKSparseCoder
 from .hybrid_topk_sparse_coder import HybridTopKSparseCoder
 from .jumprelu_sparse_coder import JumpReLUSparseCoder
 from .mixture_topk_sparse_coder import MixtureTopKSparseCoder
+from .refined_topk_sparse_coder import RefinedTopKSparseCoder
 from .residual_topk_sparse_coder import ResidualTopKSparseCoder
 from .routed_group_topk_sparse_coder import RoutedGroupTopKSparseCoder
 from .sparse_coder import Sae, SparseCoder
@@ -21,6 +22,7 @@ __all__ = [
     "GroupTopKSparseCoder",
     "JumpReLUSparseCoder",
     "MixtureTopKSparseCoder",
+    "RefinedTopKSparseCoder",
     "ResidualTopKSparseCoder",
     "RoutedGroupTopKSparseCoder",
     "Sae",

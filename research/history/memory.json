@@ -7,7 +7,8 @@
     "round 10: hybrid_topk may now be limited by using the nonlinear branch only as an additive correction; letting it multiplicatively modulate the linear logits should improve support shaping while preserving the strong baseline path. Re-test hybrid_topk at the best-known K=128, expansion_factor=8, optimizer=adam setting after this targeted hybrid-family stabilization edit. -> discard (fvu=0.27785650826990604, observed_fvu=0.278638, k=128, health=normal, termination=completed)",
     "round 14: The current best family may need cleaner support suppression rather than another additive or multiplicative residual path. An adaptive-threshold TopK encoder that keeps the proven linear logits as the anchor but learns an input-dependent nonnegative per-latent suppression term could reduce false activations at K=128 and materially improve FVU without abandoning the strong baseline initialization. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)",
     "round 16: The recent hybrid and adaptive-threshold results suggest the main failure mode is not lack of an anchor but how nonlinear information is injected into support selection. A union_topk encoder that keeps the baseline linear top-k proposal intact while letting a nonlinear branch propose an alternate candidate set, with final support chosen from the union rather than from perturbed logits, could lower FVU by adding complementary features without destabilizing the proven linear path. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)",
-    "round 17: The union_topk prototype likely failed because its nonlinear branch proposed candidates from the same centered input as the linear branch, so it mostly duplicated baseline support. Conditioning the nonlinear proposer on the linear branch residual, widening that branch, and letting it over-propose candidates before the final global top-k should increase support complementarity at K=128 and lower proxy FVU. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)"
+    "round 17: The union_topk prototype likely failed because its nonlinear branch proposed candidates from the same centered input as the linear branch, so it mostly duplicated baseline support. Conditioning the nonlinear proposer on the linear branch residual, widening that branch, and letting it over-propose candidates before the final global top-k should increase support complementarity at K=128 and lower proxy FVU. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)",
+    "round 18: Recent architecture edits have mostly tried to improve support selection, yet multiple distinct families have converged to the same proxy FVU plateau under normal runtime. A stronger next bet is that support is not the main bottleneck at K=128; instead, the selected coefficients are too crude. A refined_topk family that keeps the proven linear top-k support but recomputes the chosen coefficients with a small per-example ridge solve against the decoder atoms could materially lower FVU by directly reducing reconstruction error on the selected support. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)"
   ],
   "performance_findings": [],
   "failure_patterns": [
@@ -15,6 +16,13 @@
       "pattern": "factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit.",
       "count": 1,
       "last_round": 5,
+      "run_health": "normal",
+      "termination_reason": "completed"
+    },
+    {
+      "pattern": "Recent architecture edits have mostly tried to improve support selection, yet multiple distinct families have converged to the same proxy FVU plateau under normal runtime. A stronger next bet is that support is not the main bottleneck at K=128; instead, the selected coefficients are too crude. A refined_topk family that keeps the proven linear top-k support but recomputes the chosen coefficients with a small per-example ridge solve against the decoder atoms could materially lower FVU by directly reducing reconstruction error on the selected support.",
+      "count": 1,
+      "last_round": 18,
       "run_health": "normal",
       "termination_reason": "completed"
     }
@@ -380,29 +388,32 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 17
+    },
+    "refined_topk": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Recent architecture edits have mostly tried to improve support selection, yet multiple distinct families have converged to the same proxy FVU plateau under normal runtime. A stronger next bet is that support is not the main bottleneck at K=128; instead, the selected coefficients are too crude. A refined_topk family that keeps the proven linear top-k support but recomputes the chosen coefficients with a small per-example ridge solve against the decoder atoms could materially lower FVU by directly reducing reconstruction error on the selected support.",
+      "tested_configs": [
+        {
+          "round": 18,
+          "stage": "prototype",
+          "k": "128",
+          "decision": "crash",
+          "val_fvu": "None",
+          "run_health": "normal"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If refined_topk materially improves proxy FVU, follow with a family-specific stabilization pass on the coefficient refinement strength or support source before considering promotion.",
+        "If refined_topk is flat or regresses under normal runtime, that is evidence that coefficient refitting alone is not enough and the next round should pivot to a genuinely different encoder family rather than more top-k refinements."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 18
     }
   },
   "recent_rounds": [
-    {
-      "round": 6,
-      "hypothesis": "The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal.",
-      "change_type": "edit_architecture",
-      "expected_win": "explore_unknown",
-      "family_name": "factorized_topk",
-      "family_stage": "stabilize",
-      "decision": "incubate",
-      "val_fvu": "0.3485000617802143",
-      "observed_fvu": "0.348134",
-      "k": "128",
-      "architecture": "factorized_topk",
-      "touched_files": [
-        "sparsify/factorized_topk_sparse_coder.py"
-      ],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "83008.438145",
-      "baseline_ratio": "1.000005"
-    },
     {
       "round": 7,
       "hypothesis": "A hybrid encoder that preserves the strong linear topk path and adds a gated nonlinear residual to latent logits can improve quality without discarding the baseline behavior that already works. Test a new hybrid_topk family at K=128 as a quality-first architecture probe.",
@@ -619,13 +630,32 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83008.583271",
       "baseline_ratio": "1.000002"
+    },
+    {
+      "round": 18,
+      "hypothesis": "Recent architecture edits have mostly tried to improve support selection, yet multiple distinct families have converged to the same proxy FVU plateau under normal runtime. A stronger next bet is that support is not the main bottleneck at K=128; instead, the selected coefficients are too crude. A refined_topk family that keeps the proven linear top-k support but recomputes the chosen coefficients with a small per-example ridge solve against the decoder atoms could materially lower FVU by directly reducing reconstruction error on the selected support.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "refined_topk",
+      "family_stage": "prototype",
+      "decision": "crash",
+      "val_fvu": "None",
+      "observed_fvu": "",
+      "k": "128",
+      "architecture": "refined_topk",
+      "touched_files": [
+        "sparsify/__init__.py",
+        "sparsify/config.py",
+        "sparsify/refined_topk_sparse_coder.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "",
+      "baseline_ratio": ""
     }
   ],
   "recent_insights": [
-    "The original factorized_topk prototype likely suffered from an overly narrow d_in-sized hidden bottleneck rather than only a bad family prior.",
-    "Round 5 stabilizes factorized_topk by replacing the narrow ReLU mixer with a wider gated hidden stage before latent projection.",
-    "round 5: factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)",
-    "Round 5 factorized_topk crashed due to a hidden-to-latent shape mismatch in the widened encoder path, so that result should not be treated as architectural evidence.",
     "Round 6 fixes factorized_topk by adding an explicit hidden-to-latent projection and excluding the unused base encoder from optimization before re-running the same stabilization test.",
     "round 6: The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal. -> incubate (fvu=0.3485000617802143, observed_fvu=0.348134, k=128, health=normal, termination=completed)",
     "The fixed factorized_topk stabilization improved proxy FVU from 0.4431915953755379 to 0.3485000617802143 without runtime regression, but it remains far from the K=128 topk anchor.",
@@ -661,10 +691,14 @@
     "Round 17 stabilizes union_topk by making the nonlinear proposal branch residual-conditioned on the linear partial reconstruction instead of reading the same centered input.",
     "The union_topk stabilization also widens the nonlinear branch and lets it over-propose 2k candidates before the final global top-k, aiming to improve candidate diversity without changing decode semantics.",
     "A local import/forward/backward sanity check passed for the edited union_topk implementation before handing control back to the runtime.",
-    "round 17: The union_topk prototype likely failed because its nonlinear branch proposed candidates from the same centered input as the linear branch, so it mostly duplicated baseline support. Conditioning the nonlinear proposer on the linear branch residual, widening that branch, and letting it over-propose candidates before the final global top-k should increase support complementarity at K=128 and lower proxy FVU. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)"
+    "round 17: The union_topk prototype likely failed because its nonlinear branch proposed candidates from the same centered input as the linear branch, so it mostly duplicated baseline support. Conditioning the nonlinear proposer on the linear branch residual, widening that branch, and letting it over-propose candidates before the final global top-k should increase support complementarity at K=128 and lower proxy FVU. -> incubate (fvu=0.2749013416469097, observed_fvu=0.275225, k=128, health=normal, termination=completed)",
+    "Round 18 adds a new refined_topk family that keeps the baseline linear top-k support but refits the selected coefficients with a small ridge solve against the decoder atoms.",
+    "The refined_topk implementation uses a straight-through blend so the forward path uses refined coefficients while preserving gradient flow through the baseline top-k activations.",
+    "A local import/forward/backward sanity check passed for refined_topk before handing control back to the runtime.",
+    "round 18: Recent architecture edits have mostly tried to improve support selection, yet multiple distinct families have converged to the same proxy FVU plateau under normal runtime. A stronger next bet is that support is not the main bottleneck at K=128; instead, the selected coefficients are too crude. A refined_topk family that keeps the proven linear top-k support but recomputes the chosen coefficients with a small per-example ridge solve against the decoder atoms could materially lower FVU by directly reducing reconstruction error on the selected support. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If residual-conditioned union_topk materially improves proxy FVU, promote this family toward mainline comparison and consider a full run.",
-    "If it remains near the recent 0.275 proxy plateau under normal runtime, pivot away from branch-union variants to a more radical encoder family rather than spending more rounds on local union_topk tuning."
+    "If refined_topk materially improves proxy FVU, follow with a family-specific stabilization pass on the coefficient refinement strength or support source before considering promotion.",
+    "If refined_topk is flat or regresses under normal runtime, that is evidence that coefficient refitting alone is not enough and the next round should pivot to a genuinely different encoder family rather than more top-k refinements."
   ]
 }

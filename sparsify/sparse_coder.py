@@ -322,6 +322,9 @@ def _get_sae_class(architecture: str) -> type:
     if architecture == "union_topk":
         from .union_topk_sparse_coder import UnionTopKSparseCoder
         return UnionTopKSparseCoder
+    if architecture == "refined_topk":
+        from .refined_topk_sparse_coder import RefinedTopKSparseCoder
+        return RefinedTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
