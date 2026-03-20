@@ -629,7 +629,7 @@ def run_agent_round(
             "exec",
             "--full-auto",
             "--sandbox",
-            "workspace-write",
+            "danger-full-access",
             "--cd",
             str(REPO_ROOT),
             "--output-schema",
