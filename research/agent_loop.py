@@ -32,7 +32,6 @@ from research.git_ops import (
     capture_before_files,
     cleanup_all_snapshots,
     cleanup_round_snapshots,
-    rollback_code_changes,
     init_tracked_paths,
 )
 from research.state_io import (
@@ -93,7 +92,6 @@ from research.policy import (
     check_variable_isolation,
     compute_proxy_budget,
     detect_stagnation,
-    get_revert_target,
     enforce_incubation_limits,
     auto_archive_stale_families,
 )
@@ -414,15 +412,9 @@ def _abort_round(
     stdout_path: Path | None,
     touched: list[str],
     patch_path: Path | None,
-    pre_edit_commit: str | None,
-    is_code_edit: bool,
     auto_commit: bool,
-    rollback_reason: str | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Abort a round early: optionally rollback code, finalize state."""
-    if rollback_reason and is_code_edit and touched and pre_edit_commit:
-        rollback_code_changes(pre_edit_commit, round_id, rollback_reason)
-
+    """Abort a round early and finalize state without mutating the codebase."""
     result: dict[str, str] = {
         "decision": decision,
         "status": decision,
@@ -607,8 +599,6 @@ def _finalize_round(
     touched: list[str],
     patch_path: Path | None,
     stdout_path: Path,
-    is_code_edit: bool,
-    pre_edit_commit: str | None,
     auto_commit: bool,
     effective_session_mode: str,
 ) -> dict[str, Any]:
@@ -748,16 +738,11 @@ def main() -> int:
                     f"({agent_state['consecutive_crashes']} consecutive crashes)"
                 )
                 break
-            revert_target = get_revert_target(memory)
-            if revert_target:
-                print(f"Crash streak detected, reverting to {revert_target[:12]} and switching to param_only")
-                rollback_code_changes(revert_target, int(agent_state.get("round_index", 0)) + 1, "crash_streak_revert")
-            else:
-                print("Crash streak detected but no revert target found; forcing param_only")
+            print("Crash streak detected; forcing param_only without modifying the worktree")
             agent_state["consecutive_crashes"] = 0
             agent_state["crash_resets"] = crash_resets + 1
             save_state(state)
-            stagnation["recommended_mode"] = "revert_and_simplify"
+            stagnation["recommended_mode"] = "stabilize_after_crashes"
             force_param_only = True
 
         if agent_state["consecutive_crashes"] >= args.max_consecutive_crashes:
@@ -818,8 +803,6 @@ def main() -> int:
         before = snapshot_paths()
         if before:
             capture_before_files(list(before.keys()), round_id)
-        pre_edit_commit = current_git_commit()
-
         # --- Agent invocation ---
         try:
             action, stdout_path, returned_session_id, resumed = run_agent_round_with_retry(
@@ -887,8 +870,6 @@ def main() -> int:
             original_change_type = action.get("change_type")
             print(f"Round {round_id}: BLOCKING code edit ({original_change_type}) — crash recovery mode requires param_only")
             log_round_event(round_ctx, "code_edit_blocked", reason="crash_recovery_force_param_only", original_change_type=original_change_type)
-            if pre_edit_commit:
-                rollback_code_changes(pre_edit_commit, round_id, "crash_recovery_force_param_only")
             action["change_type"] = "param_only"
             action["needs_sanity"] = False
             action["touched_files"] = []
@@ -924,8 +905,7 @@ def main() -> int:
             _, memory = _abort_round(
                 round_id, action, "crash", "invalid_env_overrides",
                 round_ctx, memory, stdout_path, touched, patch_path,
-                pre_edit_commit, is_code_edit, auto_commit,
-                rollback_reason="invalid_env_overrides" if is_code_edit and touched else None,
+                auto_commit,
             )
             continue
 
@@ -956,8 +936,7 @@ def main() -> int:
                 _abort_round(
                     round_id, action, "policy_reject", "incubation_limit_exceeded",
                     round_ctx, memory, stdout_path, touched, patch_path,
-                    pre_edit_commit, is_code_edit, auto_commit,
-                    rollback_reason="incubation_limit_exceeded" if is_code_edit and touched else None,
+                    auto_commit,
                 )
                 continue
 
@@ -983,8 +962,7 @@ def main() -> int:
                 _abort_round(
                     round_id, action, "crash", "identical_to_baseline",
                     round_ctx, memory, stdout_path, touched, patch_path,
-                    pre_edit_commit, is_code_edit, auto_commit,
-                    rollback_reason="identical_to_baseline",
+                    auto_commit,
                 )
                 continue
             else:
@@ -1010,8 +988,6 @@ def main() -> int:
                 tier_timeout = args.proxy_timeout_sec
             if remaining_sec < args.proxy_timeout_sec * 0.5:
                 print(f"Round {round_id}: insufficient budget even for proxy ({remaining_sec:.0f}s remaining), stopping")
-                if is_code_edit and touched and pre_edit_commit:
-                    rollback_code_changes(pre_edit_commit, round_id, "budget_exhausted_before_training")
                 break
 
         # --- Sanity check for code edits ---
@@ -1024,8 +1000,7 @@ def main() -> int:
                 _abort_round(
                     round_id, action, "crash", "sanity_failed",
                     round_ctx, memory, stdout_path, touched, patch_path,
-                    pre_edit_commit, is_code_edit, auto_commit,
-                    rollback_reason=f"sanity_failed: {sanity_exc}",
+                    auto_commit,
                 )
                 continue
 
@@ -1039,10 +1014,6 @@ def main() -> int:
             f"k={result.get('k')} health={result.get('run_health')} "
             f"termination={result.get('termination_reason')}"
         )
-
-        # Code rollback on training crash
-        if is_code_edit and touched and pre_edit_commit and result.get("run_health") == "crash":
-            rollback_code_changes(pre_edit_commit, round_id, f"training_crash: {result.get('termination_reason')}")
 
         # --- Full promotion ---
         if result.get("decision") == "promote" and tier == "proxy":
@@ -1060,12 +1031,9 @@ def main() -> int:
                     f"k={result.get('k')} health={result.get('run_health')} "
                     f"termination={result.get('termination_reason')}"
                 )
-                if is_code_edit and touched and pre_edit_commit and full_result.get("run_health") == "crash":
-                    rollback_code_changes(pre_edit_commit, round_id, f"full_training_crash: {full_result.get('termination_reason')}")
-
         memory = _finalize_round(
             round_id, action, result, round_ctx, memory, touched,
-            patch_path, stdout_path, is_code_edit, pre_edit_commit,
+            patch_path, stdout_path,
             auto_commit, effective_session_mode,
         )
 

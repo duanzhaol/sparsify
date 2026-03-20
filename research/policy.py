@@ -196,7 +196,7 @@ def detect_stagnation(agent_state: dict[str, Any]) -> dict[str, Any]:
     Returns:
         level: "none" | "mild" (3-4 rounds) | "severe" (5+ rounds)
         crash_streak: bool (consecutive_crashes >= 2)
-        recommended_mode: "normal" | "exploitation" | "k_exploration" | "revert_and_simplify"
+        recommended_mode: "normal" | "exploitation" | "k_exploration" | "stabilize_after_crashes"
     """
     no_improve = int(agent_state.get("consecutive_no_improve", 0))
     crashes = int(agent_state.get("consecutive_crashes", 0))
@@ -214,7 +214,7 @@ def detect_stagnation(agent_state: dict[str, Any]) -> dict[str, Any]:
         recommended_mode = "normal"
 
     if crash_streak:
-        recommended_mode = "revert_and_simplify"
+        recommended_mode = "stabilize_after_crashes"
 
     return {
         "level": level,
@@ -227,7 +227,7 @@ def detect_stagnation(agent_state: dict[str, Any]) -> dict[str, Any]:
 
 def generate_stagnation_guidance(level: str, memory: dict[str, Any], state: dict[str, Any], recommended_mode: str = "normal") -> str:
     """Generate prompt guidance text based on stagnation level and recommended mode."""
-    if recommended_mode == "revert_and_simplify":
+    if recommended_mode == "stabilize_after_crashes":
         return (
             "CRASH RECOVERY MODE: Recent rounds have crashed consecutively.\n"
             "You MUST use change_type='param_only' this round — do NOT edit code.\n"
@@ -262,47 +262,6 @@ def generate_stagnation_guidance(level: str, memory: dict[str, Any], state: dict
         )
 
     return ""
-
-
-def get_revert_target(memory: dict[str, Any]) -> str | None:
-    """Find a safe git commit to revert sparsify/ code to after a crash streak.
-
-    Strategy: find the most recent round with a healthy (non-crash) result
-    from an active/promoted family, then look up that round's commit via
-    git log. Returns the commit hash, or None if no safe target is found.
-    """
-    import subprocess
-    from research.git_ops import REPO_ROOT
-
-    # Find the most recent successful round
-    best_round = -1
-    families = memory.get("architecture_families", {})
-    for name, family in families.items():
-        if family.get("status") not in ("active", "promoted"):
-            continue
-        for config in family.get("tested_configs", []):
-            if config.get("run_health") not in (None, "normal"):
-                continue
-            if config.get("decision") in ("keep", "promote", "incubate"):
-                r = config.get("round")
-                if r is not None and int(r) > best_round:
-                    best_round = int(r)
-
-    if best_round < 0:
-        return None
-
-    # Search git log for the commit that recorded that round
-    pattern = f"experiment: round {best_round:04d}"
-    try:
-        result = subprocess.run(
-            ["git", "log", "--all", "--grep", pattern, "--format=%H", "-1"],
-            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-        )
-        commit = result.stdout.strip()
-        return commit if commit else None
-    except Exception:
-        return None
-
 
 # ---------------------------------------------------------------------------
 # Phase 4: K Exploration Guidance

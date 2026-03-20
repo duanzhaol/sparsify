@@ -230,28 +230,3 @@ def capture_before_files(paths: list[str], round_id: int) -> None:
         if src.exists():
             dst.write_bytes(src.read_bytes())
 
-
-def rollback_code_changes(pre_edit_commit: str, round_id: int, reason: str) -> None:
-    """Restore sparsify/ code to its state at pre_edit_commit.
-
-    Use worktree-only restore so crash recovery does not pollute the git index
-    with staged rollback artifacts.
-    """
-    from research.state_io import append_timeline_event
-
-    print(f"Round {round_id}: rolling back code to {pre_edit_commit[:12]} ({reason})")
-    git(["restore", f"--source={pre_edit_commit}", "--worktree", "--", "sparsify/"])
-    append_timeline_event(
-        "code_rollback",
-        round=round_id,
-        tier=None,
-        run_name=None,
-        family_name=None,
-        family_stage=None,
-        status="rolled_back",
-        decision=None,
-        payload={
-            "pre_edit_commit": pre_edit_commit,
-            "reason": reason,
-        },
-    )

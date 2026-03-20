@@ -237,8 +237,8 @@ The runtime strategy layer (`research/policy.py`) may intervene before or during
 - **Variable isolation check**: the runtime warns (currently soft enforcement) if a round changes more than one primary dimension (e.g. architecture + optimizer simultaneously). Coupled changes like `lr` + `optimizer` are allowed.
 - **Incubation limits**: at most 2 architecture families may be incubating concurrently. Each incubating family gets at most 3 proxy rounds before being auto-archived. Exceeding these limits results in `policy_reject`.
 - **Dynamic proxy budget**: code-edit rounds (`edit_sae_code`) automatically get a larger proxy token budget (40M instead of default 20M) to allow zero-initialized components time to diverge.
-- **Stagnation detection**: after consecutive rounds without improvement, the runtime injects guidance into the prompt recommending mode shifts (exploitation sweep, K exploration, or revert-and-simplify).
-- **Crash recovery**: after 2+ consecutive crashes, the runtime reverts code to the last healthy commit and forces `param_only` mode for the next round.
+- **Stagnation detection**: after consecutive rounds without improvement, the runtime injects guidance into the prompt recommending mode shifts (exploitation sweep, K exploration, or crash stabilization).
+- **Crash recovery**: after 2+ consecutive crashes, the runtime forces `param_only` mode for the next round without automatically modifying the worktree.
 - **Meta-analysis**: every 5 rounds, the runtime generates a structured analysis of progress and injects it into the prompt.
 
 ## Session Lifecycle

@@ -582,7 +582,7 @@ python research/agent_loop.py \
   - 后续 round 用 `codex exec resume` 继续
 - `fresh-each-round`
   - 每轮重新新建一个 `codex exec`
-  - 主要用于调试或回退
+  - 主要用于调试或隔离 session 问题
 
 和 session 相关的高级参数还有：
 
