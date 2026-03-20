@@ -17,7 +17,9 @@ Primary objective:
 - lower FVU
 
 Secondary objective:
-- achieve similar FVU at smaller K
+- treat `K=128` only as an initial quality anchor, not as a success criterion
+- only reward smaller `K` after quality has materially beaten the current `K=128` baseline
+- the quality target is aggressive: aim for configurations that can drive FVU to roughly half of the current `K=128` baseline before preferring smaller `K`
 
 Tertiary objective:
 - reduce cost: memory, wall time, or training instability
@@ -31,8 +33,28 @@ These pieces are fixed infrastructure. Do not redesign them inside a round.
 - Nightly loop: `research/agent_loop.py`
 - Environment checks and parsing helpers: `research/prepare.py`
 
+The nightly loop may run in two modes:
+
+- `resume-session`
+  - default
+  - create one Codex session for the night, then continue it with `codex exec resume`
+- `fresh-each-round`
+  - debugging fallback
+  - create a fresh `codex exec` session every round
+
+In the default mode, the Codex session is only short/mid-term working memory.  
+Long-term factual memory still lives in `research/history/*`.
+
+The nightly loop also defaults to git-tracked experiment mode:
+
+- each round creates one experiment commit
+- commits go to a dedicated research branch, not the user's main development branch
+- the worktree must be clean before the loop starts
+
 Parameter changes should be expressed through environment overrides.  
 Only edit code when the hypothesis actually needs a code change.
+
+Architecture exploration is explicitly allowed and encouraged when parameter-only search is not closing the quality gap.
 
 ## Allowed Edits
 
@@ -55,11 +77,15 @@ The important memory files are:
 - `research/history/frontier.json`
   - compact frontier snapshot
 - `research/history/memory.json`
-  - distilled findings, recent rounds, failure patterns, next hypotheses
+  - distilled findings, recent rounds, failure patterns, architecture family memory, next hypotheses
 - `research/history/results.tsv`
   - full factual experiment history
 - `research/history/round_summaries/*.json`
   - one compact summary per round
+- `research/history/session_brief.json`
+  - minimal recovery pack for the active nightly session
+- `research/history/timeline.jsonl`
+  - ordered event log for rounds, training, hints, and session lifecycle
 
 Use them like this:
 
@@ -67,6 +93,7 @@ Use them like this:
 - `memory.json` is your main long-term summary
 - `results.tsv` is the source of truth when you need detailed comparison
 - `round_summaries/` gives short-term local context from recent rounds
+- `session_brief.json` is the minimum context pack when continuing or rebuilding the nightly session
 
 Do not try to carry the whole experiment history in the model context.  
 Use the structured files instead.
@@ -85,7 +112,7 @@ Keep the round hypothesis narrow. One round should make one coherent bet.
 
 ## Decision Rules
 
-The controller decides `promote / keep / archive / discard / crash`.
+The controller decides `promote / keep / incubate / archive / discard / crash`.
 
 Interpret them as:
 
@@ -93,6 +120,8 @@ Interpret them as:
   - proxy result is good enough to justify a full run
 - `keep`
   - full result improved the frontier
+- `incubate`
+  - a new or immature architecture family is not ready for the main frontier yet, but deserves further structured follow-up
 - `archive`
   - interesting but not clearly better
 - `discard`
@@ -106,6 +135,8 @@ The loop should:
 - automatically run `full` only after `promote`
 - reject or coerce direct `full` requests unless explicitly enabled at runtime
 - stop a direction after repeated crashes or repeated non-improvements
+- avoid spending all rounds on local parameter search; if too many rounds pass without a new family or incubating-family follow-up, bias toward architecture exploration
+- treat `proxy_frontier` and `full_frontier` separately; do not compare proxy evidence directly against full evidence
 
 The runtime also tracks run health:
 
@@ -136,10 +167,29 @@ Examples of good next moves:
   - adjust `JumpReLU` threshold behavior
   - improve `GroupTopK` routing design
   - add a new sparse coder variant
+  - explore a new activation family such as Sparse-ReLU or another sparse nonlinear encoder
+  - explore Gated or multi-branch encoders
+  - explore MoE-style or ICE-style encoders, including their own width/routing hyperparameters
+  - change encoder routing, grouping, intermediate width, branch structure, or latent allocation strategy
 - performance:
   - reduce unnecessary compute in `trainer.py`
   - reduce memory movement or logging overhead
   - optimize an implementation that showed promising quality but poor throughput
+
+The architecture examples above are examples only, not a closed list.  
+If you can defend a new SAE or encoder design that could improve the quality target, it is in scope.
+
+When proposing a new architecture family, think in stages:
+
+- `prototype`
+  - minimal viable implementation that can run and expose early quality/performance signals
+- `stabilize`
+  - sweep the family-specific internal parameters, such as width, routing width, gating shape, branch allocation, or grouping
+- `promote_to_mainline`
+  - only after the family shows enough promise to compare against the main frontier
+
+Do not expect a first prototype to win immediately.  
+Use incubation to keep plausible new families alive for a few coherent rounds.
 
 Bad rounds:
 
@@ -147,6 +197,8 @@ Bad rounds:
 - editing launch infrastructure instead of using env overrides
 - changing evaluation semantics
 - expanding context by rereading the entire history every round
+- treating smaller `K` alone as success when quality is still far from the current target
+- assuming a slow new architecture is architecturally bad before separating implementation bottlenecks from quality behavior
 
 ## Sanity Gate
 
@@ -167,6 +219,35 @@ The runtime may stop a run early for any of these reasons:
 - hard overall timeout
 
 These early stops are part of the research loop. They exist to prevent wasting long windows on clearly unhealthy runs.
+
+## Session Lifecycle
+
+In `resume-session` mode, the runtime should:
+
+- create a session on the first round of the night
+- resume that same session on later rounds
+- write `active_session_id`, `active_session_status`, `active_session_rounds`, and `last_resume_ok_at` into `state.json`
+- rebuild the session if it fails, drifts, or exceeds configured age/round limits
+- close the session at the end of the nightly loop
+
+Important:
+
+- the session is not the source of truth
+- important findings must still be written back into `memory.json`, `results.tsv`, `round_summaries/`, and `timeline.jsonl`
+
+## Git Tracking
+
+The runtime should treat git as part of the experiment record:
+
+- one round corresponds to one experiment commit
+- commit after the round result and structured history are finalized
+- keep commits on a dedicated nightly research branch
+- do not auto-reset or auto-delete failed rounds
+
+Tracked history should stay compact:
+
+- keep structured files such as `state.json`, `memory.json`, `results.tsv`, `frontier.json`, `timeline.jsonl`, `session_brief.json`, and `round_summaries/*.json`
+- do not commit `logs/`, `current_status.json`, checkpoints, or other large runtime artifacts
 
 ## Structured Action Contract
 

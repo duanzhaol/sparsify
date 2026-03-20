@@ -31,6 +31,8 @@ STATE_PATH = HISTORY_DIR / "state.json"
 RESULTS_PATH = HISTORY_DIR / "results.tsv"
 FRONTIER_PATH = HISTORY_DIR / "frontier.json"
 MEMORY_PATH = HISTORY_DIR / "memory.json"
+HINTS_PATH = HISTORY_DIR / "operator_hints.json"
+TIMELINE_PATH = HISTORY_DIR / "timeline.jsonl"
 TRAIN_PATH = RESEARCH_DIR / "train.py"
 
 RESULT_COLUMNS = [
@@ -103,6 +105,31 @@ def _run_git(args: list[str]) -> str:
     return result.stdout.strip()
 
 
+def read_json_retry(path: Path) -> Any:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        time.sleep(0.1)
+        with open(path) as f:
+            return json.load(f)
+
+
+def append_timeline_event(event: str, **payload: Any) -> str:
+    TIMELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TIMELINE_PATH.touch(exist_ok=True)
+    event_id = f"evt_{time.time_ns()}"
+    record = {
+        "event_id": event_id,
+        "ts": int(time.time()),
+        "event": event,
+        **payload,
+    }
+    with open(TIMELINE_PATH, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return event_id
+
+
 def get_git_state() -> dict[str, Any]:
     head_commit = _run_git(["rev-parse", "HEAD"])
     head_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -112,6 +139,30 @@ def get_git_state() -> dict[str, Any]:
         "head_branch": head_branch,
         "workspace_dirty": dirty,
     }
+
+
+def normalize_frontiers(state: dict[str, Any]) -> dict[str, Any]:
+    proxy_frontier = state.setdefault("proxy_frontier", {})
+    full_frontier = state.setdefault("full_frontier", {})
+    legacy_frontier = state.get("frontier", {})
+
+    for key, point in legacy_frontier.items():
+        if not isinstance(point, dict):
+            continue
+        target = proxy_frontier if point.get("tier") == "proxy" else full_frontier
+        current = target.get(key)
+        if current is None or float(point.get("fvu", float("inf"))) < float(current.get("fvu", float("inf"))):
+            target[key] = point
+
+    for key, point in list(full_frontier.items()):
+        if isinstance(point, dict) and point.get("tier") == "proxy":
+            current = proxy_frontier.get(key)
+            if current is None or float(point.get("fvu", float("inf"))) < float(current.get("fvu", float("inf"))):
+                proxy_frontier[key] = point
+            del full_frontier[key]
+
+    state["frontier"] = full_frontier
+    return state
 
 
 def ensure_history_files() -> None:
@@ -133,9 +184,12 @@ def ensure_history_files() -> None:
             "base_branch": git_state["head_branch"],
             "base_workspace_dirty": git_state["workspace_dirty"],
             "frontier": {},
+            "proxy_frontier": {},
+            "full_frontier": {},
             "total_experiments": 0,
             "total_keeps": 0,
             "total_promotes": 0,
+            "total_incubates": 0,
             "total_discards": 0,
             "total_archives": 0,
             "total_crashes": 0,
@@ -143,35 +197,53 @@ def ensure_history_files() -> None:
             "next_ideas": [],
             "last_result": None,
         }
+        normalize_frontiers(state)
         save_state(state)
     else:
-        with open(STATE_PATH) as f:
-            state = json.load(f)
+        state = read_json_retry(STATE_PATH)
+        normalize_frontiers(state)
+        save_state(state)
 
     FRONTIER_PATH.write_text(json.dumps((state or {}).get("frontier", {}), indent=2) + "\n")
 
     if not MEMORY_PATH.exists():
         memory = {
-            "current_focus": "Establish a stable low-K SAE frontier with the cheapest possible runs.",
+            "current_focus": (
+                "Treat K=128 only as the initial search anchor, not as a success criterion. "
+                "The research objective is to find configurations whose FVU is dramatically better "
+                "than the current K=128 baseline, with a target on the order of halving that baseline FVU "
+                "before rewarding smaller K or lower cost."
+            ),
             "architecture_findings": [],
             "performance_findings": [],
             "failure_patterns": [],
             "baseline_runtime": {},
+            "architecture_families": {},
             "recent_rounds": [],
             "recent_insights": [],
-            "next_hypotheses": [],
+            "next_hypotheses": [
+                "Establish or refresh a trustworthy K=128 quality anchor before rewarding lower-K points.",
+                "Do not treat smaller K as success unless its FVU is materially better than the current K=128 baseline.",
+                "Prefer experiments that can plausibly cut the current K=128 FVU by about half, even if they keep K unchanged at first."
+            ],
         }
         MEMORY_PATH.write_text(json.dumps(memory, indent=2) + "\n")
+
+    if not HINTS_PATH.exists():
+        HINTS_PATH.write_text("[]\n")
+    TIMELINE_PATH.touch(exist_ok=True)
 
 
 def load_state() -> dict[str, Any]:
     ensure_history_files()
-    with open(STATE_PATH) as f:
-        return json.load(f)
+    state = read_json_retry(STATE_PATH)
+    normalize_frontiers(state)
+    return state
 
 
 def save_state(state: dict[str, Any]) -> None:
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    normalize_frontiers(state)
     with open(STATE_PATH, "w") as f:
         json.dump(state, f, indent=2)
     FRONTIER_PATH.write_text(json.dumps(state.get("frontier", {}), indent=2) + "\n")
@@ -305,6 +377,35 @@ def decide(frontier: dict[str, Any], parsed: dict[str, Any], tier: str) -> str:
     return "archive" if near_same_k else "discard"
 
 
+def decide_with_context(
+    state: dict[str, Any],
+    parsed: dict[str, Any],
+    tier: str,
+    config: dict[str, Any],
+) -> str:
+    frontier_key = "proxy_frontier" if tier == "proxy" else "full_frontier"
+    decision = decide(state.get(frontier_key, {}), parsed, tier)
+    if decision in {"promote", "keep", "archive", "crash"}:
+        return decision
+    if tier != "proxy":
+        return decision
+
+    family_name = str(config.get("family_name") or parsed.get("architecture") or "").strip().lower()
+    family_stage = str(config.get("family_stage") or "").strip().lower()
+    known_families = {
+        str(point.get("architecture", "")).lower()
+        for frontier_name in ("proxy_frontier", "full_frontier")
+        for point in state.get(frontier_name, {}).values()
+        if isinstance(point, dict)
+    }
+
+    if family_stage == "prototype":
+        return "incubate"
+    if family_name and family_name not in known_families:
+        return "incubate"
+    return decision
+
+
 def append_result(result: RunResult) -> None:
     ensure_history_files()
     with open(RESULTS_PATH, "a", newline="") as f:
@@ -340,10 +441,12 @@ def update_state_with_result(
     config: dict[str, Any],
 ) -> None:
     state["total_experiments"] += 1
+    active_frontier_key = "proxy_frontier" if result.tier == "proxy" else "full_frontier"
+    active_frontier = state.setdefault(active_frontier_key, {})
     if result.decision == "keep":
         state["total_keeps"] += 1
         if result.k is not None and result.val_fvu is not None:
-            state["frontier"][str(result.k)] = {
+            active_frontier[str(result.k)] = {
                 "fvu": result.val_fvu,
                 "architecture": result.architecture,
                 "commit": result.head_commit,
@@ -354,12 +457,11 @@ def update_state_with_result(
             }
     elif result.decision == "promote":
         state["total_promotes"] += 1
-        # Also update frontier for proxy promotes (best known so far)
         if result.k is not None and result.val_fvu is not None:
             key = str(result.k)
-            current = state["frontier"].get(key)
+            current = active_frontier.get(key)
             if current is None or result.val_fvu < current["fvu"]:
-                state["frontier"][key] = {
+                active_frontier[key] = {
                     "fvu": result.val_fvu,
                     "architecture": result.architecture,
                     "commit": result.head_commit,
@@ -370,6 +472,8 @@ def update_state_with_result(
                 }
     elif result.decision == "archive":
         state["total_archives"] += 1
+    elif result.decision == "incubate":
+        state["total_incubates"] = int(state.get("total_incubates", 0)) + 1
     elif result.decision == "discard":
         state["total_discards"] += 1
     elif result.decision == "crash":
@@ -384,20 +488,103 @@ def update_state_with_result(
         "description": result.description,
         "self_review": result.self_review,
     }
+    state["frontier"] = state.get("full_frontier", {})
 
 
 def print_status(state: dict[str, Any]) -> None:
     print(f"total_experiments: {state['total_experiments']}")
     print(f"total_keeps: {state['total_keeps']}")
     print(f"total_promotes: {state.get('total_promotes', 0)}")
+    print(f"total_incubates: {state.get('total_incubates', 0)}")
     print(f"total_crashes: {state.get('total_crashes', 0)}")
-    print(f"frontier:")
-    for k in sorted(state["frontier"].keys(), key=int):
-        pt = state["frontier"][k]
+    print("full_frontier:")
+    for k in sorted(state.get("full_frontier", {}).keys(), key=int):
+        pt = state["full_frontier"][k]
+        print(f"  K={k}: FVU={pt['fvu']:.6f} arch={pt['architecture']} tier={pt['tier']}")
+    print("proxy_frontier:")
+    for k in sorted(state.get("proxy_frontier", {}).keys(), key=int):
+        pt = state["proxy_frontier"][k]
         print(f"  K={k}: FVU={pt['fvu']:.6f} arch={pt['architecture']} tier={pt['tier']}")
     if state.get("last_result"):
         lr = state["last_result"]
         print(f"last: {lr['decision']} | {lr['description']} | fvu={lr.get('val_fvu')}")
+
+
+def load_hints() -> list[dict[str, Any]]:
+    ensure_history_files()
+    return read_json_retry(HINTS_PATH)
+
+
+def save_hints(hints: list[dict[str, Any]]) -> None:
+    HINTS_PATH.write_text(json.dumps(hints, indent=2) + "\n")
+
+
+def add_hint(message: str, priority: str, scope: str, tag: str | None) -> dict[str, Any]:
+    hints = load_hints()
+    hint = {
+        "id": f"hint_{int(time.time())}",
+        "message": message,
+        "priority": priority,
+        "scope": scope,
+        "tag": tag,
+        "status": "pending",
+        "created_at": int(time.time()),
+        "applied_at": None,
+    }
+    hints.append(hint)
+    save_hints(hints)
+    append_timeline_event(
+        "hint_added",
+        round=None,
+        tier=None,
+        run_name=None,
+        family_name=None,
+        family_stage=None,
+        status=hint["status"],
+        decision=None,
+        payload=hint,
+    )
+    return hint
+
+
+def update_hint(
+    hint_id: str,
+    priority: str | None,
+    scope: str | None,
+    tag: str | None,
+    status: str | None,
+) -> dict[str, Any]:
+    hints = load_hints()
+    for hint in hints:
+        if hint.get("id") != hint_id:
+            continue
+        if priority is not None:
+            hint["priority"] = priority
+        if scope is not None:
+            hint["scope"] = scope
+        if tag is not None:
+            hint["tag"] = tag
+        if status is not None:
+            hint["status"] = status
+            if status == "pending":
+                hint["applied_at"] = None
+                hint.pop("applied_in_round", None)
+            elif status in {"applied", "dismissed"}:
+                hint["applied_at"] = int(time.time())
+        save_hints(hints)
+        append_timeline_event(
+            "hint_updated",
+            round=None,
+            tier=None,
+            run_name=None,
+            family_name=None,
+            family_stage=None,
+            status=hint.get("status"),
+            decision=None,
+            payload=hint,
+        )
+        return hint
+    raise KeyError(f"hint not found: {hint_id}")
 
 
 def main() -> int:
@@ -407,6 +594,9 @@ def main() -> int:
 Usage:
   python controller.py init                          # first time setup
   python controller.py status                        # show frontier & stats
+  python controller.py hint --message "..."         # enqueue an operator hint
+  python controller.py hints                         # list operator hints
+  python controller.py hint-update --id ...         # edit an operator hint
   python controller.py record --log run.log \\
     --description "baseline" --self-review "..."      # record experiment result
 """,
@@ -416,6 +606,20 @@ Usage:
 
     sub.add_parser("init", help="Initialize history/state files")
     sub.add_parser("status", help="Print controller state summary")
+    sub.add_parser("hints", help="Print operator hints")
+
+    hint_parser = sub.add_parser("hint", help="Add an operator hint")
+    hint_parser.add_argument("--message", required=True)
+    hint_parser.add_argument("--priority", choices=["low", "normal", "high"], default="normal")
+    hint_parser.add_argument("--scope", choices=["next_round", "persistent"], default="next_round")
+    hint_parser.add_argument("--tag", default=None)
+
+    hint_update = sub.add_parser("hint-update", help="Update an operator hint")
+    hint_update.add_argument("--id", required=True)
+    hint_update.add_argument("--priority", choices=["low", "normal", "high"])
+    hint_update.add_argument("--scope", choices=["next_round", "persistent"])
+    hint_update.add_argument("--tag")
+    hint_update.add_argument("--status", choices=["pending", "applied", "dismissed"])
 
     rec = sub.add_parser("record", help="Parse a training log and record the result")
     rec.add_argument("--log", help="Path to the run.log file")
@@ -445,6 +649,32 @@ Usage:
         print_status(state)
         return 0
 
+    if args.cmd == "hints":
+        for hint in load_hints():
+            print(json.dumps(hint, ensure_ascii=False))
+        return 0
+
+    if args.cmd == "hint":
+        hint = add_hint(args.message, args.priority, args.scope, args.tag)
+        print(f"hint_id: {hint['id']}")
+        print(f"status: {hint['status']}")
+        print(f"priority: {hint['priority']}")
+        print(f"scope: {hint['scope']}")
+        return 0
+
+    if args.cmd == "hint-update":
+        try:
+            hint = update_hint(args.id, args.priority, args.scope, args.tag, args.status)
+        except KeyError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+        print(f"hint_id: {hint['id']}")
+        print(f"status: {hint['status']}")
+        print(f"priority: {hint['priority']}")
+        print(f"scope: {hint['scope']}")
+        print(f"tag: {hint.get('tag')}")
+        return 0
+
     # --- record ---
     if not args.log and not args.checkpoint_dir:
         print("ERROR: record requires --log or --checkpoint-dir")
@@ -467,7 +697,7 @@ Usage:
     else:
         parsed = parse_log_output(full_output)
 
-    decision = decide(state["frontier"], parsed, args.tier)
+    decision = decide_with_context(state, parsed, args.tier, config)
 
     experiment_id = f"{args.tier}_{int(time.time())}"
 

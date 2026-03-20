@@ -81,6 +81,22 @@
 
 这一步解决的是“如何让大模型真正基于历史做下一步决策”。
 
+### 第三点五阶段：加入长期 Codex Session
+
+再后来，系统从“每轮新开一个 `codex exec`”升级成了“每晚维护一个长期 Codex session”。
+
+现在默认策略是：
+
+- 第 1 轮创建一个新的 Codex session
+- 后续轮次默认用 `codex exec resume` 延续同一个 session
+- 如果 session 失效、漂移或超龄，就自动重建
+
+这一步解决的是：
+
+- 降低每轮重复解释任务、重复扫 repo 的成本
+- 让模型保留最近几轮的短中期工作记忆
+- 同时继续依赖结构化 memory，避免长期对话失控
+
 ### 第四阶段：加入性能感知和失败处理
 
 当系统开始长时间跑实验后，一个关键问题出现了：
@@ -99,6 +115,25 @@
 - 不再只看“训练死没死”
 - 还要看“训练是不是慢得不值得继续”
 - 还要区分“架构问题”和“实现问题”
+
+### 第五阶段：加入新架构 family 孵化机制
+
+当系统开始探索真正新的 encoder / SAE family 后，又出现了另一个问题：
+
+- 新 family 的第一轮原型往往不够强
+- 但这不代表这个方向没有价值
+
+所以系统继续加入了：
+
+- `incubate` 状态
+- `architecture_families` 长期记忆
+- `rounds_since_new_family` 约束
+
+这一步解决的是：
+
+- 不让系统永远沉迷在局部参数搜索
+- 允许一个新 family 用多轮逐步长出来
+- 区分“方向值得继续孵化”和“方向真的不值得做”
 
 ## 3. 当前系统的整体设计
 
@@ -173,6 +208,7 @@
 - [`research/history/frontier.json`](/root/sparsify-ascend/research/history/frontier.json)
 - [`research/history/memory.json`](/root/sparsify-ascend/research/history/memory.json)
 - [`research/history/results.tsv`](/root/sparsify-ascend/research/history/results.tsv)
+- [`research/history/session_brief.json`](/root/sparsify-ascend/research/history/session_brief.json)
 
 它们分别承担不同角色：
 
@@ -181,9 +217,11 @@
 - `frontier.json`
   只保留当前最重要的前沿结果，便于快速读取
 - `memory.json`
-  存压缩后的研究结论、性能问题、失败模式和下一步假设
+  存压缩后的研究结论、性能问题、失败模式、架构 family 记忆和下一步假设
 - `results.tsv`
   存所有实验的事实记录，是最完整的历史来源
+- `session_brief.json`
+  存当前 nightly session 的最小恢复包，包括当前主目标、最佳 full frontier、最近结果、最近摘要、正在孵化的 family、最近性能问题和当前建议的下一步
 
 ### 短期记忆
 
@@ -198,6 +236,7 @@
 
 - [`research/history/round_summaries/`](/root/sparsify-ascend/research/history/round_summaries)
 - [`research/history/current_status.json`](/root/sparsify-ascend/research/history/current_status.json)
+- [`research/history/timeline.jsonl`](/root/sparsify-ascend/research/history/timeline.jsonl)
 - [`research/history/logs/`](/root/sparsify-ascend/research/history/logs)
 
 这种设计的好处是：
@@ -205,6 +244,53 @@
 - 长期实验信息不会丢
 - 每轮 prompt 不需要把整个历史全塞进去
 - 大模型可以用“压缩后的结论 + 最近几轮细节”做下一步决策
+- 长期 session 坏掉时，也能快速重建
+
+### Timeline
+
+现在系统还会额外记录一条连续时间线：
+
+- [`research/history/timeline.jsonl`](/root/sparsify-ascend/research/history/timeline.jsonl)
+
+它的作用是：
+
+- 回放整次夜跑里每个阶段发生了什么
+- 按时间段分析某一轮卡在哪里
+- 对照正常流程和异常流程
+
+时间线里既有关键阶段事件，也有训练过程中的 heartbeat。
+
+除了 round 级事件，现在还会记录 session 级事件：
+
+- `session_started`
+- `session_resumed`
+- `session_broken`
+- `session_rebuilt`
+- `session_closed`
+
+## 4.1 正常时间线应该是什么样
+
+一轮正常的时间线通常会包含：
+
+1. `loop_started`
+2. `session_started` 或 `session_resumed`
+3. `round_started`
+4. `agent_deciding`
+5. `agent_action_received`
+6. `training_started`（proxy）
+7. 多条 `training_heartbeat`
+8. `training_finished`（proxy）
+9. `result_recorded`（proxy）
+10. 如果 proxy 被 promote：
+   - `training_started`（full）
+   - 多条 `training_heartbeat`
+   - `training_finished`（full）
+   - `result_recorded`（full）
+11. `round_finished`
+12. 结束时出现 `session_closed`
+13. 最后出现 `loop_finished`
+
+如果你看到这个顺序被打断，就说明某个阶段出了问题。
 
 ## 5. proxy 和 full 是如何设计的
 
@@ -249,6 +335,32 @@
 
 - 不让每个候选都直接烧掉大量预算
 - 先用便宜实验筛选，再用贵实验验证
+- 不把 `proxy` 的结果直接和 `full` 的结果混成同一类证据
+
+### proxy / full frontier 分离
+
+当前 controller 会分别维护：
+
+- `proxy_frontier`
+- `full_frontier`
+
+其中：
+
+- `proxy` 只和 `proxy_frontier` 比，用来决定 `promote / archive / incubate / discard`
+- `full` 只和 `full_frontier` 比，用来决定 `keep / archive / discard`
+- `frontier.json` 默认等价于 `full_frontier`，表示更正式的前沿结果
+
+### `incubate`
+
+除了 `promote / keep / archive / discard / crash` 之外，现在 controller 还可能给出：
+
+- `incubate`
+
+它表示：
+
+- 这个新 family 或早期原型还不够进入主 frontier
+- 但值得继续给少量预算
+- 后续应该按 family 继续推进，而不是直接丢掉
 
 ## 6. 为什么要加入性能 watchdog
 
@@ -293,6 +405,8 @@ cd /root/sparsify-ascend
 python research/controller.py init
 ```
 
+如果你后续想在运行中间插入一条外部提示，也通过 `controller.py` 完成，不需要停机改代码。
+
 ### 第三步：设置代理
 
 当前 `codex exec` 需要经过你的本地代理：
@@ -301,6 +415,18 @@ python research/controller.py init
 export http_proxy=http://127.0.0.1:23234
 export https_proxy=http://127.0.0.1:23234
 ```
+
+### 第三点五步：确认 git 工作区干净
+
+当前系统默认会为每一轮实验自动创建 git commit，并写到独立实验分支。
+
+因此在启动前，要求工作区干净：
+
+```bash
+git status --short
+```
+
+如果这里还有未提交改动，先手工处理掉，再启动 nightly loop。
 
 ### 第四步：先跑一个小预算验证
 
@@ -316,6 +442,7 @@ python research/agent_loop.py \
   --slow-run-grace-sec 120 \
   --min-tokens-per-sec-ratio 0.25 \
   --min-progress-steps 4 \
+  --session-mode resume-session \
   --reset-failure-counters
 ```
 
@@ -336,6 +463,18 @@ python research/agent_loop.py \
 cat research/history/current_status.json
 ```
 
+查看完整时间线：
+
+```bash
+tail -f research/history/timeline.jsonl
+```
+
+查看当前 session 的恢复包：
+
+```bash
+cat research/history/session_brief.json
+```
+
 查看最近日志：
 
 ```bash
@@ -348,7 +487,66 @@ ls -lt research/history/logs | head
 find checkpoints/research_agent -name metrics.jsonl | tail -n 1 | xargs -r tail -f
 ```
 
-### 第六步：开始长时间实验
+按事件类型筛时间线：
+
+```bash
+rg '"event":"training_' research/history/timeline.jsonl
+```
+
+查看某一轮的摘要：
+
+```bash
+ls research/history/round_summaries
+cat research/history/round_summaries/round_0001.json
+```
+
+### 第六步：在运行中插入外部提示
+
+如果你想中途给 Agent 一条提示，可以直接写入 operator hints：
+
+```bash
+python research/controller.py hint \
+  --message "下一轮优先检查 JumpReLU 是否只是实现太慢，不要直接下负面架构结论" \
+  --priority high \
+  --scope next_round \
+  --tag perf
+```
+
+查看当前提示：
+
+```bash
+python research/controller.py hints
+```
+
+修改已有提示：
+
+```bash
+python research/controller.py hint-update \
+  --id hint_1234567890 \
+  --scope persistent \
+  --priority normal \
+  --tag architecture
+```
+
+提示字段含义：
+
+- `--message`
+  提示正文
+- `--priority`
+  `low / normal / high`
+- `--scope`
+  - `next_round`：只影响下一轮，执行后自动标记为已应用
+  - `persistent`：持续保留，供后续多轮参考
+- `--tag`
+  可选分类标签，本身不改变运行逻辑，主要用于人工组织、筛选和让 Agent 更容易理解提示属于哪一类
+
+如果你后面改主意了，`scope` 是可以改的。  
+推荐做法是：
+
+- 很临时的人工干预：`scope=next_round`
+- 需要持续影响后续多轮的研究方向：`scope=persistent`
+
+### 第七步：开始长时间实验
 
 如果小预算验证没有问题，就可以开始长时间实验。
 
@@ -359,7 +557,8 @@ python research/agent_loop.py \
   --rounds 12 \
   --budget-hours 4 \
   --proxy-max-tokens 5000000 \
-  --full-max-tokens 50000000
+  --full-max-tokens 50000000 \
+  --session-mode resume-session
 ```
 
 如果你已经确认系统很稳定，再放大到更长预算：
@@ -369,7 +568,62 @@ python research/agent_loop.py \
   --rounds 20 \
   --budget-hours 8 \
   --proxy-max-tokens 20000000 \
-  --full-max-tokens 200000000
+  --full-max-tokens 200000000 \
+  --session-mode resume-session
+```
+
+### `session-mode`
+
+当前支持两种 session 模式：
+
+- `resume-session`
+  - 默认值
+  - 一次夜跑内维护一个长期 session
+  - 后续 round 用 `codex exec resume` 继续
+- `fresh-each-round`
+  - 每轮重新新建一个 `codex exec`
+  - 主要用于调试或回退
+
+和 session 相关的高级参数还有：
+
+- `--max-session-rounds`
+  - 一个 nightly session 最多跑多少轮，超过就重建
+- `--max-session-hours`
+  - 一个 nightly session 最多活多久，超过就重建
+
+### 自动 git commit
+
+当前默认行为是：
+
+- 每一轮实验都会生成一个 git commit
+- commit 默认写到一个独立 nightly 分支
+  - 例如 `research/nightly-20260320`
+- 不直接污染你当前的日常开发分支
+
+默认会提交进 git 的是精简历史：
+
+- `results.tsv`
+- `memory.json`
+- `state.json`
+- `frontier.json`
+- `timeline.jsonl`
+- `session_brief.json`
+- `round_summaries/*.json`
+- `operator_hints.json`
+- 本轮 agent 改过的 `sparsify/` 源码
+
+不会提交的运行产物包括：
+
+- `research/history/logs/*`
+- `research/history/current_status.json`
+- `research/history/.snapshots/*`
+- checkpoints
+- wandb
+
+如果你临时不想让系统自动提交，可以加：
+
+```bash
+python research/agent_loop.py ... --no-commit-experiments
 ```
 
 ## 8. 具体用途和使用方法
@@ -472,6 +726,7 @@ python research/agent_loop.py \
 - 只允许修改 `sparsify/`
 - 不允许修改执行层和历史文件
 - 默认必须先走 proxy
+- proxy 与 full 分开维护各自的 frontier，不再混合比较
 - 训练环境目前假设为 2x CUDA
 - 当前的 baseline runtime 是按已有正常实验逐步建立的
 
