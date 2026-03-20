@@ -12,9 +12,9 @@ from .sparse_coder import SparseCoder
 class FactorizedTopKSparseCoder(SparseCoder):
     """TopK SAE with a low-rank nonlinear encoder.
 
-    A narrow hidden layer lets the encoder compose input dimensions before the
-    final latent projection, increasing routing expressivity without changing
-    the fixed-K decode path or requiring extra launcher parameters.
+    A widened gated hidden layer lets the encoder compose input dimensions
+    before the final latent projection, increasing routing expressivity without
+    changing the fixed-K decode path or requiring extra launcher parameters.
     """
 
     def __init__(
@@ -27,16 +27,16 @@ class FactorizedTopKSparseCoder(SparseCoder):
         decoder: bool = True,
     ):
         super().__init__(d_in, cfg, device, dtype, decoder=decoder)
-        hidden_dim = d_in
-        self.encoder_hidden = nn.Linear(
-            d_in, hidden_dim, device=device, dtype=dtype
-        )
+        hidden_dim = min(self.num_latents, d_in * 4)
+        self.encoder_hidden = nn.Linear(d_in, hidden_dim, device=device, dtype=dtype)
         self.encoder_hidden.bias.data.zero_()
+        self.encoder_gate = nn.Linear(d_in, hidden_dim, device=device, dtype=dtype)
+        self.encoder_gate.bias.data.zero_()
 
     def encode(self, x: Tensor) -> EncoderOutput:
-        """Encode with a nonlinear hidden mixing stage before latent scoring."""
+        """Encode with a widened gated hidden mixing stage before latent scoring."""
         x = x - self.b_dec
-        hidden = F.relu(self.encoder_hidden(x))
+        hidden = F.silu(self.encoder_hidden(x)) * torch.sigmoid(self.encoder_gate(x))
         pre_acts = F.relu(F.linear(hidden, self.encoder.weight, self.encoder.bias))
         top_acts, top_indices = pre_acts.topk(self.cfg.k, dim=-1, sorted=False)
         return EncoderOutput(top_acts, top_indices, pre_acts)
