@@ -39,14 +39,16 @@ class RefinedTopKSparseCoder(SparseCoder):
 
         # Solve a small ridge system on the selected decoder atoms to reduce
         # coefficient error while preserving the linear top-k support.
-        selected_decoder = self.W_dec[top_indices].to(x.dtype)
+        solve_dtype = torch.float32
+        selected_decoder = self.W_dec[top_indices].to(solve_dtype)
+        x_solve = x.to(solve_dtype)
         gram = torch.matmul(selected_decoder, selected_decoder.transpose(-1, -2))
-        eye = torch.eye(self.cfg.k, device=x.device, dtype=x.dtype).expand_as(gram)
-        rhs = torch.matmul(selected_decoder, x.unsqueeze(-1))
+        eye = torch.eye(self.cfg.k, device=x.device, dtype=solve_dtype).expand_as(gram)
+        rhs = torch.matmul(selected_decoder, x_solve.unsqueeze(-1))
         refined_acts = torch.linalg.solve(
             gram + self.ridge_lambda * eye,
             rhs,
-        ).squeeze(-1)
+        ).squeeze(-1).to(top_acts.dtype)
         refined_acts = refined_acts + (top_acts - top_acts.detach())
 
         return EncoderOutput(refined_acts, top_indices, pre_acts)
