@@ -373,7 +373,7 @@ class GatedSparseCoder(SparseCoder):
 
 
 class RoutedSparseCoder(SparseCoder):
-    """Gated SAE with routing scores separated from decoded magnitudes."""
+    """Gated SAE with a separate router used only for support selection."""
 
     def __init__(
         self,
@@ -389,10 +389,10 @@ class RoutedSparseCoder(SparseCoder):
             d_in, self.num_latents, device=device, dtype=dtype
         )
 
-        # Warm-start routing from the magnitude encoder so the support branch is
-        # informative from step 0 instead of learning from an all-zero projection.
-        self.gate_encoder.weight.data.copy_(0.1 * self.encoder.weight.data)
-        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+        # Initialize the router independently so routed support is observably
+        # different from plain top-k at step 0.
+        nn.init.kaiming_uniform_(self.gate_encoder.weight, a=5**0.5)
+        self.gate_encoder.bias.data.zero_()
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -401,11 +401,11 @@ class RoutedSparseCoder(SparseCoder):
         gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
         gate = torch.sigmoid(gate_logits)
 
-        # Use a support-aware score for selection, but decode with the gated
-        # magnitudes so routing and reconstruction are no longer forced to share
-        # the same shrinkage path.
+        # Use the router to perturb support selection directly while decoding
+        # with gated magnitudes, so routing is not a monotone rescaling of the
+        # base activations.
         acts = positive * gate
-        scores = positive * (1.0 + gate)
+        scores = acts + 0.1 * torch.tanh(gate_logits)
         _, top_indices = torch.topk(scores, self.cfg.k, dim=-1, sorted=False)
         top_acts = acts.gather(-1, top_indices)
         return EncoderOutput(top_acts, top_indices, acts)

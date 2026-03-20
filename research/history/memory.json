@@ -4,7 +4,8 @@
     "round 1: A JumpReLU encoder with learnable per-latent thresholds can improve the K=128 quality anchor versus plain TopK by suppressing weak activations before top-k selection, improving feature selectivity and lowering FVU without changing the execution layer. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 2: The new JumpReLU family deserves its first proxy measurement at the K=128 quality anchor; learnable thresholds with smooth gating may suppress weak activations and beat plain TopK FVU before any cost-oriented moves. -> keep (fvu=0.1887873373925686, observed_fvu=0.184100, k=128, health=normal, termination=completed)",
     "round 7: A gated SAE that decouples latent support selection from reconstruction magnitude can beat the current JumpReLU anchor at K=128 by learning a separate sigmoid routing branch while staying initialization-close to plain ReLU top-k. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
-    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
+    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
+    "round 30: The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "performance_findings": [
     "round 3: suspected performance regression for jumprelu (tps=16601.650675, baseline_ratio=0.200000, termination=throughput_too_low)"
@@ -49,6 +50,13 @@
       "pattern": "Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128.",
       "count": 1,
       "last_round": 26,
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline"
+    },
+    {
+      "pattern": "The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search.",
+      "count": 1,
+      "last_round": 30,
       "run_health": "crash",
       "termination_reason": "identical_to_baseline"
     }
@@ -349,10 +357,18 @@
     "routed": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128.",
+      "design_hypothesis": "The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search.",
       "tested_configs": [
         {
           "round": 26,
+          "stage": "prototype",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
+        },
+        {
+          "round": 30,
           "stage": "prototype",
           "k": null,
           "decision": "crash",
@@ -362,34 +378,16 @@
       ],
       "known_issues": [],
       "next_steps": [
-        "If routed proxy FVU beats gated proxy materially, promote it and treat routed-specific stabilization as the new main quality path.",
-        "If routed quality is competitive but throughput regresses, keep the family alive and follow with a performance-focused implementation pass rather than discarding it on speed alone.",
-        "If routed is clearly worse, conclude that gated-family architectural refinement needs a different mechanism and try a different new family instead of more LR-only sweeps."
+        "If routed now runs cleanly and beats gated proxy materially, promote it and begin routed-specific stabilization as the main architecture path.",
+        "If routed runs but remains clearly worse, retire this version of the family and redirect architecture exploration elsewhere.",
+        "If routed quality is competitive but runtime is poor, keep the family alive and follow with a performance-focused code pass rather than discarding it on throughput alone."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 26
+      "last_round": 30
     }
   },
   "recent_rounds": [
-    {
-      "round": 18,
-      "hypothesis": "The current JumpReLU search direction appears locally exhausted, and a gated SAE that separates support selection from reconstruction magnitude may unlock a lower-FVU regime at K=128 by learning support with an explicit sigmoid routing branch while keeping the strong baseline optimization settings.",
-      "change_type": "param_only",
-      "expected_win": "quality",
-      "family_name": "gated",
-      "family_stage": "prototype",
-      "decision": "crash",
-      "val_fvu": null,
-      "observed_fvu": null,
-      "k": null,
-      "architecture": "gated",
-      "touched_files": [],
-      "run_health": "crash",
-      "termination_reason": "invalid_env_overrides",
-      "tokens_per_sec": null,
-      "baseline_ratio": null
-    },
     {
       "round": 19,
       "hypothesis": "JumpReLU tuning appears fundamentally stalled, so the next credible move is to test the gated SAE family at K=128, where a separate sigmoid routing branch may learn cleaner support patterns than JumpReLU and reduce FVU under the same strong optimization settings.",
@@ -590,14 +588,29 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83007.991227",
       "baseline_ratio": "1.000001"
+    },
+    {
+      "round": 30,
+      "hypothesis": "The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search.",
+      "change_type": "edit_sae_code",
+      "expected_win": "quality",
+      "family_name": "routed",
+      "family_stage": "prototype",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "routed",
+      "touched_files": [
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "This round uses the plain top-k SAE as a clean architecture reset under the same best-known training regime to measure whether JumpReLU-specific gating is part of the quality bottleneck.",
-    "round 21: JumpReLU local search appears exhausted, and reverting to the fundamentally different plain top-k SAE may provide a cleaner reconstruction-support tradeoff at K=128 under the same strong optimization settings, serving as a robust architecture reset after the failed gated launch attempts. -> incubate (fvu=0.27554506808519363, observed_fvu=0.274516, k=128, health=normal, termination=completed)",
-    "Round 22: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
-    "Top-k produced a clean proxy run but remained far above the current full K=128 JumpReLU frontier, so a stronger architecture change is still needed.",
-    "Recent gated crashes were caused by invalid env overrides rather than confirmed model failure, so the family deserves one clean retry with only generic override keys.",
     "This round tests whether gated routing can provide a more meaningful architecture departure than plain top-k while keeping the optimization regime fixed.",
     "round 22: Top-k was only modestly competitive and still far from the K=128 quality target, so the next fundamentally different probe is the gated SAE family using only launcher-safe overrides; separating support selection from magnitude may recover cleaner latent routing than both JumpReLU and plain top-k. -> incubate (fvu=0.2744196895509958, observed_fvu=0.273639, k=128, health=normal, termination=completed)",
     "Round 23: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
@@ -632,11 +645,16 @@
     "Five consecutive non-improving rounds indicate the gated-local search is exhausted for now and require a shift to a fundamentally different architecture path.",
     "This round reopens the incubating top-k family under the current strongest gated training regime so the architecture comparison is clean and current.",
     "Using the best validated optimizer and capacity settings isolates whether the selection mechanism itself is limiting quality rather than stale hyperparameters from the earlier top-k probe.",
-    "round 29: Five non-improving rounds on gated-specific tweaks suggest the current search direction is locally exhausted, so the next meaningful move is to revisit a fundamentally different sparse selection mechanism. A clean top-k mainline comparison at K=128 using the current strongest training regime may show whether gated-specific routing is the bottleneck rather than the optimizer or regularization settings. -> incubate (fvu=0.26476579532027245, observed_fvu=0.263896, k=128, health=normal, termination=completed)"
+    "round 29: Five non-improving rounds on gated-specific tweaks suggest the current search direction is locally exhausted, so the next meaningful move is to revisit a fundamentally different sparse selection mechanism. A clean top-k mainline comparison at K=128 using the current strongest training regime may show whether gated-specific routing is the bottleneck rather than the optimizer or regularization settings. -> incubate (fvu=0.26476579532027245, observed_fvu=0.263896, k=128, health=normal, termination=completed)",
+    "Round 30: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "Adjusted routed initialization so the router is independently initialized instead of near-copying the magnitude encoder, avoiding baseline-equivalent startup behavior.",
+    "Changed routed support scoring to include a direct router bonus, making selection meaningfully different from plain top-k while still decoding with gated magnitudes.",
+    "Local sanity checks now show routed top-k indices and top activations differ from baseline at initialization, and forward/backward both succeed.",
+    "round 30: The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "next_hypotheses": [
-    "If top-k proxy FVU improves materially over its earlier result and is competitive with gated, promote it to full and begin top-k stabilization from this stronger anchor.",
-    "If top-k remains clearly worse even under the stronger regime, conclude that a different architectural direction is needed and retire top-k from near-term focus.",
-    "If top-k is competitive on quality but notably better on runtime or stability, keep it alive as an alternate mainline family for subsequent cost-quality tradeoff work."
+    "If routed now runs cleanly and beats gated proxy materially, promote it and begin routed-specific stabilization as the main architecture path.",
+    "If routed runs but remains clearly worse, retire this version of the family and redirect architecture exploration elsewhere.",
+    "If routed quality is competitive but runtime is poor, keep the family alive and follow with a performance-focused code pass rather than discarding it on throughput alone."
   ]
 }
