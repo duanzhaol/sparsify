@@ -135,7 +135,7 @@ def ensure_setup() -> None:
     TIMELINE_PATH.touch(exist_ok=True)
     cleanup_all_snapshots()
     from research.git_ops import run
-    run(["python", str(CONTROLLER_PATH), "init"], cwd=RESEARCH_DIR)
+    run(["python", "-m", "research.controller", "init"], cwd=REPO_ROOT)
 
 
 def read_text_safe(path: Path) -> str:
