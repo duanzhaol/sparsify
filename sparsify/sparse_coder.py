@@ -5,6 +5,7 @@ from typing import NamedTuple
 
 import einops
 import torch
+import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from natsort import natsorted
 from safetensors import safe_open
@@ -290,8 +291,48 @@ def _get_sae_class(architecture: str) -> type:
     """Return the SparseCoder subclass for the given architecture string."""
     if architecture == "topk":
         return SparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
 # Allow for alternate naming conventions
 Sae = SparseCoder
+
+
+class JumpReLUSparseCoder(SparseCoder):
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+
+        threshold = torch.full(
+            (self.num_latents,),
+            cfg.jumprelu_init_threshold,
+            device=self.device,
+            dtype=self.dtype,
+        ).clamp_min(torch.finfo(self.dtype).tiny)
+        init = torch.full(
+            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+        )
+        init.copy_(torch.log(torch.expm1(threshold)))
+        self.log_threshold = nn.Parameter(init)
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid((positive - self.threshold) / self.cfg.jumprelu_bandwidth)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)

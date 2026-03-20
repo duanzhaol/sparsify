@@ -22,7 +22,13 @@ class SparseCoderConfig(Serializable):
 
     # Architecture selection
     architecture: str = "topk"
-    """Encoding architecture. Only the standard TopK sparse coder is supported."""
+    """Encoding architecture."""
+
+    jumprelu_init_threshold: float = 0.0
+    """Initial per-latent JumpReLU threshold before softplus."""
+
+    jumprelu_bandwidth: float = 0.1
+    """Bandwidth for the smooth JumpReLU gate surrogate."""
 
 
 # Support different naming conventions for the same configuration
@@ -175,11 +181,22 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = ("topk",)
+        valid_archs = ("topk", "jumprelu")
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "
                 f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.jumprelu_bandwidth <= 0:
+            raise ValueError(
+                "jumprelu_bandwidth must be positive, "
+                f"got {self.sae.jumprelu_bandwidth}"
+            )
+        if self.sae.jumprelu_init_threshold < 0:
+            raise ValueError(
+                "jumprelu_init_threshold must be non-negative, "
+                f"got {self.sae.jumprelu_init_threshold}"
             )
 
         # Optimizer validation
