@@ -229,7 +229,7 @@
     "gated": {
       "status": "promoted",
       "goal": "new_family",
-      "design_hypothesis": "The gated K=128 EF=16 model appears sensitive to optimization, and the worse full result at LR=3.2e-3 suggests overshooting; reducing the signum learning rate to 8e-4 may improve full-run reconstruction by trading some proxy speed for a stabler optimization trajectory.",
+      "design_hypothesis": "The gated K=128 EF=16 model has now regressed at both 3.2e-3 and 8e-4, so the remaining clean learning-rate check is whether a more conservative signum step size of 4e-4 recovers a smoother optimization path and improves proxy FVU relative to the failed lower-LR probe.",
       "tested_configs": [
         {
           "round": 7,
@@ -286,17 +286,25 @@
           "decision": "discard",
           "val_fvu": "0.28860342130064964",
           "run_health": "normal"
+        },
+        {
+          "round": 27,
+          "stage": "stabilize",
+          "k": "128",
+          "decision": "discard",
+          "val_fvu": "0.336552269756794",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If LR=8e-4 improves proxy FVU, promote to full and compare directly against the current gated K=128 frontier.",
-        "If LR=8e-4 is also worse, test LR=4e-4 as the last conservative LR bracket on gated EF=16.",
-        "If lower-LR sweeps plateau, shift to gated-specific regularization or architecture refinements instead of further generic optimizer tuning."
+        "If LR=4e-4 improves proxy FVU materially, promote to full and compare against the current gated K=128 frontier.",
+        "If LR=4e-4 is also worse, begin a gated AUXK sweep with AUXK_ALPHA=0.0625 as the next stabilization probe.",
+        "If conservative LR sweeps all fail, treat optimization as bracketed and focus subsequent rounds on auxiliary regularization or expansion changes within gated rather than more LR-only tuning."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": 0.1598423682153225,
-      "last_round": 25
+      "last_round": 27
     },
     "topk": {
       "status": "incubating",
@@ -348,24 +356,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 15,
-      "hypothesis": "JumpReLU at K=128 may still benefit from a reduced but nonzero auxiliary dead-feature objective, and lowering AUXK_ALPHA from 0.03125 to 0.01 could preserve feature health while reducing the reconstruction penalty seen at the baseline auxk weight.",
-      "change_type": "param_only",
-      "expected_win": "quality",
-      "family_name": "jumprelu",
-      "family_stage": "stabilize",
-      "decision": "discard",
-      "val_fvu": "0.2798203472048044",
-      "observed_fvu": "0.278738",
-      "k": "128",
-      "architecture": "jumprelu",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "83007.928890",
-      "baseline_ratio": "0.999998"
-    },
     {
       "round": 16,
       "hypothesis": "JumpReLU at K=128 appears limited more by encoder capacity than by auxk tuning, so increasing expansion_factor from 8 to 16 while holding the improved LR=1.6e-3 and AUXK_ALPHA=0.03125 fixed may reduce proxy FVU below the current JumpReLU proxy anchor.",
@@ -566,14 +556,27 @@
       "termination_reason": "identical_to_baseline",
       "tokens_per_sec": null,
       "baseline_ratio": null
+    },
+    {
+      "round": 27,
+      "hypothesis": "The gated K=128 EF=16 model has now regressed at both 3.2e-3 and 8e-4, so the remaining clean learning-rate check is whether a more conservative signum step size of 4e-4 recovers a smoother optimization path and improves proxy FVU relative to the failed lower-LR probe.",
+      "change_type": "param_only",
+      "expected_win": "quality",
+      "family_name": "gated",
+      "family_stage": "stabilize",
+      "decision": "discard",
+      "val_fvu": "0.336552269756794",
+      "observed_fvu": "0.334738",
+      "k": "128",
+      "architecture": "gated",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "83007.913718",
+      "baseline_ratio": "0.999993"
     }
   ],
   "recent_insights": [
-    "This round switches to the incubating gated family as a fundamentally different encoder-routing approach while preserving the strongest known optimization settings for a fair comparison.",
-    "A clean gated proxy result is needed before deciding whether to stabilize the family or abandon it in favor of another architecture direction.",
-    "round 18: The current JumpReLU search direction appears locally exhausted, and a gated SAE that separates support selection from reconstruction magnitude may unlock a lower-FVU regime at K=128 by learning support with an explicit sigmoid routing branch while keeping the strong baseline optimization settings. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=invalid_env_overrides)",
-    "Six consecutive non-improving rounds indicate the local JumpReLU search direction is exhausted for now.",
-    "This round promotes the incubating gated family back into active testing as the required fundamentally different architecture probe.",
     "Keeping the best-known training regime fixed isolates whether routing design, rather than another optimizer tweak, is the missing ingredient for lower FVU.",
     "round 19: JumpReLU tuning appears fundamentally stalled, so the next credible move is to test the gated SAE family at K=128, where a separate sigmoid routing branch may learn cleaner support patterns than JumpReLU and reduce FVU under the same strong optimization settings. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=invalid_env_overrides)",
     "Round 20: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
@@ -608,11 +611,16 @@
     "Added a new `routed` SAE family that uses support-aware top-k scores but decodes with gated magnitudes, so routing and coefficient shrinkage are no longer the same operation.",
     "The routed family warm-starts its gate projection from the magnitude encoder instead of an all-zero gate branch, aiming to reduce optimization drag seen in later gated stabilization sweeps.",
     "A local forward/backward sanity check passed for the new architecture before launching training.",
-    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
+    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
+    "Round 27: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
+    "The gated EF=16 mainline has now failed at both higher and moderately lower LRs, so this round closes the remaining conservative LR bracket before moving to other single-parameter sweeps.",
+    "This round keeps the strongest validated gated architecture fixed at K=128 and tests only LR=4e-4 in proxy.",
+    "If LR=4e-4 also regresses, the next exploitation axis should shift from LR to gated-specific regularization such as AUXK_ALPHA rather than continuing to shrink step size blindly.",
+    "round 27: The gated K=128 EF=16 model has now regressed at both 3.2e-3 and 8e-4, so the remaining clean learning-rate check is whether a more conservative signum step size of 4e-4 recovers a smoother optimization path and improves proxy FVU relative to the failed lower-LR probe. -> discard (fvu=0.336552269756794, observed_fvu=0.334738, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If routed proxy FVU beats gated proxy materially, promote it and treat routed-specific stabilization as the new main quality path.",
-    "If routed quality is competitive but throughput regresses, keep the family alive and follow with a performance-focused implementation pass rather than discarding it on speed alone.",
-    "If routed is clearly worse, conclude that gated-family architectural refinement needs a different mechanism and try a different new family instead of more LR-only sweeps."
+    "If LR=4e-4 improves proxy FVU materially, promote to full and compare against the current gated K=128 frontier.",
+    "If LR=4e-4 is also worse, begin a gated AUXK sweep with AUXK_ALPHA=0.0625 as the next stabilization probe.",
+    "If conservative LR sweeps all fail, treat optimization as bracketed and focus subsequent rounds on auxiliary regularization or expansion changes within gated rather than more LR-only tuning."
   ]
 }
