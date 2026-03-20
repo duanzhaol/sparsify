@@ -13,6 +13,7 @@ import difflib
 import hashlib
 import json
 import os
+import signal
 import re
 import subprocess
 import time
@@ -53,6 +54,10 @@ DEFAULT_MIN_PROGRESS_STEPS = 4
 DEFAULT_MAX_SESSION_ROUNDS = 20
 DEFAULT_MAX_SESSION_HOURS = 8.0
 DEFAULT_RESEARCH_BRANCH_PREFIX = "research/nightly-"
+DEFAULT_AGENT_MAX_RETRIES = 3
+DEFAULT_AGENT_RETRY_BASE_SEC = 10
+DEFAULT_MAX_SESSION_FAILURES = 3
+DEFAULT_PROCESS_TERM_TIMEOUT_SEC = 15
 
 BASE_ENV_DEFAULTS = {
     "ARCHITECTURE": "topk",
@@ -71,6 +76,19 @@ BASE_ENV_DEFAULTS = {
 }
 
 ALLOWED_EDIT_PREFIXES = ("sparsify/",)
+
+# Whitelist of env keys the agent is allowed to set via env_overrides.
+# Anything not in this set is rejected to prevent accidental system damage.
+ALLOWED_ENV_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
+    "NUM_GROUPS",
+    "ACTIVE_GROUPS",
+    "JUMPRELU_INIT_THRESHOLD",
+    "JUMPRELU_BANDWIDTH",
+    "ORTHO_LAMBDA",
+    "RESIDUAL_FROM",
+    "MATRYOSHKA_KS",
+    "MATRYOSHKA_WEIGHTS",
+}
 SNAPSHOT_ROOTS = ("sparsify", "research", "scripts")
 SNAPSHOT_EXCLUDES = (
     "research/history/",
@@ -590,6 +608,7 @@ def run_agent_round(
     agent_proxy: str | None,
     session_id: str | None,
 ) -> tuple[dict[str, Any], Path, str | None, bool]:
+    """Run a single agent invocation. No retries — caller handles that."""
     action_path = LOG_DIR / f"agent_action_{round_id:04d}.json"
     stdout_path = LOG_DIR / f"agent_round_{round_id:04d}.stdout.log"
     resumed = session_id is not None
@@ -639,6 +658,95 @@ def run_agent_round(
     return action, stdout_path, active_session_id, resumed
 
 
+def run_agent_round_with_retry(
+    state: dict[str, Any],
+    memory: dict[str, Any],
+    recent_results: list[dict[str, str]],
+    brief: dict[str, Any],
+    round_id: int,
+    args: argparse.Namespace,
+    round_ctx: dict[str, Any],
+    session_id: str | None,
+    need_new_session: bool,
+) -> tuple[dict[str, Any], Path, str | None, bool]:
+    """Try agent invocation with retries and session degradation.
+
+    Strategy:
+    1. If resuming, try resume first.
+    2. On failure, retry with exponential backoff up to max_retries.
+    3. If resume fails, rebuild session (fresh prompt, no session_id).
+    4. If fresh also fails repeatedly, raise to caller.
+    """
+    max_retries = args.agent_max_retries
+    retry_base = args.agent_retry_base_sec
+    attempt = 0
+    last_error: Exception | None = None
+    current_session_id = session_id if not need_new_session else None
+
+    while attempt <= max_retries:
+        if need_new_session or current_session_id is None:
+            prompt = build_session_bootstrap_prompt(state, memory, recent_results)
+            try_session_id = None
+        else:
+            prompt = build_resume_prompt(state, memory, recent_results, round_id, brief)
+            try_session_id = current_session_id
+
+        try:
+            result = run_agent_round(
+                prompt, round_id, args.model, args.agent_proxy, try_session_id,
+            )
+            if attempt > 0:
+                log_round_event(
+                    round_ctx,
+                    "agent_retry_succeeded",
+                    attempt=attempt,
+                    was_resume=try_session_id is not None,
+                )
+            return result
+        except Exception as exc:
+            last_error = exc
+            attempt += 1
+            log_round_event(
+                round_ctx,
+                "agent_retry",
+                attempt=attempt,
+                max_retries=max_retries,
+                was_resume=try_session_id is not None,
+                error=str(exc),
+            )
+            print(
+                f"Round {round_id}: agent invocation failed (attempt {attempt}/{max_retries + 1}): {exc}"
+            )
+            if try_session_id is not None:
+                # Resume failed — rebuild session on next attempt
+                print(f"Round {round_id}: session resume failed, will rebuild session")
+                append_timeline_event(
+                    "session_broken",
+                    round=round_id,
+                    tier=None,
+                    run_name=None,
+                    family_name=None,
+                    family_stage=None,
+                    status="broken",
+                    decision=None,
+                    payload={
+                        "session_id": try_session_id,
+                        "error": str(exc),
+                    },
+                )
+                current_session_id = None
+                need_new_session = True
+
+            if attempt <= max_retries:
+                delay = retry_base * (2 ** (attempt - 1))
+                print(f"Round {round_id}: retrying in {delay}s...")
+                time.sleep(delay)
+
+    raise RuntimeError(
+        f"Agent invocation failed after {max_retries + 1} attempts: {last_error}"
+    )
+
+
 def build_session_brief(
     state: dict[str, Any],
     memory: dict[str, Any],
@@ -666,10 +774,31 @@ def build_session_brief(
     }
 
 
+def validate_env_overrides(overrides: list | dict) -> list[str]:
+    """Validate env_overrides against the whitelist. Return list of rejected keys."""
+    rejected: list[str] = []
+    if isinstance(overrides, dict):
+        for key in overrides:
+            if key not in ALLOWED_ENV_OVERRIDE_KEYS:
+                rejected.append(key)
+    else:
+        for item in overrides:
+            key = item.get("key")
+            if key and key not in ALLOWED_ENV_OVERRIDE_KEYS:
+                rejected.append(key)
+    return rejected
+
+
 def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, args: argparse.Namespace) -> tuple[dict[str, str], dict[str, Any]]:
     env = os.environ.copy()
     config = dict(BASE_ENV_DEFAULTS)
     overrides = action.get("env_overrides", [])
+    rejected = validate_env_overrides(overrides)
+    if rejected:
+        raise RuntimeError(
+            f"Agent env_overrides contain disallowed keys: {', '.join(rejected)}. "
+            f"Allowed keys: {sorted(ALLOWED_ENV_OVERRIDE_KEYS)}"
+        )
     if isinstance(overrides, dict):
         config.update({k: str(v) for k, v in overrides.items()})
     else:
@@ -787,6 +916,111 @@ def run_sanity(config: dict[str, Any]) -> None:
         ),
     ]
     subprocess.run(cmd, cwd=REPO_ROOT, check=True, capture_output=True, text=True)
+
+
+def rollback_code_changes(pre_edit_commit: str, round_id: int, reason: str) -> None:
+    """Restore sparsify/ code to its state at pre_edit_commit.
+
+    Uses ``git checkout <commit> -- sparsify/`` so only the code area is
+    reverted while history files stay untouched.
+    """
+    print(f"Round {round_id}: rolling back code to {pre_edit_commit[:12]} ({reason})")
+    git(["checkout", pre_edit_commit, "--", "sparsify/"])
+    append_timeline_event(
+        "code_rollback",
+        round=round_id,
+        tier=None,
+        run_name=None,
+        family_name=None,
+        family_stage=None,
+        status="rolled_back",
+        decision=None,
+        payload={
+            "pre_edit_commit": pre_edit_commit,
+            "reason": reason,
+        },
+    )
+
+
+def terminate_process_group(process: subprocess.Popen, timeout: int = DEFAULT_PROCESS_TERM_TIMEOUT_SEC) -> None:
+    """Gracefully terminate a process and its entire process group.
+
+    1. Send SIGTERM to the process group.
+    2. Wait up to *timeout* seconds.
+    3. If still alive, send SIGKILL to the process group.
+    """
+    pgid = None
+    try:
+        pgid = os.getpgid(process.pid)
+    except OSError:
+        pass
+
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            pass
+    else:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        else:
+            try:
+                process.kill()
+            except OSError:
+                pass
+        process.wait(timeout=5)
+
+
+def budget_remaining_sec(start_time: float, budget_hours: float) -> float:
+    """Return remaining budget in seconds."""
+    return budget_hours * 3600 - (time.time() - start_time)
+
+
+def check_agent_backend_reachable(agent_proxy: str | None) -> None:
+    """Quick connectivity check before entering the main loop.
+
+    If a local proxy is configured, verify it accepts connections.
+    Also verify the ``codex`` CLI is available on PATH.
+    """
+    import shutil
+
+    if not shutil.which("codex"):
+        raise RuntimeError(
+            "codex CLI not found on PATH. Install it or adjust PATH before running."
+        )
+
+    if agent_proxy:
+        import urllib.request
+        import urllib.error
+
+        # Just open a TCP connection to the proxy; don't actually send traffic.
+        try:
+            req = urllib.request.Request(agent_proxy)
+            req.method = "HEAD"
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": agent_proxy, "https": agent_proxy})
+            )
+            opener.open(req, timeout=5)
+        except urllib.error.URLError:
+            # Proxy may refuse HEAD but still be listening — that's OK.
+            # We only fail on ConnectionRefusedError / unreachable.
+            pass
+        except (ConnectionRefusedError, OSError) as exc:
+            raise RuntimeError(
+                f"Agent proxy {agent_proxy} is not reachable: {exc}. "
+                f"Start the proxy or pass --agent-proxy '' to disable."
+            ) from exc
 
 
 def record_result(
@@ -1042,6 +1276,36 @@ def mark_hints_applied(round_id: int) -> None:
         save_operator_hints(hints)
 
 
+def _run_sanity_for_round(
+    action: dict[str, Any],
+    tier: str,
+    round_id: int,
+    round_ctx: dict[str, Any],
+) -> None:
+    """Run sanity check and log events. Raises on failure."""
+    # Build a minimal config_json for sanity from action env_overrides
+    config = dict(BASE_ENV_DEFAULTS)
+    overrides = action.get("env_overrides", [])
+    if isinstance(overrides, dict):
+        config.update({k: str(v) for k, v in overrides.items()})
+    else:
+        for item in overrides:
+            key = item.get("key")
+            value = item.get("value")
+            if key:
+                config[key] = str(value)
+    sanity_config = {
+        "architecture": config.get("ARCHITECTURE", "topk").lower(),
+        "k": int(config.get("K", "128")),
+        "expansion_factor": int(config.get("EXPANSION_FACTOR", "8")),
+    }
+    print(f"Round {round_id}: running sanity check before {tier}")
+    log_round_event(round_ctx, "sanity_started", tier=tier)
+    run_sanity(sanity_config)
+    print(f"Round {round_id}: sanity check passed")
+    log_round_event(round_ctx, "sanity_finished", tier=tier, status="ok")
+
+
 def run_training_round(
     action: dict[str, Any],
     tier: str,
@@ -1091,28 +1355,6 @@ def run_training_round(
         baseline_tokens_per_sec=baseline_tps,
     )
 
-    if action.get("needs_sanity"):
-        print(f"Round {round_id}: running sanity check before {tier}")
-        log_round_event(
-            round_ctx,
-            "sanity_started",
-            tier=tier,
-            run_name=run_name,
-            family_name=config_json.get("family_name"),
-            family_stage=config_json.get("family_stage"),
-        )
-        run_sanity(config_json)
-        print(f"Round {round_id}: sanity check passed")
-        log_round_event(
-            round_ctx,
-            "sanity_finished",
-            tier=tier,
-            run_name=run_name,
-            family_name=config_json.get("family_name"),
-            family_stage=config_json.get("family_stage"),
-            status="ok",
-        )
-
     timeout_sec = args.full_timeout_sec if tier == "full" else args.proxy_timeout_sec
     start = time.time()
     termination_reason = "completed"
@@ -1129,6 +1371,7 @@ def run_training_round(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         last_progress = start
         while process.poll() is None:
@@ -1195,7 +1438,7 @@ def run_training_round(
                             f"{latest_tps:.2f} tokens/s vs baseline {baseline_tps:.2f} "
                             f"({latest_tps / baseline_tps:.2%})"
                         )
-                        process.kill()
+                        terminate_process_group(process)
                         break
                 else:
                     slow_trigger_count = 0
@@ -1205,7 +1448,7 @@ def run_training_round(
                     f"Round {round_id}: early stopping before first step "
                     f"after {args.first_step_timeout_sec}s"
                 )
-                process.kill()
+                terminate_process_group(process)
                 break
             elif not first_step_seen:
                 log_round_event(
@@ -1225,7 +1468,7 @@ def run_training_round(
             if time.time() - start > timeout_sec:
                 termination_reason = "hard_timeout"
                 print(f"Round {round_id}: hard timeout after {timeout_sec}s")
-                process.kill()
+                terminate_process_group(process)
                 break
             if time.time() - last_progress > args.stall_timeout_sec:
                 termination_reason = "stall_timeout"
@@ -1233,7 +1476,7 @@ def run_training_round(
                     f"Round {round_id}: stall timeout after "
                     f"{args.stall_timeout_sec}s without metrics update"
                 )
-                process.kill()
+                terminate_process_group(process)
                 break
     process.wait()
     checkpoint_dir = latest_checkpoint_dir(save_dir, run_name)
@@ -1350,6 +1593,9 @@ def main() -> int:
     parser.add_argument("--no-commit-experiments", action="store_true")
     parser.add_argument("--allow-direct-full", action="store_true")
     parser.add_argument("--reset-failure-counters", action="store_true")
+    parser.add_argument("--agent-max-retries", type=int, default=DEFAULT_AGENT_MAX_RETRIES)
+    parser.add_argument("--agent-retry-base-sec", type=int, default=DEFAULT_AGENT_RETRY_BASE_SEC)
+    parser.add_argument("--max-session-failures", type=int, default=DEFAULT_MAX_SESSION_FAILURES)
     args = parser.parse_args()
 
     ensure_setup()
@@ -1389,6 +1635,25 @@ def main() -> int:
         save_state(state)
         print("Reset agent failure counters")
 
+    # --- Preflight: verify agent backend is reachable ---
+    try:
+        check_agent_backend_reachable(args.agent_proxy)
+        print("Agent backend preflight: OK")
+    except RuntimeError as exc:
+        print(f"Agent backend preflight FAILED: {exc}")
+        append_timeline_event(
+            "backend_unavailable",
+            round=None,
+            tier=None,
+            run_name=None,
+            family_name=None,
+            family_stage=None,
+            status="failed",
+            decision=None,
+            payload={"error": str(exc)},
+        )
+        return 1
+
     if auto_commit_enabled:
         ensure_clean_worktree_for_auto_commit()
         state = load_state()
@@ -1407,6 +1672,8 @@ def main() -> int:
             payload={"branch": research_branch, "base_branch": state.get("base_branch"), "base_commit": state.get("base_commit")},
         )
         print(f"research_branch: {research_branch}")
+
+    session_failure_count = 0
 
     for _ in range(args.rounds):
         if (time.time() - start_time) / 3600 > args.budget_hours:
@@ -1446,7 +1713,28 @@ def main() -> int:
         log_round_event(round_ctx, "agent_deciding")
         recent_results = load_results(limit=8)
         brief = load_session_brief()
-        session_id = None if args.session_mode == "fresh-each-round" else agent_state.get("active_session_id")
+
+        # --- Session lifecycle ---
+        effective_session_mode = args.session_mode
+        if session_failure_count >= args.max_session_failures and effective_session_mode == "resume-session":
+            effective_session_mode = "fresh-each-round"
+            print(
+                f"Round {round_id}: degraded to fresh-each-round after "
+                f"{session_failure_count} session failures"
+            )
+            append_timeline_event(
+                "session_fallback_to_fresh",
+                round=round_id,
+                tier=None,
+                run_name=None,
+                family_name=None,
+                family_stage=None,
+                status="degraded",
+                decision=None,
+                payload={"session_failure_count": session_failure_count},
+            )
+
+        session_id = None if effective_session_mode == "fresh-each-round" else agent_state.get("active_session_id")
         session_status = agent_state.get("active_session_status", "closed")
         session_started_at = agent_state.get("active_session_started_at")
         session_rounds = int(agent_state.get("active_session_rounds", 0))
@@ -1454,69 +1742,52 @@ def main() -> int:
             (time.time() - float(session_started_at)) / 3600 if session_started_at else 0.0
         )
         need_new_session = (
-            args.session_mode == "fresh-each-round"
+            effective_session_mode == "fresh-each-round"
             or not session_id
             or session_status in {"broken", "closed", "stale"}
             or session_rounds >= args.max_session_rounds
             or session_age_hours >= args.max_session_hours
         )
-        if need_new_session:
-            prompt = build_session_bootstrap_prompt(state, memory, recent_results)
-            if session_id and args.session_mode != "fresh-each-round":
-                append_timeline_event(
-                    "session_rebuilt",
-                    round=round_id,
-                    tier=None,
-                    run_name=None,
-                    family_name=None,
-                    family_stage=None,
-                    status="recreated",
-                    decision=None,
-                    payload={
-                        "previous_session_id": session_id,
-                        "previous_status": session_status,
-                        "previous_rounds": session_rounds,
-                        "previous_age_hours": round(session_age_hours, 4),
-                    },
-                )
-            session_id = None
-        else:
-            prompt = build_resume_prompt(state, memory, recent_results, round_id, brief)
+        if need_new_session and session_id and effective_session_mode != "fresh-each-round":
+            append_timeline_event(
+                "session_rebuilt",
+                round=round_id,
+                tier=None,
+                run_name=None,
+                family_name=None,
+                family_stage=None,
+                status="recreated",
+                decision=None,
+                payload={
+                    "previous_session_id": session_id,
+                    "previous_status": session_status,
+                    "previous_rounds": session_rounds,
+                    "previous_age_hours": round(session_age_hours, 4),
+                },
+            )
 
+        # --- Snapshot code before agent edits ---
         before = snapshot_paths()
         if before:
             capture_before_files(list(before.keys()), round_id)
+        # Record restore point for code rollback.  Works both with and without
+        # auto-commit: git HEAD is always available in a git repo.
+        pre_edit_commit = current_git_commit()
+
+        # --- Agent invocation with retry ---
         try:
-            action, stdout_path, returned_session_id, resumed = run_agent_round(
-                prompt,
-                round_id,
-                args.model,
-                args.agent_proxy,
-                session_id,
+            action, stdout_path, returned_session_id, resumed = run_agent_round_with_retry(
+                state, memory, recent_results, brief,
+                round_id, args, round_ctx,
+                session_id if not need_new_session else None,
+                need_new_session,
             )
+            session_failure_count = 0
         except Exception as exc:
+            session_failure_count += 1
             error_path = LOG_DIR / f"agent_round_{round_id:04d}.error.log"
             error_path.write_text(str(exc) + "\n")
-            print(f"Round {round_id} failed during agent invocation: {exc}")
-            state = load_state()
-            agent = state.setdefault("agent", {})
-            if args.session_mode == "resume-session" and agent.get("active_session_id"):
-                agent["active_session_status"] = "broken"
-                append_timeline_event(
-                    "session_broken",
-                    round=round_id,
-                    tier=None,
-                    run_name=None,
-                    family_name=None,
-                    family_stage=None,
-                    status="broken",
-                    decision=None,
-                    payload={
-                        "session_id": agent.get("active_session_id"),
-                        "error": str(exc),
-                    },
-                )
-                save_state(state)
+            print(f"Round {round_id}: agent invocation exhausted all retries: {exc}")
             log_round_event(
                 round_ctx,
                 "round_finished",
@@ -1525,7 +1796,7 @@ def main() -> int:
                 error=str(exc),
             )
             memory.setdefault("recent_insights", []).append(
-                f"round {round_id}: agent invocation failed: {exc}"
+                f"round {round_id}: agent invocation failed after retries: {exc}"
             )
             memory["recent_insights"] = memory["recent_insights"][-40:]
             save_json(MEMORY_PATH, memory)
@@ -1534,6 +1805,8 @@ def main() -> int:
             agent["round_index"] = round_id
             agent["consecutive_crashes"] = int(agent.get("consecutive_crashes", 0)) + 1
             agent["last_action_file"] = str(error_path)
+            if effective_session_mode == "resume-session" and agent.get("active_session_id"):
+                agent["active_session_status"] = "broken"
             save_state(state)
             if auto_commit_enabled:
                 crash_action = {
@@ -1553,62 +1826,49 @@ def main() -> int:
                         "error": str(exc),
                     },
                 )
-                append_timeline_event(
-                    "experiment_commit_prepared",
-                    round=round_id,
-                    tier="proxy",
-                    run_name=None,
-                    family_name="agent_invocation",
-                    family_stage=None,
-                    status="crash",
-                    decision="crash",
-                    payload={"branch": current_git_branch()},
+                commit_round_state(
+                    round_id, crash_action, crash_result, [], round_summary_path, "proxy",
                 )
-                commit_hash, branch_name = commit_round_state(
-                    round_id,
-                    crash_action,
-                    crash_result,
-                    [],
-                    round_summary_path,
-                    "proxy",
-                )
-            break
+            # Continue to next round instead of breaking the entire loop
+            continue
 
         state = load_state()
         agent = state.setdefault("agent", {})
-        if args.session_mode == "resume-session":
+        if effective_session_mode == "resume-session":
             if not returned_session_id:
-                raise RuntimeError("Codex did not return a session id for persistent session mode")
-            if resumed:
-                agent["last_resume_ok_at"] = int(time.time())
-                append_timeline_event(
-                    "session_resumed",
-                    round=round_id,
-                    tier=None,
-                    run_name=None,
-                    family_name=None,
-                    family_stage=None,
-                    status="active",
-                    decision=None,
-                    payload={"session_id": returned_session_id},
-                )
+                print(f"Round {round_id}: WARNING: Codex did not return a session id, falling back to fresh")
+                session_failure_count += 1
             else:
-                agent["active_session_started_at"] = int(time.time())
-                agent["active_session_rounds"] = 0
-                append_timeline_event(
-                    "session_started",
-                    round=round_id,
-                    tier=None,
-                    run_name=None,
-                    family_name=None,
-                    family_stage=None,
-                    status="active",
-                    decision=None,
-                    payload={"session_id": returned_session_id},
-                )
-            agent["active_session_id"] = returned_session_id
-            agent["active_session_status"] = "active"
-            round_ctx["session_id"] = returned_session_id
+                if resumed:
+                    agent["last_resume_ok_at"] = int(time.time())
+                    append_timeline_event(
+                        "session_resumed",
+                        round=round_id,
+                        tier=None,
+                        run_name=None,
+                        family_name=None,
+                        family_stage=None,
+                        status="active",
+                        decision=None,
+                        payload={"session_id": returned_session_id},
+                    )
+                else:
+                    agent["active_session_started_at"] = int(time.time())
+                    agent["active_session_rounds"] = 0
+                    append_timeline_event(
+                        "session_started",
+                        round=round_id,
+                        tier=None,
+                        run_name=None,
+                        family_name=None,
+                        family_stage=None,
+                        status="active",
+                        decision=None,
+                        payload={"session_id": returned_session_id},
+                    )
+                agent["active_session_id"] = returned_session_id
+                agent["active_session_status"] = "active"
+                round_ctx["session_id"] = returned_session_id
             save_state(state)
 
         if action.get("command") == "stop":
@@ -1658,9 +1918,11 @@ def main() -> int:
             )
         print(f"Round {round_id}: action log -> {stdout_path}")
 
+        # --- Detect code changes ---
         touched: list[str] = []
         patch_path: Path | None = None
-        if action.get("change_type") != "param_only":
+        is_code_edit = action.get("change_type") not in ("param_only", "no_change")
+        if is_code_edit:
             after = snapshot_paths()
             touched = touched_files(before, after)
         if touched:
@@ -1673,6 +1935,107 @@ def main() -> int:
         else:
             print(f"Round {round_id}: no code files changed")
 
+        # --- Validate env_overrides ---
+        try:
+            overrides = action.get("env_overrides", [])
+            rejected_keys = validate_env_overrides(overrides)
+            if rejected_keys:
+                raise RuntimeError(
+                    f"env_overrides contain disallowed keys: {', '.join(rejected_keys)}"
+                )
+        except RuntimeError as exc:
+            print(f"Round {round_id}: env_overrides rejected: {exc}")
+            log_round_event(
+                round_ctx,
+                "env_overrides_rejected",
+                rejected_keys=rejected_keys,
+                error=str(exc),
+            )
+            result = {"decision": "crash", "status": "crash"}
+            result["termination_reason"] = "invalid_env_overrides"
+            result["run_health"] = "crash"
+            if is_code_edit and touched and pre_edit_commit:
+                rollback_code_changes(pre_edit_commit, round_id, "invalid_env_overrides")
+            round_ctx["ended_at"] = int(time.time())
+            round_ctx["duration_sec"] = round_ctx["ended_at"] - int(round_ctx["started_at"])
+            log_round_event(round_ctx, "round_finished", status="crash", decision="crash")
+            write_round_summary(round_id, action, result, touched, patch_path, round_ctx)
+            round_summary_path = ROUND_SUMMARIES_DIR / f"round_{round_id:04d}.json"
+            existing_families = set(memory.get("architecture_families", {}).keys())
+            memory = append_memory(memory, action, result, round_id, touched)
+            save_json(MEMORY_PATH, memory)
+            state = load_state()
+            family_name = str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
+            is_new_family = family_name not in existing_families
+            update_agent_state(state, result, action, stdout_path, patch_path, is_new_family)
+            save_state(state)
+            if auto_commit_enabled:
+                commit_round_state(round_id, action, result, touched, round_summary_path, "proxy")
+            continue
+
+        # --- Budget check before training ---
+        remaining_sec = budget_remaining_sec(start_time, args.budget_hours)
+        tier = action["experiment_tier"]
+        tier_timeout = args.full_timeout_sec if tier == "full" else args.proxy_timeout_sec
+        if remaining_sec < tier_timeout * 0.5:
+            if tier == "full":
+                # Not enough budget for full — downgrade to proxy
+                print(
+                    f"Round {round_id}: insufficient budget for full run "
+                    f"({remaining_sec:.0f}s remaining vs {tier_timeout}s timeout), "
+                    f"downgrading to proxy"
+                )
+                action["experiment_tier"] = "proxy"
+                tier = "proxy"
+                tier_timeout = args.proxy_timeout_sec
+            if remaining_sec < args.proxy_timeout_sec * 0.5:
+                print(
+                    f"Round {round_id}: insufficient budget even for proxy "
+                    f"({remaining_sec:.0f}s remaining), stopping"
+                )
+                if is_code_edit and touched and pre_edit_commit:
+                    rollback_code_changes(pre_edit_commit, round_id, "budget_exhausted_before_training")
+                break
+
+        # --- Sanity check for code edits (with rollback on failure) ---
+        sanity_failed = False
+        if action.get("needs_sanity") and is_code_edit:
+            try:
+                run_sanity_result = _run_sanity_for_round(action, tier, round_id, round_ctx)
+            except Exception as sanity_exc:
+                sanity_failed = True
+                print(f"Round {round_id}: sanity check FAILED: {sanity_exc}")
+                log_round_event(
+                    round_ctx,
+                    "sanity_failed",
+                    tier=tier,
+                    error=str(sanity_exc),
+                )
+                if pre_edit_commit:
+                    rollback_code_changes(pre_edit_commit, round_id, f"sanity_failed: {sanity_exc}")
+                result = {"decision": "crash", "status": "crash"}
+                result["termination_reason"] = "sanity_failed"
+                result["run_health"] = "crash"
+                round_ctx["ended_at"] = int(time.time())
+                round_ctx["duration_sec"] = round_ctx["ended_at"] - int(round_ctx["started_at"])
+                log_round_event(round_ctx, "round_finished", status="crash", decision="crash")
+                write_round_summary(round_id, action, result, touched, patch_path, round_ctx)
+                round_summary_path = ROUND_SUMMARIES_DIR / f"round_{round_id:04d}.json"
+                existing_families = set(memory.get("architecture_families", {}).keys())
+                memory = append_memory(memory, action, result, round_id, touched)
+                save_json(MEMORY_PATH, memory)
+                state = load_state()
+                family_name = str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
+                is_new_family = family_name not in existing_families
+                update_agent_state(state, result, action, stdout_path, patch_path, is_new_family)
+                save_state(state)
+                if auto_commit_enabled:
+                    commit_round_state(round_id, action, result, touched, round_summary_path, "proxy")
+                continue
+
+        if sanity_failed:
+            continue
+
         result = run_training_round(action, action["experiment_tier"], args, round_id, memory, round_ctx)
         round_ctx["proxy_result"] = result
         print(
@@ -1681,17 +2044,46 @@ def main() -> int:
             f"k={result.get('k')} health={result.get('run_health')} "
             f"termination={result.get('termination_reason')}"
         )
+
+        # --- Code rollback on crash (not perf_regression) ---
+        if (
+            is_code_edit
+            and touched
+            and pre_edit_commit
+            and result.get("run_health") == "crash"
+        ):
+            rollback_code_changes(pre_edit_commit, round_id, f"training_crash: {result.get('termination_reason')}")
+
         if result.get("decision") == "promote" and action["experiment_tier"] == "proxy":
-            print(f"Round {round_id}: promoted to full")
-            full_result = run_training_round(action, "full", args, round_id, memory, round_ctx)
-            result = full_result
-            round_ctx["full_result"] = full_result
-            print(
-                f"Round {round_id} full result: "
-                f"decision={result.get('decision')} fvu={result.get('val_fvu')} "
-                f"k={result.get('k')} health={result.get('run_health')} "
-                f"termination={result.get('termination_reason')}"
-            )
+            # Budget check before full promotion
+            remaining_sec = budget_remaining_sec(start_time, args.budget_hours)
+            if remaining_sec < args.full_timeout_sec * 0.5:
+                print(
+                    f"Round {round_id}: skipping full promotion, insufficient budget "
+                    f"({remaining_sec:.0f}s remaining)"
+                )
+            else:
+                print(f"Round {round_id}: promoted to full")
+                full_result = run_training_round(action, "full", args, round_id, memory, round_ctx)
+                result = full_result
+                round_ctx["full_result"] = full_result
+                print(
+                    f"Round {round_id} full result: "
+                    f"decision={result.get('decision')} fvu={result.get('val_fvu')} "
+                    f"k={result.get('k')} health={result.get('run_health')} "
+                    f"termination={result.get('termination_reason')}"
+                )
+                # Rollback code on full crash too
+                if (
+                    is_code_edit
+                    and touched
+                    and pre_edit_commit
+                    and full_result.get("run_health") == "crash"
+                ):
+                    rollback_code_changes(
+                        pre_edit_commit, round_id,
+                        f"full_training_crash: {full_result.get('termination_reason')}",
+                    )
 
         round_ctx["ended_at"] = int(time.time())
         round_ctx["duration_sec"] = round_ctx["ended_at"] - int(round_ctx["started_at"])
@@ -1716,7 +2108,7 @@ def main() -> int:
         family_name = str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
         is_new_family = family_name not in existing_families
         update_agent_state(state, result, action, stdout_path, patch_path, is_new_family)
-        if args.session_mode == "resume-session" and state["agent"].get("active_session_status") == "active":
+        if effective_session_mode == "resume-session" and state["agent"].get("active_session_status") == "active":
             state["agent"]["active_session_rounds"] = int(state["agent"].get("active_session_rounds", 0)) + 1
         save_state(state)
         save_session_brief(build_session_brief(state, memory, load_results(limit=8), round_id))
