@@ -36,6 +36,11 @@ class HybridTopKSparseCoder(SparseCoder):
             hidden_dim, self.num_latents, device=device, dtype=dtype
         )
         self.encoder_residual.bias.data.zero_()
+        self.encoder_modulation = nn.Linear(
+            hidden_dim, self.num_latents, device=device, dtype=dtype
+        )
+        self.encoder_modulation.weight.data.zero_()
+        self.encoder_modulation.bias.data.zero_()
 
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode with linear logits plus a gated nonlinear residual."""
@@ -43,6 +48,8 @@ class HybridTopKSparseCoder(SparseCoder):
         linear_logits = F.linear(x, self.encoder.weight, self.encoder.bias)
         hidden = F.silu(self.encoder_hidden(x)) * torch.sigmoid(self.encoder_gate(x))
         residual_logits = self.encoder_residual(hidden)
-        pre_acts = F.relu(linear_logits + residual_logits)
+        modulation = torch.tanh(self.encoder_modulation(hidden))
+        combined_logits = linear_logits * (1.0 + modulation) + residual_logits
+        pre_acts = F.relu(combined_logits)
         top_acts, top_indices = pre_acts.topk(self.cfg.k, dim=-1, sorted=False)
         return EncoderOutput(top_acts, top_indices, pre_acts)
