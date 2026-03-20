@@ -559,12 +559,12 @@ def main() -> int:
         description="SAE autoresearch controller",
         epilog="""
 Usage:
-  python controller.py init                          # first time setup
-  python controller.py status                        # show frontier & stats
-  python controller.py hint --message "..."         # enqueue an operator hint
-  python controller.py hints                         # list operator hints
-  python controller.py hint-update --id ...         # edit an operator hint
-  python controller.py record --log run.log \\
+  python -m research.controller init                # first time setup
+  python -m research.controller status              # show frontier & stats
+  python -m research.controller hint --message "..."      # enqueue an operator hint
+  python -m research.controller hints               # list operator hints
+  python -m research.controller hint-update --id ...      # edit an operator hint
+  python -m research.controller record --log run.log \\
     --description "baseline" --self-review "..."      # record experiment result
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,

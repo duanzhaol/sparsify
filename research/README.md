@@ -402,7 +402,7 @@ cd /root/sparsify-ascend
 如果是第一次运行，或者你刚清空了历史：
 
 ```bash
-python research/controller.py init
+python -m research.controller init
 ```
 
 如果你后续想在运行中间插入一条外部提示，也通过 `controller.py` 完成，不需要停机改代码。
@@ -505,7 +505,7 @@ cat research/history/round_summaries/round_0001.json
 如果你想中途给 Agent 一条提示，可以直接写入 operator hints：
 
 ```bash
-python research/controller.py hint \
+python -m research.controller hint \
   --message "下一轮优先检查 JumpReLU 是否只是实现太慢，不要直接下负面架构结论" \
   --priority high \
   --scope next_round \
@@ -515,13 +515,13 @@ python research/controller.py hint \
 查看当前提示：
 
 ```bash
-python research/controller.py hints
+python -m research.controller hints
 ```
 
 修改已有提示：
 
 ```bash
-python research/controller.py hint-update \
+python -m research.controller hint-update \
   --id hint_1234567890 \
   --scope persistent \
   --priority normal \

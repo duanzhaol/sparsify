@@ -601,7 +601,7 @@ class Trainer(CheckpointMixin):
             )
             sync_gradients = substep_candidate == 0
             should_time = (
-                self.cfg.log_to_wandb
+                (self.cfg.log_to_wandb or metrics_logger is not None)
                 and sync_gradients
                 and (step_candidate + 1) % self.cfg.wandb_log_frequency == 0
             )

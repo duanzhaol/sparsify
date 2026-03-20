@@ -20,7 +20,6 @@ from research.state_io import (
 )
 
 SCRIPT_PATH = REPO_ROOT / "scripts" / "autoresearch_test.sh"
-CONTROLLER_PATH = REPO_ROOT / "research" / "controller.py"
 SAVE_ROOT = REPO_ROOT / "checkpoints" / "research_agent"
 
 DEFAULT_PROXY_MAX_TOKENS = "20000000"
@@ -273,7 +272,8 @@ def record_result(
 ) -> dict[str, str]:
     cmd = [
         "python",
-        str(CONTROLLER_PATH),
+        "-m",
+        "research.controller",
         "record",
         "--log",
         str(log_path),
@@ -288,7 +288,7 @@ def record_result(
     ]
     if checkpoint_dir is not None:
         cmd.extend(["--checkpoint-dir", str(checkpoint_dir)])
-    result = run(cmd, cwd=REPO_ROOT / "research")
+    result = run(cmd, cwd=REPO_ROOT)
     parsed: dict[str, str] = {}
     for line in result.stdout.splitlines():
         if ":" in line:

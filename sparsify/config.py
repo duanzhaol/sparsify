@@ -22,21 +22,7 @@ class SparseCoderConfig(Serializable):
 
     # Architecture selection
     architecture: str = "topk"
-    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk' | 'routed_group_topk' | 'residual_topk' | 'factorized_topk' | 'mixture_topk'."""
-
-    # JumpReLU parameters (only used when architecture='jumprelu')
-    jumprelu_init_threshold: float = 0.001
-    """Initial per-feature threshold for JumpReLU activation."""
-
-    jumprelu_bandwidth: float = 0.001
-    """Bandwidth for STE approximation in JumpReLU backward."""
-
-    # Group TopK parameters (only used when architecture='group_topk')
-    num_groups: int = 0
-    """Number of groups for Group TopK. Must divide num_latents evenly."""
-
-    active_groups: int = 0
-    """Number of groups to select per input in Group TopK."""
+    """Encoding architecture. Only the standard TopK sparse coder is supported."""
 
 
 # Support different naming conventions for the same configuration
@@ -189,40 +175,12 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = (
-            "topk",
-            "gated",
-            "jumprelu",
-            "group_topk",
-            "routed_group_topk",
-            "residual_topk",
-            "factorized_topk",
-            "mixture_topk",
-        )
+        valid_archs = ("topk",)
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "
                 f"Must be one of {valid_archs}"
             )
-
-        if self.sae.architecture in ("group_topk", "routed_group_topk"):
-            if self.sae.num_groups <= 0:
-                raise ValueError("num_groups must be > 0 for grouped architectures")
-            if self.sae.active_groups <= 0:
-                raise ValueError("active_groups must be > 0 for grouped architectures")
-            if self.sae.active_groups > self.sae.num_groups:
-                raise ValueError("active_groups must be <= num_groups")
-            # Ensure enough selectable latents for k
-            num_latents = self.sae.num_latents or 1  # actual value depends on d_in
-            if self.sae.num_latents > 0:
-                group_size = self.sae.num_latents // self.sae.num_groups
-                selectable = self.sae.active_groups * group_size
-                if self.sae.k > selectable:
-                    raise ValueError(
-                        f"k ({self.sae.k}) > active_groups * group_size "
-                        f"({self.sae.active_groups} * {group_size} = {selectable}). "
-                        f"This would select -inf values from masked groups."
-                    )
 
         # Optimizer validation
         valid_opts = ("signum", "adam")
@@ -230,11 +188,6 @@ class TrainConfig(Serializable):
             raise ValueError(
                 f"Unknown optimizer: {self.optimizer!r}. Must be one of {valid_opts}"
             )
-
-        # JumpReLU validation
-        if self.sae.architecture == "jumprelu":
-            if self.sae.jumprelu_bandwidth <= 0:
-                raise ValueError("jumprelu_bandwidth must be > 0")
 
         # Matryoshka validation
         if self.matryoshka_ks:
