@@ -311,20 +311,6 @@ def _get_sae_class(architecture: str) -> type:
     if architecture == "mixture_topk":
         from .mixture_topk_sparse_coder import MixtureTopKSparseCoder
         return MixtureTopKSparseCoder
-    if architecture == "hybrid_topk":
-        from .hybrid_topk_sparse_coder import HybridTopKSparseCoder
-        return HybridTopKSparseCoder
-    if architecture == "adaptive_threshold_topk":
-        from .adaptive_threshold_topk_sparse_coder import (
-            AdaptiveThresholdTopKSparseCoder,
-        )
-        return AdaptiveThresholdTopKSparseCoder
-    if architecture == "union_topk":
-        from .union_topk_sparse_coder import UnionTopKSparseCoder
-        return UnionTopKSparseCoder
-    if architecture == "refined_topk":
-        from .refined_topk_sparse_coder import RefinedTopKSparseCoder
-        return RefinedTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
