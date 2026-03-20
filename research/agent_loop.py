@@ -634,7 +634,7 @@ def run_agent_round(
             "resume",
             session_id,
             "-",
-            "--full-auto",
+            "--dangerously-bypass-approvals-and-sandbox",
             "-o",
             str(action_path),
         ]
@@ -642,9 +642,7 @@ def run_agent_round(
         cmd = [
             "codex",
             "exec",
-            "--full-auto",
-            "--sandbox",
-            "danger-full-access",
+            "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             str(REPO_ROOT),
             "--output-schema",
