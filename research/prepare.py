@@ -9,7 +9,6 @@ This script is READ-ONLY for the agent. Do not modify.
 """
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -27,31 +26,6 @@ DATASET_PATH = os.path.expanduser(
 ELBOW_THRESHOLD_PATH = os.path.expanduser(
     "~/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json"
 )
-
-# ---------------------------------------------------------------------------
-# Proxy experiment budget (for the agent's fast iteration loop)
-# ---------------------------------------------------------------------------
-
-PROXY_MAX_TOKENS = 20_000_000      # ~20M tokens, matches validated script
-FULL_MAX_TOKENS = 200_000_000      # ~200M tokens, full training
-PROXY_TIMEOUT = 1800               # kill after 30 min
-FULL_TIMEOUT = 7200                # kill after 2 hours
-
-# Default hookpoint for proxy (layer 3 — model forward truncates early, much faster)
-PROXY_HOOKPOINT = "layers.3.self_attn.o_proj"
-
-# Default SAE baseline config
-BASELINE_CONFIG = {
-    "architecture": "topk",
-    "expansion_factor": 8,
-    "k": 128,
-    "optimizer": "signum",
-    "lr": 8e-4,
-    "batch_size": 1,
-    "grad_acc_steps": 8,
-    "auxk_alpha": 0.03125,
-    "dead_feature_threshold": 10_000_000,
-}
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -128,57 +102,6 @@ def smoke_test():
         print(f"  [OK] save/load roundtrip, FVU={out2.fvu.item():.4f}")
 
     return True
-
-
-# ---------------------------------------------------------------------------
-# Result parsing utilities (used by the agent / decision logic)
-# ---------------------------------------------------------------------------
-
-
-def parse_summary(checkpoint_dir: str) -> dict | None:
-    """Extract metrics from a training run's summary.json."""
-    summary_path = os.path.join(checkpoint_dir, "summary.json")
-    if not os.path.exists(summary_path):
-        return None
-    with open(summary_path) as f:
-        return json.load(f)
-
-
-def parse_metrics_jsonl(checkpoint_dir: str) -> list[dict]:
-    """Read all step records from metrics.jsonl."""
-    path = os.path.join(checkpoint_dir, "metrics.jsonl")
-    if not os.path.exists(path):
-        return []
-    records = []
-    with open(path) as f:
-        for line in f:
-            rec = json.loads(line)
-            if rec.get("type") == "step":
-                records.append(rec)
-    return records
-
-
-def get_final_fvu(checkpoint_dir: str, hookpoint: str | None = None) -> float | None:
-    """Get the final FVU from summary.json.
-
-    If hookpoint is given, return that hookpoint's FVU.
-    Otherwise return the average across all hookpoints.
-    """
-    summary = parse_summary(checkpoint_dir)
-    if summary is None:
-        return None
-    fvu_dict = summary.get("final_fvu", {})
-    if not fvu_dict:
-        # Try best_fvu as fallback
-        fvu_dict = summary.get("best_fvu", {})
-    if not fvu_dict:
-        return None
-    if hookpoint and hookpoint in fvu_dict:
-        return fvu_dict[hookpoint]
-    # Average across all hookpoints
-    vals = [v for v in fvu_dict.values() if isinstance(v, (int, float))]
-    return sum(vals) / len(vals) if vals else None
-
 
 # ---------------------------------------------------------------------------
 # Main

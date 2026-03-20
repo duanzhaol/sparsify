@@ -13,12 +13,14 @@ import argparse
 import csv
 import json
 import re
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from research.git_ops import git
+from research.state_io import append_timeline_event
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -92,17 +94,6 @@ class RunResult:
     log_path: str
 
 
-def _run_git(args: list[str]) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
 def read_json_retry(path: Path) -> Any:
     try:
         with open(path) as f:
@@ -111,27 +102,10 @@ def read_json_retry(path: Path) -> Any:
         time.sleep(0.1)
         with open(path) as f:
             return json.load(f)
-
-
-def append_timeline_event(event: str, **payload: Any) -> str:
-    TIMELINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TIMELINE_PATH.touch(exist_ok=True)
-    event_id = f"evt_{time.time_ns()}"
-    record = {
-        "event_id": event_id,
-        "ts": int(time.time()),
-        "event": event,
-        **payload,
-    }
-    with open(TIMELINE_PATH, "a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return event_id
-
-
 def get_git_state() -> dict[str, Any]:
-    head_commit = _run_git(["rev-parse", "HEAD"])
-    head_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-    dirty = bool(_run_git(["status", "--porcelain"]))
+    head_commit = git(["rev-parse", "HEAD"]).stdout.strip()
+    head_branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+    dirty = bool(git(["status", "--porcelain"]).stdout.strip())
     return {
         "head_commit": head_commit,
         "head_branch": head_branch,
