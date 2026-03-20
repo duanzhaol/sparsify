@@ -295,6 +295,8 @@ def _get_sae_class(architecture: str) -> type:
         return JumpReLUSparseCoder
     if architecture == "gated":
         return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -367,4 +369,43 @@ class GatedSparseCoder(SparseCoder):
         gate = torch.sigmoid(gate_logits)
         acts = positive * gate
         top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class RoutedSparseCoder(SparseCoder):
+    """Gated SAE with routing scores separated from decoded magnitudes."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        # Warm-start routing from the magnitude encoder so the support branch is
+        # informative from step 0 instead of learning from an all-zero projection.
+        self.gate_encoder.weight.data.copy_(0.1 * self.encoder.weight.data)
+        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+
+        # Use a support-aware score for selection, but decode with the gated
+        # magnitudes so routing and reconstruction are no longer forced to share
+        # the same shrinkage path.
+        acts = positive * gate
+        scores = positive * (1.0 + gate)
+        _, top_indices = torch.topk(scores, self.cfg.k, dim=-1, sorted=False)
+        top_acts = acts.gather(-1, top_indices)
         return EncoderOutput(top_acts, top_indices, acts)

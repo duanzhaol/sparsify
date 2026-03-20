@@ -3,7 +3,8 @@
   "architecture_findings": [
     "round 1: A JumpReLU encoder with learnable per-latent thresholds can improve the K=128 quality anchor versus plain TopK by suppressing weak activations before top-k selection, improving feature selectivity and lowering FVU without changing the execution layer. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 2: The new JumpReLU family deserves its first proxy measurement at the K=128 quality anchor; learnable thresholds with smooth gating may suppress weak activations and beat plain TopK FVU before any cost-oriented moves. -> keep (fvu=0.1887873373925686, observed_fvu=0.184100, k=128, health=normal, termination=completed)",
-    "round 7: A gated SAE that decouples latent support selection from reconstruction magnitude can beat the current JumpReLU anchor at K=128 by learning a separate sigmoid routing branch while staying initialization-close to plain ReLU top-k. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
+    "round 7: A gated SAE that decouples latent support selection from reconstruction magnitude can beat the current JumpReLU anchor at K=128 by learning a separate sigmoid routing branch while staying initialization-close to plain ReLU top-k. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
+    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "performance_findings": [
     "round 3: suspected performance regression for jumprelu (tps=16601.650675, baseline_ratio=0.200000, termination=throughput_too_low)"
@@ -43,6 +44,13 @@
       "last_round": 19,
       "run_health": "crash",
       "termination_reason": "invalid_env_overrides"
+    },
+    {
+      "pattern": "Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128.",
+      "count": 1,
+      "last_round": 26,
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline"
     }
   ],
   "baseline_runtime": {
@@ -313,27 +321,33 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 21
+    },
+    "routed": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128.",
+      "tested_configs": [
+        {
+          "round": 26,
+          "stage": "prototype",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If routed proxy FVU beats gated proxy materially, promote it and treat routed-specific stabilization as the new main quality path.",
+        "If routed quality is competitive but throughput regresses, keep the family alive and follow with a performance-focused implementation pass rather than discarding it on speed alone.",
+        "If routed is clearly worse, conclude that gated-family architectural refinement needs a different mechanism and try a different new family instead of more LR-only sweeps."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 26
     }
   },
   "recent_rounds": [
-    {
-      "round": 14,
-      "hypothesis": "JumpReLU at K=128 may be paying unnecessary reconstruction cost to the auxiliary dead-feature objective, and removing auxk pressure could lower primary FVU below the current 0.1724 full frontier.",
-      "change_type": "param_only",
-      "expected_win": "quality",
-      "family_name": "jumprelu",
-      "family_stage": "stabilize",
-      "decision": "discard",
-      "val_fvu": "0.2798203472048044",
-      "observed_fvu": "0.278738",
-      "k": "128",
-      "architecture": "jumprelu",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "83008.053565",
-      "baseline_ratio": "1.000000"
-    },
     {
       "round": 15,
       "hypothesis": "JumpReLU at K=128 may still benefit from a reduced but nonzero auxiliary dead-feature objective, and lowering AUXK_ALPHA from 0.03125 to 0.01 could preserve feature health while reducing the reconstruction penalty seen at the baseline auxk weight.",
@@ -531,14 +545,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "41496.622319",
       "baseline_ratio": "0.499908"
+    },
+    {
+      "round": 26,
+      "hypothesis": "Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "routed",
+      "family_stage": "prototype",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "routed",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "EXPANSION_FACTOR=16 did not beat the existing JumpReLU proxy anchor, so higher capacity alone is not an obvious path to lower FVU.",
-    "This round completes the planned one-variable expansion-factor sweep by testing EXPANSION_FACTOR=4 on the same K=128 JumpReLU baseline.",
-    "If EF=4 also fails to improve proxy quality, local JumpReLU expansion-factor search should be considered exhausted and the next round should move to another remaining hyperparameter axis.",
-    "round 17: JumpReLU at K=128 may be overprovisioned at expansion_factor=8 for the current optimization regime, so reducing expansion_factor to 4 while holding LR=1.6e-3 and AUXK_ALPHA=0.03125 fixed could improve proxy FVU by enforcing a more efficient latent basis. -> discard (fvu=0.2960480824112892, observed_fvu=0.295090, k=128, health=normal, termination=completed)",
-    "Five consecutive non-improving rounds indicate the local JumpReLU sweep is exhausted for now.",
     "This round switches to the incubating gated family as a fundamentally different encoder-routing approach while preserving the strongest known optimization settings for a fair comparison.",
     "A clean gated proxy result is needed before deciding whether to stabilize the family or abandon it in favor of another architecture direction.",
     "round 18: The current JumpReLU search direction appears locally exhausted, and a gated SAE that separates support selection from reconstruction magnitude may unlock a lower-FVU regime at K=128 by learning support with an explicit sigmoid routing branch while keeping the strong baseline optimization settings. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=invalid_env_overrides)",
@@ -573,11 +603,16 @@
     "Gated EF=16 remains the best full frontier, but LR=3.2e-3 improved proxy while degrading full quality, indicating optimization sensitivity rather than a settled LR optimum.",
     "This round tests a lower LR on the same gated EF=16 anchor to see whether a more conservative optimization path yields better full-run generalization.",
     "The search remains focused on beating the K=128 gated baseline materially before considering smaller K or cost reductions.",
-    "round 25: The gated K=128 EF=16 model appears sensitive to optimization, and the worse full result at LR=3.2e-3 suggests overshooting; reducing the signum learning rate to 8e-4 may improve full-run reconstruction by trading some proxy speed for a stabler optimization trajectory. -> discard (fvu=0.28860342130064964, observed_fvu=0.287440, k=128, health=normal, termination=completed)"
+    "round 25: The gated K=128 EF=16 model appears sensitive to optimization, and the worse full result at LR=3.2e-3 suggests overshooting; reducing the signum learning rate to 8e-4 may improve full-run reconstruction by trading some proxy speed for a stabler optimization trajectory. -> discard (fvu=0.28860342130064964, observed_fvu=0.287440, k=128, health=normal, termination=completed)",
+    "Round 26: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "Added a new `routed` SAE family that uses support-aware top-k scores but decodes with gated magnitudes, so routing and coefficient shrinkage are no longer the same operation.",
+    "The routed family warm-starts its gate projection from the magnitude encoder instead of an all-zero gate branch, aiming to reduce optimization drag seen in later gated stabilization sweeps.",
+    "A local forward/backward sanity check passed for the new architecture before launching training.",
+    "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "next_hypotheses": [
-    "If LR=8e-4 improves proxy FVU, promote to full and compare directly against the current gated K=128 frontier.",
-    "If LR=8e-4 is also worse, test LR=4e-4 as the last conservative LR bracket on gated EF=16.",
-    "If lower-LR sweeps plateau, shift to gated-specific regularization or architecture refinements instead of further generic optimizer tuning."
+    "If routed proxy FVU beats gated proxy materially, promote it and treat routed-specific stabilization as the new main quality path.",
+    "If routed quality is competitive but throughput regresses, keep the family alive and follow with a performance-focused implementation pass rather than discarding it on speed alone.",
+    "If routed is clearly worse, conclude that gated-family architectural refinement needs a different mechanism and try a different new family instead of more LR-only sweeps."
   ]
 }
