@@ -293,6 +293,8 @@ def _get_sae_class(architecture: str) -> type:
         return SparseCoder
     if architecture == "jumprelu":
         return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -333,6 +335,36 @@ class JumpReLUSparseCoder(SparseCoder):
         pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
         positive = F.relu(pre_acts)
         gate = torch.sigmoid((positive - self.threshold) / self.cfg.jumprelu_bandwidth)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class GatedSparseCoder(SparseCoder):
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        # Start close to plain ReLU top-k, then let the gate branch learn support.
+        self.gate_encoder.weight.data.zero_()
+        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
         acts = positive * gate
         top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
         return EncoderOutput(top_acts, top_indices, acts)

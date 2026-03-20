@@ -30,6 +30,12 @@ class SparseCoderConfig(Serializable):
     jumprelu_bandwidth: float = 0.1
     """Bandwidth for the smooth JumpReLU gate surrogate."""
 
+    gated_temperature: float = 1.0
+    """Temperature for the sigmoid gate in gated encoders."""
+
+    gated_init_logit: float = 2.0
+    """Initial bias logit for gated encoders."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -181,7 +187,7 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = ("topk", "jumprelu")
+        valid_archs = ("topk", "jumprelu", "gated")
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "
@@ -197,6 +203,11 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "jumprelu_init_threshold must be non-negative, "
                 f"got {self.sae.jumprelu_init_threshold}"
+            )
+        if self.sae.gated_temperature <= 0:
+            raise ValueError(
+                "gated_temperature must be positive, "
+                f"got {self.sae.gated_temperature}"
             )
 
         # Optimizer validation
