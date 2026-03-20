@@ -22,7 +22,7 @@ class SparseCoderConfig(Serializable):
 
     # Architecture selection
     architecture: str = "topk"
-    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk'."""
+    """Encoding architecture: 'topk' | 'gated' | 'jumprelu' | 'group_topk' | 'routed_group_topk' | 'residual_topk' | 'factorized_topk' | 'mixture_topk'."""
 
     # JumpReLU parameters (only used when architecture='jumprelu')
     jumprelu_init_threshold: float = 0.001
@@ -189,18 +189,27 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = ("topk", "gated", "jumprelu", "group_topk")
+        valid_archs = (
+            "topk",
+            "gated",
+            "jumprelu",
+            "group_topk",
+            "routed_group_topk",
+            "residual_topk",
+            "factorized_topk",
+            "mixture_topk",
+        )
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "
                 f"Must be one of {valid_archs}"
             )
 
-        if self.sae.architecture == "group_topk":
+        if self.sae.architecture in ("group_topk", "routed_group_topk"):
             if self.sae.num_groups <= 0:
-                raise ValueError("num_groups must be > 0 for group_topk architecture")
+                raise ValueError("num_groups must be > 0 for grouped architectures")
             if self.sae.active_groups <= 0:
-                raise ValueError("active_groups must be > 0 for group_topk architecture")
+                raise ValueError("active_groups must be > 0 for grouped architectures")
             if self.sae.active_groups > self.sae.num_groups:
                 raise ValueError("active_groups must be <= num_groups")
             # Ensure enough selectable latents for k

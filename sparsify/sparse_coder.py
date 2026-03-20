@@ -299,6 +299,18 @@ def _get_sae_class(architecture: str) -> type:
     if architecture == "group_topk":
         from .group_topk_sparse_coder import GroupTopKSparseCoder
         return GroupTopKSparseCoder
+    if architecture == "routed_group_topk":
+        from .routed_group_topk_sparse_coder import RoutedGroupTopKSparseCoder
+        return RoutedGroupTopKSparseCoder
+    if architecture == "residual_topk":
+        from .residual_topk_sparse_coder import ResidualTopKSparseCoder
+        return ResidualTopKSparseCoder
+    if architecture == "factorized_topk":
+        from .factorized_topk_sparse_coder import FactorizedTopKSparseCoder
+        return FactorizedTopKSparseCoder
+    if architecture == "mixture_topk":
+        from .mixture_topk_sparse_coder import MixtureTopKSparseCoder
+        return MixtureTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 

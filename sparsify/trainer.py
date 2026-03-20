@@ -126,12 +126,16 @@ class Trainer(CheckpointMixin):
         lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
 
         if cfg.optimizer == "adam":
-            base_opt = torch.optim.Adam(pgs)
+            # The reference ScheduleFree wrapper stores its own per-parameter
+            # state entries before delegating to the base optimizer. Adam
+            # interprets that as an already-initialized state dict and then
+            # crashes because exp_avg / exp_avg_sq were never created.
+            opt = torch.optim.Adam(pgs)
         else:
             # signum (default)
             base_opt = SignSGD(pgs)
-        opt = ScheduleFreeWrapperReference(base_opt, momentum=0.95)
-        opt.train()
+            opt = ScheduleFreeWrapperReference(base_opt, momentum=0.95)
+            opt.train()
         self.optimizers = [opt]
 
         logger.info(
