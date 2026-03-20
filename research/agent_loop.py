@@ -82,7 +82,6 @@ SNAPSHOT_EXCLUDES = (
     "research/orchestrator.py",
     "research/prepare.py",
     "research/program.md",
-    "research/train.py",
     "research/agent_action.schema.json",
     "scripts/autoresearch_test.sh",
 )

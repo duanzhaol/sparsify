@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import importlib.util
 import json
 import re
 import subprocess
@@ -33,7 +32,6 @@ FRONTIER_PATH = HISTORY_DIR / "frontier.json"
 MEMORY_PATH = HISTORY_DIR / "memory.json"
 HINTS_PATH = HISTORY_DIR / "operator_hints.json"
 TIMELINE_PATH = HISTORY_DIR / "timeline.jsonl"
-TRAIN_PATH = RESEARCH_DIR / "train.py"
 
 RESULT_COLUMNS = [
     "experiment_id",
@@ -249,24 +247,19 @@ def save_state(state: dict[str, Any]) -> None:
     FRONTIER_PATH.write_text(json.dumps(state.get("frontier", {}), indent=2) + "\n")
 
 
-def load_train_config() -> dict[str, Any]:
-    spec = importlib.util.spec_from_file_location("research_train", TRAIN_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load {TRAIN_PATH}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return dict(module.CONFIG)
-
-
 def load_config_from_json(path: str | None) -> dict[str, Any]:
     if path is None:
-        return load_train_config()
+        raise RuntimeError(
+            "record now requires --config-json; the legacy research/train.py "
+            "fallback has been removed because it could diverge from the real "
+            "env-driven training configuration."
+        )
     with open(path) as f:
         return json.load(f)
 
 
 def parse_log_output(output: str) -> dict[str, Any]:
-    """Parse the key-value summary block printed by train.py."""
+    """Parse the key-value summary block printed by the training launcher."""
     parsed: dict[str, Any] = {}
     for key, pattern in SUMMARY_PATTERNS.items():
         match = pattern.search(output)
