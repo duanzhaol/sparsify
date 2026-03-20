@@ -4,6 +4,7 @@ from .config import SaeConfig, SparseCoderConfig, TrainConfig
 from .factorized_topk_sparse_coder import FactorizedTopKSparseCoder
 from .gated_sparse_coder import GatedSparseCoder
 from .group_topk_sparse_coder import GroupTopKSparseCoder
+from .hybrid_topk_sparse_coder import HybridTopKSparseCoder
 from .jumprelu_sparse_coder import JumpReLUSparseCoder
 from .mixture_topk_sparse_coder import MixtureTopKSparseCoder
 from .residual_topk_sparse_coder import ResidualTopKSparseCoder

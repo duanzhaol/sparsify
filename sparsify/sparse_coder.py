@@ -311,6 +311,9 @@ def _get_sae_class(architecture: str) -> type:
     if architecture == "mixture_topk":
         from .mixture_topk_sparse_coder import MixtureTopKSparseCoder
         return MixtureTopKSparseCoder
+    if architecture == "hybrid_topk":
+        from .hybrid_topk_sparse_coder import HybridTopKSparseCoder
+        return HybridTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
