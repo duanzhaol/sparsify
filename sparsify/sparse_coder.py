@@ -319,6 +319,9 @@ def _get_sae_class(architecture: str) -> type:
             AdaptiveThresholdTopKSparseCoder,
         )
         return AdaptiveThresholdTopKSparseCoder
+    if architecture == "union_topk":
+        from .union_topk_sparse_coder import UnionTopKSparseCoder
+        return UnionTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 

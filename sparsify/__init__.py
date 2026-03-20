@@ -12,6 +12,7 @@ from .residual_topk_sparse_coder import ResidualTopKSparseCoder
 from .routed_group_topk_sparse_coder import RoutedGroupTopKSparseCoder
 from .sparse_coder import Sae, SparseCoder
 from .trainer import SaeTrainer, Trainer
+from .union_topk_sparse_coder import UnionTopKSparseCoder
 
 __all__ = [
     "FactorizedTopKSparseCoder",
@@ -29,4 +30,5 @@ __all__ = [
     "SparseCoderConfig",
     "Trainer",
     "TrainConfig",
+    "UnionTopKSparseCoder",
 ]
