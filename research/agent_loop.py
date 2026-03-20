@@ -164,6 +164,21 @@ def ensure_research_branch(branch: str, state: dict[str, Any]) -> None:
     base_commit = current_git_commit()
     if base_branch != branch:
         if branch_exists(branch):
+            # ensure_setup() may have created history files that conflict
+            # with tracked versions on the research branch — remove them
+            # so checkout succeeds (they'll be restored from the branch).
+            for hf in HISTORY_DIR.iterdir():
+                if hf.is_file() and not hf.name.startswith("."):
+                    try:
+                        result = subprocess.run(
+                            ["git", "ls-files", "--error-unmatch", str(hf.relative_to(REPO_ROOT))],
+                            cwd=REPO_ROOT, capture_output=True, text=True,
+                        )
+                        # File is untracked here but tracked on target branch
+                        if result.returncode != 0:
+                            hf.unlink()
+                    except Exception:
+                        pass
             git(["checkout", branch])
         else:
             git(["checkout", "-b", branch])
@@ -1589,7 +1604,7 @@ def main() -> int:
     parser.add_argument("--session-mode", choices=["resume-session", "fresh-each-round"], default="resume-session")
     parser.add_argument("--max-session-rounds", type=int, default=DEFAULT_MAX_SESSION_ROUNDS)
     parser.add_argument("--max-session-hours", type=float, default=DEFAULT_MAX_SESSION_HOURS)
-    parser.add_argument("--research-branch", default=None)
+    # --research-branch removed: experiments run on the current branch directly
     parser.add_argument("--no-commit-experiments", action="store_true")
     parser.add_argument("--allow-direct-full", action="store_true")
     parser.add_argument("--reset-failure-counters", action="store_true")
@@ -1662,8 +1677,10 @@ def main() -> int:
 
     if auto_commit_enabled:
         state = load_state()
-        research_branch = args.research_branch or default_research_branch_name()
-        ensure_research_branch(research_branch, state)
+        research_branch = current_git_branch()
+        state["research_branch"] = research_branch
+        state["base_branch"] = state.get("base_branch", research_branch)
+        state["base_commit"] = state.get("base_commit", current_git_commit())
         save_state(state)
         append_timeline_event(
             "research_branch_ready",
