@@ -1,7 +1,8 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 5: factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)"
+    "round 5: factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)",
+    "round 6: The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal. -> incubate (fvu=0.3485000617802143, observed_fvu=0.348134, k=128, health=normal, termination=completed)"
   ],
   "performance_findings": [],
   "failure_patterns": [
@@ -47,12 +48,12 @@
       "updated_at": 1774003477
     },
     "proxy|factorized_topk|layers.[3].self_attn.o_proj": {
-      "tokens_per_sec": 83007.98594992296,
-      "round": 4,
+      "tokens_per_sec": 83008.43814532935,
+      "round": 6,
       "tier": "proxy",
       "architecture": "factorized_topk",
       "k": 128,
-      "updated_at": 1774003617
+      "updated_at": 1774004137
     }
   },
   "architecture_families": {
@@ -128,7 +129,7 @@
     "factorized_topk": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit.",
+      "design_hypothesis": "The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal.",
       "tested_configs": [
         {
           "round": 4,
@@ -145,16 +146,24 @@
           "decision": "crash",
           "val_fvu": "None",
           "run_health": "normal"
+        },
+        {
+          "round": 6,
+          "stage": "stabilize",
+          "k": "128",
+          "decision": "incubate",
+          "val_fvu": "0.3485000617802143",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If the stabilized factorized_topk proxy improves substantially, consider promotion or a follow-up quality pass with optimizer tuning.",
-        "If the stabilized factorized_topk remains poor under normal runtime, deprioritize the current built-in families and move to a genuinely new encoder family rather than more local tuning."
+        "If the fixed factorized_topk now yields a valid proxy improvement, keep incubating the family with quality-focused tuning.",
+        "If the fixed factorized_topk still performs poorly under normal runtime, stop spending rounds on current built-in families and move to a genuinely new encoder design."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 5
+      "last_round": 6
     }
   },
   "recent_rounds": [
@@ -249,6 +258,26 @@
       "termination_reason": "completed",
       "tokens_per_sec": "",
       "baseline_ratio": ""
+    },
+    {
+      "round": 6,
+      "hypothesis": "The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal.",
+      "change_type": "edit_architecture",
+      "expected_win": "explore_unknown",
+      "family_name": "factorized_topk",
+      "family_stage": "stabilize",
+      "decision": "incubate",
+      "val_fvu": "0.3485000617802143",
+      "observed_fvu": "0.348134",
+      "k": "128",
+      "architecture": "factorized_topk",
+      "touched_files": [
+        "sparsify/factorized_topk_sparse_coder.py"
+      ],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "83008.438145",
+      "baseline_ratio": "1.000005"
     }
   ],
   "recent_insights": [
@@ -266,10 +295,13 @@
     "round 4: A factorized nonlinear encoder may lower FVU at K=128 by adding a hidden mixing stage before latent scoring, giving the encoder more expressive feature composition while keeping the fixed-K decode path unchanged. Test factorized_topk at the same K=128 anchor point as the next quality-first family. -> incubate (fvu=0.4431915953755379, observed_fvu=0.440471, k=128, health=normal, termination=completed)",
     "The original factorized_topk prototype likely suffered from an overly narrow d_in-sized hidden bottleneck rather than only a bad family prior.",
     "Round 5 stabilizes factorized_topk by replacing the narrow ReLU mixer with a wider gated hidden stage before latent projection.",
-    "round 5: factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)"
+    "round 5: factorized_topk likely failed because its hidden mixer is too narrow and lossy; widening that stage and adding a gate should preserve more information before latent selection and materially improve FVU. Re-test factorized_topk at K=128 after this single architectural stabilization edit. -> crash (fvu=None, observed_fvu=, k=128, health=normal, termination=completed)",
+    "Round 5 factorized_topk crashed due to a hidden-to-latent shape mismatch in the widened encoder path, so that result should not be treated as architectural evidence.",
+    "Round 6 fixes factorized_topk by adding an explicit hidden-to-latent projection and excluding the unused base encoder from optimization before re-running the same stabilization test.",
+    "round 6: The stabilized factorized_topk crash was caused by an implementation bug in the widened hidden-path projection, not by the architecture itself. Fix the hidden-to-latent projection and rerun the same K=128 factorized_topk stabilization pass to recover a valid quality signal. -> incubate (fvu=0.3485000617802143, observed_fvu=0.348134, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If the stabilized factorized_topk proxy improves substantially, consider promotion or a follow-up quality pass with optimizer tuning.",
-    "If the stabilized factorized_topk remains poor under normal runtime, deprioritize the current built-in families and move to a genuinely new encoder family rather than more local tuning."
+    "If the fixed factorized_topk now yields a valid proxy improvement, keep incubating the family with quality-focused tuning.",
+    "If the fixed factorized_topk still performs poorly under normal runtime, stop spending rounds on current built-in families and move to a genuinely new encoder design."
   ]
 }
