@@ -28,6 +28,11 @@ from .utils import simple_parse_args_string
 logger = logging.getLogger(__name__)
 
 
+def _is_local_artifact(path: str) -> bool:
+    """Best-effort check for paths that can be loaded safely on all ranks in parallel."""
+    return os.path.exists(path)
+
+
 @dataclass
 class RunConfig(TrainConfig):
     model: str = field(
@@ -148,14 +153,18 @@ def run():
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
 
     args = parse(RunConfig)
+    parallel_local_load = _is_local_artifact(args.model) and _is_local_artifact(
+        args.dataset
+    )
 
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):
-        if not ddp or rank == 0:
+        if not ddp or parallel_local_load or rank == 0:
             model, dataset = load_artifacts(args, rank)
         if ddp:
-            dist.barrier()
-            if rank != 0:
+            if not parallel_local_load:
+                dist.barrier()
+            if not parallel_local_load and rank != 0:
                 model, dataset = load_artifacts(args, rank)
 
             # Drop examples indivisible across processes to prevent deadlock
