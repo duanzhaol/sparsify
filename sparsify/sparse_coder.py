@@ -299,6 +299,8 @@ def _get_sae_class(architecture: str) -> type:
         return RoutedSparseCoder
     if architecture == "group_topk":
         return GroupTopKSparseCoder
+    if architecture == "factorized_topk":
+        return FactorizedTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -444,3 +446,50 @@ class GroupTopKSparseCoder(SparseCoder):
         top_offsets = winner_offsets.gather(-1, top_group_indices)
         top_indices = top_group_indices * group_size + top_offsets
         return EncoderOutput(top_group_acts, top_indices, acts)
+
+
+class FactorizedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with a low-rank ReLU mixing stage before latent scoring."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        hidden_dim = min(self.num_latents, max(d_in // 2, cfg.k * 4))
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.encoder = nn.Linear(
+            hidden_dim, self.num_latents, device=device, dtype=dtype
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.encoder.bias.data.zero_()
+
+        if decoder:
+            effective_encoder = self.encoder.weight.data @ self.factor_encoder.weight.data
+            self.W_dec = nn.Parameter(effective_encoder)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        hidden = F.relu(
+            F.linear(x, self.factor_encoder.weight, self.factor_encoder.bias)
+        )
+        acts = F.relu(F.linear(hidden, self.encoder.weight, self.encoder.bias))
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)

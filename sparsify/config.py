@@ -190,7 +190,14 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = ("topk", "jumprelu", "gated", "routed", "group_topk")
+        valid_archs = (
+            "topk",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+        )
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "

@@ -7,7 +7,8 @@
     "round 26: Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectural rather than a simple optimizer bracket. A new routed SAE family that separates top-k selection scores from decoded magnitudes, while warm-starting the support branch from the magnitude encoder, may preserve useful medium-strength features that plain gated currently suppresses too early and thus reduce FVU at K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 30: The routed family did not get a fair read because its initial support selection was too close to baseline top-k and tripped the identical-to-baseline guard. Making routed support depend on an independently initialized router with a direct, non-monotone routing bonus should produce a genuine architecture signal in proxy and reveal whether separate support selection can outperform the stalled gated search. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 32: Severe stagnation and two non-competitive K=128 architecture probes suggest the current global-ranking support mechanisms are locally exhausted. A new `group_topk` prototype that enforces one local winner per small latent group before the global top-k may reduce redundant feature selection and improve reconstruction quality or cost under the same validated training regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=invalid_env_overrides)",
-    "round 43: `topk` has now repeated the same K=128 proxy result under the stronger regime and remains far from the gated frontier, so more selector-only variants are unlikely to close the quality gap. The next informative move is to prototype a more expressive encoder family inside `sparsify/`: a factorized top-k SAE that inserts a learned intermediate bottleneck and nonlinearity before latent selection. This changes the encoder hypothesis, not the training recipe, and tests whether extra pre-selection mixing can recover substantially lower FVU without committing to full gating complexity. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=sanity_failed)"
+    "round 43: `topk` has now repeated the same K=128 proxy result under the stronger regime and remains far from the gated frontier, so more selector-only variants are unlikely to close the quality gap. The next informative move is to prototype a more expressive encoder family inside `sparsify/`: a factorized top-k SAE that inserts a learned intermediate bottleneck and nonlinearity before latent selection. This changes the encoder hypothesis, not the training recipe, and tests whether extra pre-selection mixing can recover substantially lower FVU without committing to full gating complexity. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=sanity_failed)",
+    "round 52: Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "performance_findings": [
     "round 3: suspected performance regression for jumprelu (tps=16601.650675, baseline_ratio=0.200000, termination=throughput_too_low)",
@@ -143,6 +144,13 @@
       "last_round": 49,
       "run_health": "crash",
       "termination_reason": "completed"
+    },
+    {
+      "pattern": "Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime.",
+      "count": 1,
+      "last_round": 52,
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline"
     }
   ],
   "baseline_runtime": {
@@ -625,7 +633,7 @@
     "factorized_topk": {
       "status": "archived",
       "goal": "new_family",
-      "design_hypothesis": "`factorized_topk` has now failed for a concrete architecture-registration reason rather than an ambiguous quality or runtime signal: the execution layer rejects the architecture name in `SparseCoderConfig` before training begins. The next coherent move is a narrow code-fix round that wires `factorized_topk` into the existing config/class registry and forward path so the prototype can finally receive one real K=128 proxy measurement under the strongest current regime.",
+      "design_hypothesis": "Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime.",
       "tested_configs": [
         {
           "round": 43,
@@ -666,6 +674,14 @@
           "decision": "crash",
           "val_fvu": "None",
           "run_health": "crash"
+        },
+        {
+          "round": 52,
+          "stage": "prototype",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
         }
       ],
       "known_issues": [
@@ -673,34 +689,16 @@
         "round 49: training crash for factorized_topk | ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')"
       ],
       "next_steps": [
-        "If the registered `factorized_topk` run completes and beats plain `topk`, keep the family alive and begin stabilizing its internal factorization design.",
-        "If the run completes normally but remains far behind gated, retire shallow factorization and move to a different encoder-expressivity direction.",
-        "If `factorized_topk` still fails after registration is fixed, treat the remaining issue as a deeper implementation incompatibility and shift effort elsewhere."
+        "If `factorized_topk` completes and shows promising proxy FVU, keep the family alive and stabilize its internal width/throughput tradeoff next.",
+        "If it runs but is clearly worse than gated and plain top-k, archive this shallow factorized path and move to a different encoder-expressivity family.",
+        "If quality is plausible but runtime is poor, follow with an `edit_perf_code` round focused on the factorized encoder path rather than discarding the family."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 49
+      "last_round": 52
     }
   },
   "recent_rounds": [
-    {
-      "round": 40,
-      "hypothesis": "In crash recovery mode, the safest informative move is to return to the current best working gated K=128 configuration and make the smallest remaining stabilization adjustment. Setting AUXK_ALPHA from 0.01 to 0 tests whether the new gated anchor is still slightly over-regularized while keeping architecture, K, expansion factor, optimizer, and learning rate fixed.",
-      "change_type": "param_only",
-      "expected_win": "quality",
-      "family_name": "gated",
-      "family_stage": "stabilize",
-      "decision": "crash",
-      "val_fvu": "None",
-      "observed_fvu": "",
-      "k": "128",
-      "architecture": "gated",
-      "touched_files": [],
-      "run_health": "crash",
-      "termination_reason": "first_step_timeout",
-      "tokens_per_sec": "",
-      "baseline_ratio": ""
-    },
     {
       "round": 41,
       "hypothesis": "The recent `first_step_timeout` crashes are not specific to `group_topk`: the gated AUXK=0 recovery run also advanced through the first few microbatches and then stalled at the first optimizer step. That points to a shared training-path bottleneck rather than an architecture verdict. Replacing CUDA's per-step fired-latent `cat`+advanced-index update with an incremental boolean fired mask in `sparsify/trainer.py` should remove that first-step spike and let the unresolved `group_topk` K=128 proxy run complete under the current strongest regime.",
@@ -900,14 +898,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "88762.949535",
       "baseline_ratio": "0.666216"
+    },
+    {
+      "round": 52,
+      "hypothesis": "Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime.",
+      "change_type": "edit_sae_code",
+      "expected_win": "explore_unknown",
+      "family_name": "factorized_topk",
+      "family_stage": "prototype",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "factorized_topk",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "After nine rounds without a new family, the search should shift from selector tweaks to encoder-expressivity exploration.",
-    "This round introduces a `factorized_topk` prototype that keeps the same decoding and training loop but changes the encoder to a two-stage projection, isolating architecture as the primary new variable.",
-    "round 43: `topk` has now repeated the same K=128 proxy result under the stronger regime and remains far from the gated frontier, so more selector-only variants are unlikely to close the quality gap. The next informative move is to prototype a more expressive encoder family inside `sparsify/`: a factorized top-k SAE that inserts a learned intermediate bottleneck and nonlinearity before latent selection. This changes the encoder hypothesis, not the training recipe, and tests whether extra pre-selection mixing can recover substantially lower FVU without committing to full gating complexity. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=sanity_failed)",
-    "The most recent valid alternate-family result left `topk` clearly behind gated, so this round returns to the best stable gated anchor for a one-variable sweep.",
-    "Older crashes should not be treated as architecture-quality evidence, so this round avoids reopening unstable code paths and instead seeks a clean proxy signal.",
     "Keeping architecture, K, optimizer, AUXK, and expansion fixed isolates learning rate as the only changed variable on the strongest current baseline.",
     "round 44: The cleanest next move is to stay on the strongest stable gated K=128 anchor and test a lower learning rate as a single-variable stabilization sweep. If the current `1.6e-3` regime is slightly overshooting, `2e-4` may improve reconstruction quality without changing architecture, sparsity mechanism, or expansion. -> discard (fvu=0.2658645771443844, observed_fvu=0.276852, k=128, health=normal, termination=completed)",
     "`LR=2e-4` was a healthy but worse gated K=128 run, so lower-LR exploitation does not currently look promising.",
@@ -942,12 +956,17 @@
     "Round 50 restored a clean working baseline: gated K=64 reproduced its prior proxy and full behavior under the strongest stable regime.",
     "This round stays on the same gated recipe and changes only K, moving to the adjacent lower-cost Pareto point at K=32.",
     "After repeated factorized-topk crashes, continued progress should come from stable gated runs until there is a concrete implementation plan for any new architecture attempt.",
-    "round 51: Stability has returned on the gated path, and the K=64 point was reconfirmed exactly in both proxy and full. The next least-risk informative move is to refresh the adjacent lower-cost gated Pareto point at K=32 under the same strongest regime, keeping architecture, optimizer, LR, AUXK, and expansion fixed so only K changes. -> keep (fvu=0.25877368822693825, observed_fvu=0.249833, k=32, health=normal, termination=completed)"
+    "round 51: Stability has returned on the gated path, and the K=64 point was reconfirmed exactly in both proxy and full. The next least-risk informative move is to refresh the adjacent lower-cost gated Pareto point at K=32 under the same strongest regime, keeping architecture, optimizer, LR, AUXK, and expansion fixed so only K changes. -> keep (fvu=0.25877368822693825, observed_fvu=0.249833, k=32, health=normal, termination=completed)",
+    "Round 52: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "Registered `factorized_topk` in `SparseCoderConfig` validation and SAE class dispatch so the execution layer can actually launch the family.",
+    "Implemented a minimal `factorized_topk` prototype with a low-rank ReLU mixing stage before latent scoring; hidden width is derived from existing config (`max(d_in/2, 4*K)`) so no launcher changes are required.",
+    "Local forward/backward sanity passed for `factorized_topk` at K=128, so the prior failure mode was a code-integration blocker rather than an architecture-quality result.",
+    "round 52: Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "next_hypotheses": [
-    "If K=32 matches or improves its prior proxy behavior, keep the gated low-K frontier confirmed and consider cost-focused comparisons within the stable family.",
-    "If K=32 regresses unexpectedly under the same stable recipe, treat recent results as noisy and return to the exact K=128 anchor to recheck baseline stability.",
-    "If stability remains clean after this round, resume broader architecture exploration only with an implementation plan that avoids the recent unregistered-architecture failure mode."
+    "If `factorized_topk` completes and shows promising proxy FVU, keep the family alive and stabilize its internal width/throughput tradeoff next.",
+    "If it runs but is clearly worse than gated and plain top-k, archive this shallow factorized path and move to a different encoder-expressivity family.",
+    "If quality is plausible but runtime is poor, follow with an `edit_perf_code` round focused on the factorized encoder path rather than discarding the family."
   ],
   "recent_sanity_failures": [
     {
@@ -997,6 +1016,20 @@
       "traceback_excerpt": "[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 195, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')\n[rank1]: Traceback (most recent call last):\n[rank1]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank1]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 195, in __post_init__\n[rank1]: ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
       "log_excerpt": "[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 195, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')\n[rank1]: Traceback (most recent call last):\n[rank1]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank1]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank1]:     run()\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank1]:     args = parse(RunConfig)\n[rank1]:            ^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank1]:     parsed_args = parser.parse_args(args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank1]:     args, argv = self.parse_known_args(args, namespace)\n[rank1]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank1]:     parsed_args = self._postprocessing(parsed_args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank1]:     parsed_args = self._instantiate_dataclasses(\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 195, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')\n[rank0]:[W321 21:28:10.971027831 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nE0321 21:28:12.462000 42347 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 0 (pid: 42406) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n[1]:\n  time      : 2026-03-21_21:28:12\n  host      : iZwz9abj7gsvix03ksg3uvZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 42407)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-21_21:28:12\n  host      : iZwz9abj7gsvix03ksg3uvZ\n  rank      : 0 (local_rank: 0)\n  exitcode  : 1 (pid: 42406)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================",
       "log_path": "/root/sparsify-ascend/research/history/logs/proxy_1774099713.log"
+    },
+    {
+      "round": 52,
+      "tier": "proxy",
+      "family_name": "factorized_topk",
+      "change_type": "edit_sae_code",
+      "primary_variable": "architecture",
+      "hypothesis": "Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime.",
+      "termination_reason": "identical_to_baseline",
+      "error_type": "",
+      "error_summary": "",
+      "traceback_excerpt": "",
+      "log_excerpt": "",
+      "log_path": ""
     }
   ]
 }
