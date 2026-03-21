@@ -269,6 +269,8 @@ def budget_remaining_sec(start_time: float, budget_hours: float) -> float:
 
 def check_agent_backend_reachable(agent_proxy: str | None) -> None:
     import shutil
+    import socket
+    import urllib.parse
 
     if not shutil.which("codex"):
         raise RuntimeError(
@@ -276,18 +278,17 @@ def check_agent_backend_reachable(agent_proxy: str | None) -> None:
         )
 
     if agent_proxy:
-        import urllib.request
-        import urllib.error
-
         try:
-            req = urllib.request.Request(agent_proxy)
-            req.method = "HEAD"
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({"http": agent_proxy, "https": agent_proxy})
-            )
-            opener.open(req, timeout=5)
-        except urllib.error.URLError:
-            pass
+            parsed = urllib.parse.urlparse(agent_proxy)
+            host = parsed.hostname
+            port = parsed.port
+            if not host or not port:
+                raise RuntimeError(
+                    f"Agent proxy {agent_proxy} is not a valid proxy URL. "
+                    "Expected something like http://127.0.0.1:23234."
+                )
+            with socket.create_connection((host, port), timeout=5):
+                pass
         except (ConnectionRefusedError, OSError) as exc:
             raise RuntimeError(
                 f"Agent proxy {agent_proxy} is not reachable: {exc}. "

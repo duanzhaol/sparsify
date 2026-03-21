@@ -106,7 +106,7 @@ CONTROLLER_PATH = RESEARCH_DIR / "controller.py"
 PROGRAM_PATH = RESEARCH_DIR / "program.md"
 SCHEMA_PATH = RESEARCH_DIR / "agent_action.schema.json"
 
-DEFAULT_AGENT_PROXY = "http://127.0.0.1:23234"
+DEFAULT_AGENT_PROXY: str | None = None
 DEFAULT_MAX_SESSION_ROUNDS = 8
 DEFAULT_MAX_SESSION_HOURS = 4.0
 DEFAULT_AGENT_MAX_RETRIES = 3
@@ -272,9 +272,13 @@ def run_agent_round(
     if model:
         cmd.extend(["--model", model])
     env = os.environ.copy()
+    proxy_env_keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
+    if agent_proxy is not None:
+        for key in proxy_env_keys:
+            env.pop(key, None)
     if agent_proxy:
-        env["http_proxy"] = agent_proxy
-        env["https_proxy"] = agent_proxy
+        for key in proxy_env_keys:
+            env[key] = agent_proxy
     try:
         result = subprocess.run(cmd, input=prompt, text=True, capture_output=True, env=env, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
@@ -740,7 +744,8 @@ def main() -> int:
     print("Starting SAE agent loop")
     print(f"round_budget: {args.rounds}")
     print(f"time_budget_hours: {args.budget_hours}")
-    print(f"agent_proxy: {args.agent_proxy}")
+    effective_agent_proxy = "inherit-env" if args.agent_proxy is None else (args.agent_proxy or "disabled")
+    print(f"agent_proxy: {effective_agent_proxy}")
     print(f"session_mode: {args.session_mode}")
     print(f"auto_commit: {auto_commit}")
     print(

@@ -407,13 +407,23 @@ python -m research.controller init
 
 如果你后续想在运行中间插入一条外部提示，也通过 `controller.py` 完成，不需要停机改代码。
 
-### 第三步：设置代理
+### 第三步：按需设置代理
 
-当前 `codex exec` 需要经过你的本地代理：
+`codex exec` 是否需要 HTTP 代理，取决于你的 Codex provider 和本机网络环境。
+
+- 如果你在 shell 里直接运行 `codex exec` 已经正常，那么 `agent_loop.py` 默认也应直接复用当前环境，不需要额外设置代理。
+- 如果你的环境必须走本地代理，再显式传入或导出代理，例如：
 
 ```bash
 export http_proxy=http://127.0.0.1:23234
 export https_proxy=http://127.0.0.1:23234
+python research/agent_loop.py --agent-proxy http://127.0.0.1:23234
+```
+
+- 如果你之前配置过 `--agent-proxy`，但现在想强制禁用代理，可传：
+
+```bash
+python research/agent_loop.py --agent-proxy ''
 ```
 
 ### 第三点五步：确认 git 工作区干净
