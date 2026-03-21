@@ -125,12 +125,12 @@
       "updated_at": 1774131609
     },
     "proxy|two_stage_residual|layers.[3].self_attn.o_proj": {
-      "tokens_per_sec": 110860.4803471805,
-      "round": 7,
+      "tokens_per_sec": 111036.54934327074,
+      "round": 14,
       "tier": "proxy",
       "architecture": "two_stage_residual",
       "k": 128,
-      "updated_at": 1774132477
+      "updated_at": 1774137282
     },
     "full|two_stage_residual|layers.[3].self_attn.o_proj": {
       "tokens_per_sec": 83227.56110940345,
@@ -418,7 +418,7 @@
     "two_stage_residual": {
       "status": "promoted",
       "goal": "new_family",
-      "design_hypothesis": "`two_stage_residual` remains the best K=128 full architecture, but both the K=64 drop and the EF=32 regression suggest the current 50/50 split of the total K across coarse and residual stages is likely misallocated rather than the family being exhausted. A family-specific stabilization pass that shifts more of the fixed K=128 budget into the first stage should test whether the architecture needs a stronger coarse pass before residual refinement to preserve its K=128 advantage.",
+      "design_hypothesis": "Stagnation and the runtime policy both point to exploitation on the current best family rather than another architecture change. The strongest clean next move is to keep the winning `two_stage_residual` K=128 / EF=16 / signum / aux-free recipe fixed and lower only the learning rate to `4e-4`, testing whether the current plateau is partly an optimization-step-size issue after the family-specific stage allocation stabilized.",
       "tested_configs": [
         {
           "round": 7,
@@ -451,20 +451,28 @@
           "decision": "keep",
           "val_fvu": "0.13607123959809542",
           "run_health": "normal"
+        },
+        {
+          "round": 14,
+          "stage": "stabilize",
+          "k": "128",
+          "decision": "discard",
+          "val_fvu": "0.19914506003260612",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If a more front-loaded stage allocation improves K=128 proxy FVU, promote it to full and continue stabilizing this family around the better split.",
-        "If the split change is neutral or worse, treat the current prototype as likely overfitting to a narrow configuration and pivot to a different non-gated family rather than continuing blind internal tweaks.",
-        "If quality improves but runtime regresses materially, follow with a targeted performance-oriented code pass."
+        "If `LR=4e-4` improves proxy FVU, promote and then continue LR stabilization before changing another parameter.",
+        "If `LR=4e-4` regresses, test the remaining prescribed LR extremes (`2e-4` or `3.2e-3`) one at a time before revisiting aux or EF.",
+        "If LR sweep stays flat across the prescribed points, move to the next one-variable exploitation axis on this family, likely `AUXK_ALPHA=0.01`."
       ],
       "best_proxy_fvu": 0.13607123959809542,
       "best_full_fvu": 0.13607123959809542,
-      "last_round": 10
+      "last_round": 14
     },
     "multi_branch_gated": {
-      "status": "incubating",
+      "status": "archived",
       "goal": "new_family",
       "design_hypothesis": "`multi_branch_gated` showed a competitive prototype signal at K=128, but the strong regression at EF=32 suggests the family is not generically width-limited and instead needs a family-specific routing adjustment. Reducing the number of active branches from the current default to a simpler two-branch mixture should test whether the prototype is over-fragmenting capacity across too many competing branches and can recover better K=128 quality under the same training recipe.",
       "tested_configs": [
@@ -505,24 +513,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 2,
-      "hypothesis": "The higher-LR gated probe regressed, so the next clean exploitation move is to keep the stable K=128 gated signum EF=16 anchor fixed and reintroduce a small auxiliary balancing term at AUXK_ALPHA=0.01. A modest auxk penalty may improve feature usage and reconstruction quality without the optimization instability seen from the aggressive LR increase.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "gated",
-      "family_stage": "stabilize",
-      "decision": "discard",
-      "val_fvu": "0.17990098893642426",
-      "observed_fvu": "0.188279",
-      "k": "128",
-      "architecture": "gated",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "133243.691741",
-      "baseline_ratio": "0.999993"
-    },
     {
       "round": 3,
       "hypothesis": "Five rounds of gated-local tuning have failed to move the frontier, so the current search direction is likely locally exhausted. The least-disruptive fundamentally different probe is to switch the single primary variable back to architecture and run `jumprelu` at K=128 under the strongest shared signum recipe to test whether a different sparse activation mechanism can reopen quality gains without introducing new code risk.",
@@ -728,12 +718,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "53253.227816",
       "baseline_ratio": "0.799946"
+    },
+    {
+      "round": 14,
+      "hypothesis": "Stagnation and the runtime policy both point to exploitation on the current best family rather than another architecture change. The strongest clean next move is to keep the winning `two_stage_residual` K=128 / EF=16 / signum / aux-free recipe fixed and lower only the learning rate to `4e-4`, testing whether the current plateau is partly an optimization-step-size issue after the family-specific stage allocation stabilized.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "two_stage_residual",
+      "family_stage": "stabilize",
+      "decision": "discard",
+      "val_fvu": "0.19914506003260612",
+      "observed_fvu": "0.208535",
+      "k": "128",
+      "architecture": "two_stage_residual",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "111036.549343",
+      "baseline_ratio": "1.001588"
     }
   ],
   "recent_insights": [
-    "Round 5: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
-    "Adjusted `lowrank_residual` trunk sizing to `min(d_in, max(2*k, d_in//4))` so the dense trunk is not implicitly weakened by the shared EF=16 recipe.",
-    "Local smoke test after the edit succeeded for `lowrank_residual` forward/backward, with trunk rank 256 at `d_in=1024, k=128`.",
     "This round isolates a family-specific stabilization hypothesis for `lowrank_residual` after its initial proxy beat `jumprelu` but remained well behind gated.",
     "round 5: `lowrank_residual` produced the strongest non-gated proxy among recent architecture pivots, so the next informative move is a narrow family-specific stabilization pass rather than abandoning it after one prototype result. The current trunk rank formula likely underpowers the dense trunk under the strong EF=16 recipe by collapsing to a near-minimal rank, so increasing the default trunk capacity should remove more shared dense structure before sparse residual coding and improve FVU at fixed K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "Round 6: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
@@ -770,12 +775,15 @@
     "Round 13: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
     "`multi_branch_gated` remained competitive at K=128 prototype quality, but increasing `EXPANSION_FACTOR` to 32 regressed badly, indicating the family likely needs a routing/branch-allocation adjustment rather than more generic width.",
     "This round stabilizes `multi_branch_gated` by simplifying the default branch count from three to two at the K=128 anchor.",
-    "round 13: `multi_branch_gated` showed a competitive prototype signal at K=128, but the strong regression at EF=32 suggests the family is not generically width-limited and instead needs a family-specific routing adjustment. Reducing the number of active branches from the current default to a simpler two-branch mixture should test whether the prototype is over-fragmenting capacity across too many competing branches and can recover better K=128 quality under the same training recipe. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)"
+    "round 13: `multi_branch_gated` showed a competitive prototype signal at K=128, but the strong regression at EF=32 suggests the family is not generically width-limited and instead needs a family-specific routing adjustment. Reducing the number of active branches from the current default to a simpler two-branch mixture should test whether the prototype is over-fragmenting capacity across too many competing branches and can recover better K=128 quality under the same training recipe. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)",
+    "Round proposal stays in exploitation mode on `two_stage_residual` and changes only LR.",
+    "Use `LR=4e-4` as the next untested midpoint-down step below the current best `1.6e-3` while keeping the aux-free EF=16 K=128 anchor fixed.",
+    "round 14: Stagnation and the runtime policy both point to exploitation on the current best family rather than another architecture change. The strongest clean next move is to keep the winning `two_stage_residual` K=128 / EF=16 / signum / aux-free recipe fixed and lower only the learning rate to `4e-4`, testing whether the current plateau is partly an optimization-step-size issue after the family-specific stage allocation stabilized. -> discard (fvu=0.19914506003260612, observed_fvu=0.208535, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If the simpler two-branch `multi_branch_gated` improves materially, continue stabilizing the family and consider promotion to full.",
-    "If the branch-count simplification is flat or worse, test a different family-specific routing-weight or branch-allocation change before abandoning the family.",
-    "If quality improves but runtime regresses materially, follow with a targeted performance-focused code pass."
+    "If `LR=4e-4` improves proxy FVU, promote and then continue LR stabilization before changing another parameter.",
+    "If `LR=4e-4` regresses, test the remaining prescribed LR extremes (`2e-4` or `3.2e-3`) one at a time before revisiting aux or EF.",
+    "If LR sweep stays flat across the prescribed points, move to the next one-variable exploitation axis on this family, likely `AUXK_ALPHA=0.01`."
   ],
   "recent_sanity_failures": [
     {
