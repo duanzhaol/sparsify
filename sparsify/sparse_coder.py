@@ -307,6 +307,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankResidualSparseCoder
     if architecture == "two_stage_residual":
         return TwoStageResidualSparseCoder
+    if architecture == "multi_branch_gated":
+        return MultiBranchGatedSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -739,3 +741,79 @@ class TwoStageResidualSparseCoder(SparseCoder):
             fvu,
             auxk_loss,
         )
+
+
+class MultiBranchGatedSparseCoder(SparseCoder):
+    """Mix several gated encoder branches before the final top-k selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        self.num_branches = 3
+
+        self.branch_encoders = nn.ModuleList(
+            [
+                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+                for _ in range(self.num_branches)
+            ]
+        )
+        self.branch_gates = nn.ModuleList(
+            [
+                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+                for _ in range(self.num_branches)
+            ]
+        )
+        self.branch_mix_logits = nn.Linear(
+            d_in, self.num_branches, device=device, dtype=dtype
+        )
+
+        for encoder in self.branch_encoders:
+            encoder.bias.data.zero_()
+        for gate in self.branch_gates:
+            gate.weight.data.zero_()
+            gate.bias.data.fill_(cfg.gated_init_logit)
+
+        self.branch_mix_logits.weight.data.zero_()
+        self.branch_mix_logits.bias.data.zero_()
+
+        if decoder:
+            decoder_init = torch.stack(
+                [branch.weight.data for branch in self.branch_encoders], dim=0
+            ).mean(dim=0)
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        branch_weights = torch.softmax(self.branch_mix_logits(x), dim=-1)
+
+        branch_acts = []
+        for branch_idx, (encoder, gate_encoder) in enumerate(
+            zip(self.branch_encoders, self.branch_gates)
+        ):
+            pre_acts = F.linear(x, encoder.weight, encoder.bias)
+            positive = F.relu(pre_acts)
+            gate_logits = gate_encoder(x) / self.cfg.gated_temperature
+            gate = torch.sigmoid(gate_logits)
+            acts = positive * gate
+            branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+            branch_acts.append(acts * branch_weight)
+
+        acts = torch.stack(branch_acts, dim=0).sum(dim=0)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
