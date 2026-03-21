@@ -197,6 +197,7 @@ class TrainConfig(Serializable):
             "routed",
             "group_topk",
             "factorized_topk",
+            "lowrank_residual",
         )
         if self.sae.architecture not in valid_archs:
             raise ValueError(
