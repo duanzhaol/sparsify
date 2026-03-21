@@ -22,6 +22,7 @@ STATUS_PATH = HISTORY_DIR / "current_status.json"
 HINTS_PATH = HISTORY_DIR / "operator_hints.json"
 TIMELINE_PATH = HISTORY_DIR / "timeline.jsonl"
 SESSION_BRIEF_PATH = HISTORY_DIR / "session_brief.json"
+OPERATOR_GUIDE_PATH = RESEARCH_DIR / "operator_guide.md"
 
 BASE_ENV_DEFAULTS = {
     "ARCHITECTURE": "topk",
@@ -49,6 +50,21 @@ def load_json(path: Path, default: Any) -> Any:
 
 def save_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def load_operator_guide_excerpt(max_chars: int = 6000) -> str:
+    """Load a compact operator guidance excerpt for prompt injection.
+
+    The file is optional. When present, trim it to a bounded size so one
+    large operator note cannot dominate the prompt context window.
+    """
+    if not OPERATOR_GUIDE_PATH.exists():
+        return ""
+    text = OPERATOR_GUIDE_PATH.read_text().strip()
+    if len(text) <= max_chars:
+        return text
+    head = text[: max_chars - 64].rstrip()
+    return head + "\n\n[truncated: operator guide excerpt clipped for prompt budget]"
 
 
 def load_state() -> dict[str, Any]:

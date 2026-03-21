@@ -8,6 +8,7 @@ from typing import Any
 from research.state_io import (
     FRONTIER_PATH,
     load_json,
+    load_operator_guide_excerpt,
     load_operator_hints,
     split_hints,
     summarize_results,
@@ -24,6 +25,7 @@ def build_prompt(
 ) -> str:
     frontier = load_json(FRONTIER_PATH, state.get("frontier", {}))
     operator_hints, _ = split_hints(load_operator_hints())
+    operator_guide_excerpt = load_operator_guide_excerpt()
 
     # Trim architecture_families to avoid unbounded prompt growth:
     # keep only non-discarded/non-archived families, and cap tested_configs per family
@@ -66,6 +68,7 @@ def build_prompt(
         "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-6:],
         "baseline_runtime": baseline_runtime,
         "operator_hints": operator_hints[:8],
+        "operator_guide_excerpt": operator_guide_excerpt,
         "next_hypotheses": memory.get("next_hypotheses", [])[:8],
         "recent_results": summarize_results(results[-8:]),
         "recent_round_summaries": recent_round_summaries(),
@@ -91,6 +94,7 @@ Execution layer is fixed:
 Important rules:
 - Read research/program.md before deciding.
 - Read and respect any operator_hints in the structured context.
+- Read and respect operator_guide_excerpt in the structured context when present.
 - You may edit ONLY files under sparsify/.
 - Do not edit research/history/*, research/*.py, or scripts/autoresearch_test.sh.
 - For parameter-only experiments, use env_overrides instead of editing launch code.
@@ -127,6 +131,7 @@ def build_resume_prompt(
     policy_context: str = "",
 ) -> str:
     operator_hints, _ = split_hints(load_operator_hints())
+    operator_guide_excerpt = load_operator_guide_excerpt()
     payload = {
         "round": round_id,
         "current_focus": brief.get("current_focus") or memory.get("current_focus"),
@@ -138,6 +143,7 @@ def build_resume_prompt(
         "recent_performance_findings": brief.get("recent_performance_findings", memory.get("performance_findings", [])[-8:]),
         "recent_sanity_failures": brief.get("recent_sanity_failures", memory.get("recent_sanity_failures", [])[-6:]),
         "pending_hints": brief.get("pending_hints", operator_hints[:8]),
+        "operator_guide_excerpt": operator_guide_excerpt,
         "next_move_guidance": brief.get("next_move_guidance", memory.get("next_hypotheses", [])[:8]),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
     }
