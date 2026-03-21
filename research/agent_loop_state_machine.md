@@ -47,7 +47,7 @@
   -> invoke agent
 
 [Agent Invoke]
-  -> agent failure after retries -> [Round End: crash(agent_invocation)]
+  -> agent failure after retries -> [Special End: agent_invocation_failure]
   -> action=stop -> coerce to run
   -> action=full and direct full not allowed -> coerce to proxy
   -> action received -> [Round Execute]
@@ -64,6 +64,7 @@
   -> optional behavioral diff test
   -> proxy budget selection
   -> remaining time check
+  -> if remaining budget cannot support even proxy -> [Loop Exit: stop without round finalize]
   -> optional sanity
   -> training
 
@@ -75,16 +76,16 @@
 [training]
   -> result=crash and repairable and attempts left -> [repair action]
   -> result=promote on proxy -> [full training]
-  -> result=ok/discard/incubate/keep -> [Round End: normal]
+  -> result decision in {discard, incubate, keep, archive, crash} -> [Round End]
 
 [repair action]
-  -> send failure context back into same session
+  -> send failure context back into current session when available
   -> constrain experiment target/family/env_overrides
   -> get new code-fix action
   -> loop back to [Round-local Execution Loop]
 
 [full training]
-  -> keep/crash/etc -> [Round End: normal or crash]
+  -> keep/discard/archive/crash/etc -> [Round End]
 
 [Round End]
   -> write round summary
@@ -146,7 +147,8 @@
 其中：
 
 - stagnation 有一部分只影响 prompt guidance
-- crash recovery 会直接影响 runtime 行为，例如强制 `param_only`
+- crash recovery 的硬约束只有禁止 code edit、强制 `param_only`
+- “回到当前最强 working family”是 prompt guidance，不是 runtime 强制重写
 
 ---
 
@@ -179,8 +181,9 @@ fresh-each-round
 
 潜在风险：
 
-- repair loop 当前也复用同一个 session，这是合理的
-- 但 repair 过程中如果 session 本身坏掉，repair 目前没有主 agent invoke 那么完整的 retry/rebuild 包装
+- repair loop 会优先复用当前 round 的 `session_id`
+- 但如果当前没有 session id，repair 也可能直接新开一次 agent invocation
+- repair 过程中如果 session 本身坏掉，repair 目前没有主 agent invoke 那么完整的 retry/rebuild 包装
 
 ---
 
@@ -233,10 +236,11 @@ while True:
   6. behavioral diff test
   7. proxy budget 选择
   8. budget 剩余时间检查
-  9. sanity
-  10. training
-  11. crash 可修则进入 repair
-  12. 否则退出本轮局部循环
+  9. 如果预算连 proxy 都不够，直接退出整个 loop
+  10. sanity
+  11. training
+  12. crash 可修则进入 repair
+  13. 否则退出本轮局部循环
 ```
 
 这与旧逻辑相比的主要升级是：
@@ -279,7 +283,7 @@ param_only
 则系统更倾向：
 
 - 继续 `param_only`
-- 选择已知 working family
+- 在 prompt 中建议选择已知 working family
 - 避免 code edit
 
 ---
@@ -347,7 +351,7 @@ edit_sae_code
 ```text
 repairable failure
   -> build repair prompt
-  -> resume same session
+  -> reuse current session if available, otherwise run without resume
   -> get repair action
   -> coerce repair action back to original experiment target
   -> re-enter round-local execution loop
@@ -472,6 +476,11 @@ sanity pass
 - `run_health`
 - `termination_reason`
 
+这里要特别区分：
+
+- `status` 常见是 `ok` / `crash`
+- `decision` 常见是 `promote` / `keep` / `incubate` / `discard` / `archive` / `crash`
+
 ### 10.2 一个重要事实
 
 `termination_reason` 和 `decision` 不是一回事。
@@ -531,6 +540,7 @@ proxy decision = promote
 
 - proxy pass 只是 full 的前提，不是 full 稳定性的保证
 - 如果 full crash，当前会直接作为 full crash 结束该轮
+- 如果 full 得到 `discard` 或 `archive`，同样直接以 full 结果结束该轮
 
 ---
 
@@ -557,6 +567,13 @@ _abort_round
   -> update agent state
 ```
 
+但要注意它和正常 finalize 不完全一样：
+
+- 不会刷新 session brief
+- 不会应用 hint 更新
+- 不会发出 `experiment_commit_prepared` 事件
+- 内部传给 `_close_round()` 的 `effective_session_mode` 固定为 `fresh-each-round`
+
 ### 12.3 信息保留特性
 
 当前：
@@ -567,6 +584,11 @@ _abort_round
 
 这意味着某些 repair 子过程只在 timeline 中可见，不会完全展开到 round summary。
 
+另有一个特殊出口：
+
+- `agent invocation failed after retries` 不走通用 `_close_round()`
+- `budget even for proxy is insufficient` 也不会生成本轮 round summary
+
 ---
 
 ## 13. 树状图：按大类决策
@@ -574,14 +596,16 @@ _abort_round
 ```text
 Round
 ├─ Agent invocation failed
-│  └─ round crash
+│  └─ special failure handling
 ├─ Agent returns stop
 │  └─ coerce to run
 ├─ Action blocked by crash recovery
 │  └─ code_edit -> param_only
+├─ Budget too low before runnable training
+│  └─ break main loop without round finalize
 ├─ Param-only path
-│  ├─ proxy discard/incubate
-│  ├─ proxy promote -> full keep/crash
+│  ├─ proxy discard/incubate/archive
+│  ├─ proxy promote -> full keep/discard/archive/crash
 │  └─ proxy/full crash
 └─ Code-edit path
    ├─ invalid env_overrides
@@ -613,7 +637,7 @@ Round
 系统倾向于：
 
 - 强制 `param_only`
-- 回到 strongest known working family
+- 在 policy guidance 里建议回到 strongest known working family
 - 暂时阻止 code edit
 
 ### 14.2 如果上下文是“连续 no-improve”
@@ -678,7 +702,17 @@ repair action 可能没有改任何代码，但系统仍会继续下一次 repai
 
 这是一个明确的设计选择，不一定错误，但要知道它存在。
 
-### 15.5 Repair attempt 不影响 crash recovery 计数
+### 15.5 预算不足时的“无 summary”退出
+
+如果 round 已经开始，但剩余时间连 proxy 的一半 timeout 都不满足：
+
+- 系统会直接 `break` 主循环
+- 不调用 `_abort_round()`
+- 不写该轮 round summary
+
+这不是常规 round end，而是一个更靠近调度层的退出口。
+
+### 15.6 Repair attempt 不影响 crash recovery 计数
 
 当前 crash recovery 是按“轮”算，不按 repair attempt 算。
 
@@ -687,7 +721,7 @@ repair action 可能没有改任何代码，但系统仍会继续下一次 repai
 - 单轮内部连炸 5 次，也不会立刻触发全局 crash recovery
 - 只有最终 round result=crash 才会计入 `consecutive_crashes`
 
-### 15.6 `edit_perf_code` 可能绕过 behavioral diff
+### 15.7 `edit_perf_code` 可能绕过 behavioral diff
 
 `behavioral_diff_test` 只对 `edit_sae_code` 启用。
 
@@ -752,4 +786,3 @@ repair action 可能没有改任何代码，但系统仍会继续下一次 repai
 - repair 空转阻断
 - 同根因重复失败的硬约束
 - repair 子过程的可观测性
-
