@@ -291,6 +291,8 @@ def _get_sae_class(architecture: str) -> type:
     """Return the SparseCoder subclass for the given architecture string."""
     if architecture == "topk":
         return SparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
     if architecture == "jumprelu":
         return JumpReLUSparseCoder
     if architecture == "gated":
@@ -308,6 +310,42 @@ def _get_sae_class(architecture: str) -> type:
 
 # Allow for alternate naming conventions
 Sae = SparseCoder
+
+
+class WhitenedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with a learned input preconditioner before sparse selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.preconditioner = nn.Linear(
+            d_in, d_in, bias=False, device=device, dtype=dtype
+        )
+
+        # Start near identity but with a small fixed mixing term so the
+        # architecture is observably distinct from plain top-k at step 0.
+        self.preconditioner.weight.data.zero_()
+        self.preconditioner.weight.data += torch.eye(
+            d_in, device=device, dtype=dtype
+        )
+        if d_in > 1:
+            self.preconditioner.weight.data += 0.01 * torch.roll(
+                torch.eye(d_in, device=device, dtype=dtype), shifts=1, dims=1
+            )
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        whitened = self.preconditioner(x)
+        return fused_encoder(
+            whitened, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
 
 
 class JumpReLUSparseCoder(SparseCoder):
