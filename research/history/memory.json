@@ -329,7 +329,7 @@
     "gated": {
       "status": "promoted",
       "goal": "new_family",
-      "design_hypothesis": "The lower-LR gated sweep was a clean regression, so the next narrow exploitation move is to test the remaining untried capacity point on the best stable family. Reducing gated `EXPANSION_FACTOR` from 16 to 4 at K=128 may reveal a non-dominated quality-cost tradeoff and will close the last obvious one-parameter sweep on the current anchor before returning to broader architecture work.",
+      "design_hypothesis": "Crash recovery mode requires returning to the best known working gated path with only a minor parameter adjustment. The safest informative move is to reuse the strongest stable recipe and probe the adjacent lower-K point `K=64`, which is already a validated Pareto setting and avoids the blocked architecture-code path entirely.",
       "tested_configs": [
         {
           "round": 7,
@@ -458,17 +458,25 @@
           "decision": "discard",
           "val_fvu": "0.2916756868362427",
           "run_health": "normal"
+        },
+        {
+          "round": 50,
+          "stage": "stabilize",
+          "k": "64",
+          "decision": "keep",
+          "val_fvu": "0.2061613965779543",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `EXPANSION_FACTOR=4` is unexpectedly competitive, keep it alive as a quality-cost tradeoff candidate and consider checking runtime or memory benefits before discarding it.",
-        "If `EXPANSION_FACTOR=4` is clearly worse, conclude that the obvious gated one-parameter sweep is exhausted and resume architecture exploration or fix the blocked `factorized_topk` sanity issue.",
-        "If `EXPANSION_FACTOR=4` materially improves proxy FVU, promote it to full and treat lower-width gated training as the new mainline stabilization candidate."
+        "If the K=64 proxy run is healthy and matches its prior behavior, keep using the gated family for recovery until crashes stop.",
+        "If K=64 regresses unexpectedly under the same stable regime, return to the exact K=128 anchor on the next round to separate runtime noise from configuration effects.",
+        "If stability is restored after this round, resume broader exploration only with a clear implementation plan that avoids the recent factorized-topk registration failure mode."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": 0.15980935469269753,
-      "last_round": 45
+      "last_round": 50
     },
     "topk": {
       "status": "archived",
@@ -668,24 +676,6 @@
   },
   "recent_rounds": [
     {
-      "round": 38,
-      "hypothesis": "The last round showed the gated low-K capacity cut was a real quality regression, and the search has now gone several rounds without advancing an incubating alternative family. The least-bad informative move is to get a real proxy read on the already-implemented `group_topk` family at K=128 under the strongest current training regime, removing the unsupported `GROUP_TOPK_SIZE` override that caused the earlier policy crashes. This will finally test whether local winner-take-all competition can beat other non-gated support selectors on anchor-quality rather than being discarded for an execution-layer mismatch.",
-      "change_type": "param_only",
-      "expected_win": "explore_unknown",
-      "family_name": "group_topk",
-      "family_stage": "prototype",
-      "decision": "crash",
-      "val_fvu": "None",
-      "observed_fvu": "",
-      "k": "128",
-      "architecture": "group_topk",
-      "touched_files": [],
-      "run_health": "crash",
-      "termination_reason": "first_step_timeout",
-      "tokens_per_sec": "",
-      "baseline_ratio": ""
-    },
-    {
       "round": 39,
       "hypothesis": "`group_topk` still has no valid quality signal because its first actual proxy run timed out at the first step, which is stronger evidence of an implementation bottleneck than of a bad architecture. The next coherent move is a performance-focused code pass that makes the `group_topk` encoder path more execution-friendly so the family can receive one clean proxy measurement at K=128 under the strongest current regime.",
       "change_type": "edit_perf_code",
@@ -884,13 +874,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "",
       "baseline_ratio": ""
+    },
+    {
+      "round": 50,
+      "hypothesis": "Crash recovery mode requires returning to the best known working gated path with only a minor parameter adjustment. The safest informative move is to reuse the strongest stable recipe and probe the adjacent lower-K point `K=64`, which is already a validated Pareto setting and avoids the blocked architecture-code path entirely.",
+      "change_type": "param_only",
+      "expected_win": "explore_unknown",
+      "family_name": "gated",
+      "family_stage": "stabilize",
+      "decision": "keep",
+      "val_fvu": "0.2061613965779543",
+      "observed_fvu": "0.200472",
+      "k": "64",
+      "architecture": "gated",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "120987.785688",
+      "baseline_ratio": "0.908082"
     }
   ],
   "recent_insights": [
-    "This round patches `sparsify/trainer.py` so CUDA tracks fired latents with an incremental per-step boolean mask instead of building a large concatenated index tensor at step end, while preserving the deferred NPU path.",
-    "round 41: The recent `first_step_timeout` crashes are not specific to `group_topk`: the gated AUXK=0 recovery run also advanced through the first few microbatches and then stalled at the first optimizer step. That points to a shared training-path bottleneck rather than an architecture verdict. Replacing CUDA's per-step fired-latent `cat`+advanced-index update with an incremental boolean fired mask in `sparsify/trainer.py` should remove that first-step spike and let the unresolved `group_topk` K=128 proxy run complete under the current strongest regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=sanity_failed)",
-    "The search has now gone eight rounds without advancing a new family, so architecture exploration should take priority over more local gated tuning.",
-    "`topk` remains incubating with older K=128 proxy evidence taken under weaker regimes, so it deserves one clean comparison against the current strongest training setup before being retired or promoted.",
     "This round keeps the regime fixed to the current gated anchor settings and changes only architecture, giving a direct read on whether simpler global top-k selection benefits from the newer training recipe.",
     "round 42: After multiple rounds dominated by gated-local tuning and unresolved crash recovery, the most informative next move is to advance an already-incubating alternate family rather than spend another round near the current gated anchor. A clean `topk` K=128 proxy run under the current strongest gated training regime tests whether simpler support selection benefits more from the improved optimizer and regularization settings than it did in earlier comparisons. -> incubate (fvu=0.26476579532027245, observed_fvu=0.263896, k=128, health=normal, termination=completed)",
     "Round 43: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
@@ -926,12 +930,16 @@
     "Round 48 produced a concrete execution-layer error for `factorized_topk`: the architecture name is not registered in `SparseCoderConfig`, so the family still has no usable quality signal.",
     "This is stronger evidence of a missing code integration step than of a bad architecture, so the family should not be retired on quality grounds yet.",
     "This round keeps the original `factorized_topk` K=128 proxy target fixed and changes only the code needed to make the architecture selectable and runnable by the existing launcher.",
-    "round 49: `factorized_topk` has now failed for a concrete architecture-registration reason rather than an ambiguous quality or runtime signal: the execution layer rejects the architecture name in `SparseCoderConfig` before training begins. The next coherent move is a narrow code-fix round that wires `factorized_topk` into the existing config/class registry and forward path so the prototype can finally receive one real K=128 proxy measurement under the strongest current regime. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)"
+    "round 49: `factorized_topk` has now failed for a concrete architecture-registration reason rather than an ambiguous quality or runtime signal: the execution layer rejects the architecture name in `SparseCoderConfig` before training begins. The next coherent move is a narrow code-fix round that wires `factorized_topk` into the existing config/class registry and forward path so the prototype can finally receive one real K=128 proxy measurement under the strongest current regime. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
+    "Crash recovery mode requires a param-only round on the current best working configuration, so this round returns to the stable gated recipe.",
+    "The `factorized_topk` path has now crashed repeatedly for implementation-layer reasons, so it should not be touched again until session stability is re-established.",
+    "Using gated K=64 preserves the strongest known architecture and training regime while testing a previously healthy lower-cost Pareto point.",
+    "round 50: Crash recovery mode requires returning to the best known working gated path with only a minor parameter adjustment. The safest informative move is to reuse the strongest stable recipe and probe the adjacent lower-K point `K=64`, which is already a validated Pareto setting and avoids the blocked architecture-code path entirely. -> keep (fvu=0.2061613965779543, observed_fvu=0.200472, k=64, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If the registered `factorized_topk` run completes and beats plain `topk`, keep the family alive and begin stabilizing its internal factorization design.",
-    "If the run completes normally but remains far behind gated, retire shallow factorization and move to a different encoder-expressivity direction.",
-    "If `factorized_topk` still fails after registration is fixed, treat the remaining issue as a deeper implementation incompatibility and shift effort elsewhere."
+    "If the K=64 proxy run is healthy and matches its prior behavior, keep using the gated family for recovery until crashes stop.",
+    "If K=64 regresses unexpectedly under the same stable regime, return to the exact K=128 anchor on the next round to separate runtime noise from configuration effects.",
+    "If stability is restored after this round, resume broader exploration only with a clear implementation plan that avoids the recent factorized-topk registration failure mode."
   ],
   "recent_sanity_failures": [
     {
