@@ -36,6 +36,9 @@ class SparseCoderConfig(Serializable):
     gated_init_logit: float = 2.0
     """Initial bias logit for gated encoders."""
 
+    group_topk_size: int = 4
+    """Number of latents per local competition group for group-topk encoders."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -187,7 +190,7 @@ class TrainConfig(Serializable):
                 )
 
         # Architecture validation
-        valid_archs = ("topk", "jumprelu", "gated", "routed")
+        valid_archs = ("topk", "jumprelu", "gated", "routed", "group_topk")
         if self.sae.architecture not in valid_archs:
             raise ValueError(
                 f"Unknown architecture: {self.sae.architecture!r}. "
@@ -208,6 +211,11 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "gated_temperature must be positive, "
                 f"got {self.sae.gated_temperature}"
+            )
+        if self.sae.group_topk_size <= 0:
+            raise ValueError(
+                "group_topk_size must be positive, "
+                f"got {self.sae.group_topk_size}"
             )
 
         # Optimizer validation

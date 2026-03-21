@@ -297,6 +297,8 @@ def _get_sae_class(architecture: str) -> type:
         return GatedSparseCoder
     if architecture == "routed":
         return RoutedSparseCoder
+    if architecture == "group_topk":
+        return GroupTopKSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -409,3 +411,36 @@ class RoutedSparseCoder(SparseCoder):
         _, top_indices = torch.topk(scores, self.cfg.k, dim=-1, sorted=False)
         top_acts = acts.gather(-1, top_indices)
         return EncoderOutput(top_acts, top_indices, acts)
+
+
+class GroupTopKSparseCoder(SparseCoder):
+    """Select one winner per local group before the global top-k competition."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+        group_size = self.cfg.group_topk_size
+        if self.num_latents % group_size != 0:
+            raise ValueError(
+                "group_topk requires num_latents divisible by group_topk_size, "
+                f"got num_latents={self.num_latents} and "
+                f"group_topk_size={group_size}"
+            )
+
+        num_groups = self.num_latents // group_size
+        if self.cfg.k > num_groups:
+            raise ValueError(
+                "group_topk requires k <= number of groups, "
+                f"got k={self.cfg.k} and num_groups={num_groups}"
+            )
+
+        grouped = acts.view(*acts.shape[:-1], num_groups, group_size)
+        winner_acts, winner_offsets = grouped.max(dim=-1)
+        top_group_acts, top_group_indices = torch.topk(
+            winner_acts, self.cfg.k, dim=-1, sorted=False
+        )
+
+        top_offsets = winner_offsets.gather(-1, top_group_indices)
+        top_indices = top_group_indices * group_size + top_offsets
+        return EncoderOutput(top_group_acts, top_indices, acts)
