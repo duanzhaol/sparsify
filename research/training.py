@@ -245,23 +245,31 @@ def run_sanity(config: dict[str, Any]) -> None:
     arch = config["architecture"]
     k = config["k"]
     ef = config["expansion_factor"]
+    script = "\n".join(
+        [
+            "import sys",
+            "sys.path.insert(0, '.')",
+            "from sparsify import SparseCoder",
+            "from sparsify.config import SparseCoderConfig",
+            "import torch",
+            "device = 'cuda' if torch.cuda.is_available() else 'cpu'",
+            "try:",
+            "    import torch_npu",
+            "    device = 'npu' if torch.npu.is_available() else device",
+            "except ImportError:",
+            "    pass",
+            f"cfg = SparseCoderConfig(architecture={arch!r}, k={k}, expansion_factor={ef})",
+            "sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)",
+            "x = torch.randn(4, 1024, device=device)",
+            "out = sae(x)",
+            "out.fvu.backward()",
+            "print('sanity: OK')",
+        ]
+    )
     cmd = [
         "python",
         "-c",
-        (
-            "import sys; sys.path.insert(0, '.'); "
-            "from sparsify import SparseCoder; "
-            "from sparsify.config import SparseCoderConfig; "
-            "import torch; "
-            "device = 'cuda' if torch.cuda.is_available() else 'cpu'; "
-            "try:\n"
-            "    import torch_npu; device = 'npu' if torch.npu.is_available() else device\n"
-            "except ImportError: pass; "
-            f"cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef}); "
-            "sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32); "
-            "x = torch.randn(4, 1024, device=device); "
-            "out = sae(x); out.fvu.backward(); print('sanity: OK')"
-        ),
+        script,
     ]
     try:
         subprocess.run(
