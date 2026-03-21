@@ -55,6 +55,8 @@ def build_prompt(
         "frontier": frontier,
         "proxy_frontier": state.get("proxy_frontier", {}),
         "full_frontier": state.get("full_frontier", frontier),
+        "pareto_proxy_frontier": state.get("pareto_proxy_frontier", []),
+        "pareto_full_frontier": state.get("pareto_full_frontier", state.get("pareto_frontier", [])),
         "agent_state": state.get("agent", {}),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
         "current_focus": memory.get("current_focus"),
@@ -74,11 +76,11 @@ def build_prompt(
 You are the nightly SAE research agent for this repository.
 
 Primary objective:
-- reduce FVU
-- K=128 is only an initial quality anchor, not a success criterion
-- only reward smaller K after quality has materially beaten the current K=128 baseline
-- the quality target is aggressive: aim for configurations that can drive FVU to roughly half of the current K=128 baseline before preferring smaller K or lower cost
-- then reduce cost / improve throughput / memory
+- maintain and improve the Pareto frontier across FVU, K, and available cost signals
+- K=128 is an initial anchor point, not the only success criterion
+- smaller K is intrinsically valuable when it creates a non-dominated tradeoff, even if FVU is somewhat worse
+- reduce FVU where possible, but do not suppress lower-K exploration just because it does not beat the K=128 quality anchor
+- improve throughput / memory when that strengthens the Pareto frontier
 
 Execution layer is fixed:
 - training entrypoint: scripts/autoresearch_test.sh
@@ -96,6 +98,7 @@ Important rules:
 - Prefer proxy unless there is a strong reason to go straight to full.
 - Direct full requests may be coerced back to proxy by the runtime.
 - You are allowed to explore the SAE architecture space broadly, not just tune existing defaults.
+- Treat `pareto_full_frontier` and `pareto_proxy_frontier` as the main target objects to improve.
 - Architectural examples such as Sparse-ReLU, Gated, JumpReLU, GroupTopK, MoE-style encoders, factorized encoders, routed encoders, multi-branch encoders, or new sparse activation mechanisms are examples only, not limits.
 - If a new architecture family seems promising, you may add it under sparsify/ as long as the change is coherent and compatible with the existing execution layer.
 - Encoder design is part of the search space. You may change routing, gating, intermediate width, branch structure, activation form, grouping strategy, or other internal encoder mechanisms when justified.
@@ -106,7 +109,8 @@ Important rules:
 - A new architecture family may require several rounds of incubation. Do not expect a first prototype to beat the frontier immediately.
 - Use family_stage to reflect whether the round is a prototype, stabilization pass, mainline comparison, or promotion attempt.
 - If several rounds have passed without proposing a new family or advancing an incubating family, bias toward architecture exploration rather than more local tuning.
-- If there is no promising next move, return command="stop".
+- Never stop the session on your own. You must always return command="run".
+- If evidence is weak or local tuning looks exhausted, propose the least-bad next informative move instead of stopping.
 - Set primary_variable to indicate which single dimension this round changes (architecture, optimizer, lr, k, expansion_factor, other_param, or code_fix). Avoid changing multiple primary variables in one round.
 - Return a final JSON object matching the schema exactly.
 {policy_section}
@@ -126,6 +130,7 @@ def build_resume_prompt(
         "round": round_id,
         "current_focus": brief.get("current_focus") or memory.get("current_focus"),
         "best_full_frontier": brief.get("best_full_frontier", state.get("full_frontier", {})),
+        "pareto_full_frontier": brief.get("pareto_full_frontier", state.get("pareto_full_frontier", state.get("pareto_frontier", []))),
         "recent_results": brief.get("recent_results", summarize_results(results)),
         "recent_round_summaries": brief.get("recent_round_summaries", recent_round_summaries_trimmed()),
         "incubating_families": brief.get("incubating_families", {}),

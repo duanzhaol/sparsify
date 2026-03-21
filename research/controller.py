@@ -134,7 +134,80 @@ def normalize_frontiers(state: dict[str, Any]) -> dict[str, Any]:
             del full_frontier[key]
 
     state["frontier"] = full_frontier
+    refresh_pareto_frontiers(state)
     return state
+
+
+def _coerce_frontier_point(key: str, point: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(point, dict):
+        return None
+    try:
+        fvu = float(point.get("fvu"))
+        k = int(point.get("config", {}).get("k", key))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "k": k,
+        "fvu": fvu,
+        "architecture": point.get("architecture"),
+        "commit": point.get("commit"),
+        "config": point.get("config", {}),
+        "tier": point.get("tier"),
+        "checkpoint": point.get("checkpoint"),
+        "peak_memory_gb": point.get("peak_memory_gb"),
+    }
+
+
+def _pareto_dominates(a: dict[str, Any], b: dict[str, Any], fvu_tol: float = 0.001, mem_tol: float = 0.5) -> bool:
+    if a["k"] > b["k"]:
+        return False
+    if a["fvu"] > b["fvu"] + fvu_tol:
+        return False
+
+    a_mem = a.get("peak_memory_gb")
+    b_mem = b.get("peak_memory_gb")
+    mem_not_worse = True
+    mem_strict = False
+    if a_mem is not None and b_mem is not None:
+        mem_not_worse = a_mem <= b_mem + mem_tol
+        mem_strict = a_mem < b_mem - mem_tol
+    if not mem_not_worse:
+        return False
+
+    return (
+        a["k"] < b["k"]
+        or a["fvu"] < b["fvu"] - fvu_tol
+        or mem_strict
+    )
+
+
+def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
+    points = []
+    for key, point in frontier.items():
+        normalized = _coerce_frontier_point(key, point)
+        if normalized is not None:
+            points.append(normalized)
+
+    pareto: list[dict[str, Any]] = []
+    for point in points:
+        dominated = False
+        for other in points:
+            if other is point:
+                continue
+            if _pareto_dominates(other, point):
+                dominated = True
+                break
+        if not dominated:
+            pareto.append(point)
+
+    pareto.sort(key=lambda x: (x["k"], x["fvu"]))
+    return pareto
+
+
+def refresh_pareto_frontiers(state: dict[str, Any]) -> None:
+    state["pareto_proxy_frontier"] = compute_pareto_frontier(state.get("proxy_frontier", {}))
+    state["pareto_full_frontier"] = compute_pareto_frontier(state.get("full_frontier", {}))
+    state["pareto_frontier"] = state["pareto_full_frontier"]
 
 
 def ensure_history_files() -> None:
@@ -181,10 +254,10 @@ def ensure_history_files() -> None:
     if not MEMORY_PATH.exists():
         memory = {
             "current_focus": (
-                "Treat K=128 only as the initial search anchor, not as a success criterion. "
-                "The research objective is to find configurations whose FVU is dramatically better "
-                "than the current K=128 baseline, with a target on the order of halving that baseline FVU "
-                "before rewarding smaller K or lower cost."
+                "Track a Pareto frontier across reconstruction quality and sparsity/cost. "
+                "Treat K=128 as one anchor point, not the only success criterion. "
+                "Prefer experiments that add non-dominated tradeoff points, including smaller-K runs "
+                "that accept some FVU increase when they improve the overall frontier."
             ),
             "architecture_findings": [],
             "performance_findings": [],
@@ -194,9 +267,9 @@ def ensure_history_files() -> None:
             "recent_rounds": [],
             "recent_insights": [],
             "next_hypotheses": [
-                "Establish or refresh a trustworthy K=128 quality anchor before rewarding lower-K points.",
-                "Do not treat smaller K as success unless its FVU is materially better than the current K=128 baseline.",
-                "Prefer experiments that can plausibly cut the current K=128 FVU by about half, even if they keep K unchanged at first."
+                "Maintain a Pareto frontier over FVU and K rather than optimizing only the single best FVU point.",
+                "Probe smaller K values even when FVU rises, as long as the new point may improve the tradeoff frontier.",
+                "Use K=128 quality anchors to calibrate tradeoffs, not to suppress lower-K exploration."
             ],
         }
         MEMORY_PATH.write_text(json.dumps(memory, indent=2) + "\n")
@@ -326,15 +399,25 @@ def decide(frontier: dict[str, Any], parsed: dict[str, Any], tier: str) -> str:
             ):
                 improve_same_k = True
 
-    improve_smaller_k = False
+    candidate = {
+        "k": k,
+        "fvu": fvu,
+        "peak_memory_gb": peak_memory_gb,
+    }
+    current_points = []
     for frontier_k, frontier_point in frontier.items():
-        fk = int(frontier_k)
-        ffvu = frontier_point["fvu"]
-        if k < fk and fvu <= ffvu + fvu_tol:
-            improve_smaller_k = True
-            break
+        normalized = _coerce_frontier_point(frontier_k, frontier_point)
+        if normalized is not None:
+            current_points.append(normalized)
 
-    is_improvement = improve_same_k or improve_smaller_k
+    pareto_improvement = not current_points
+    if current_points:
+        pareto_improvement = not any(
+            _pareto_dominates(point, candidate, fvu_tol=fvu_tol, mem_tol=mem_tol)
+            for point in current_points
+        )
+
+    is_improvement = improve_same_k or pareto_improvement
     if is_improvement:
         return "promote" if tier == "proxy" else "keep"
 
@@ -456,6 +539,7 @@ def update_state_with_result(
         "self_review": result.self_review,
     }
     state["frontier"] = state.get("full_frontier", {})
+    refresh_pareto_frontiers(state)
 
 
 def print_status(state: dict[str, Any]) -> None:
@@ -468,10 +552,16 @@ def print_status(state: dict[str, Any]) -> None:
     for k in sorted(state.get("full_frontier", {}).keys(), key=int):
         pt = state["full_frontier"][k]
         print(f"  K={k}: FVU={pt['fvu']:.6f} arch={pt['architecture']} tier={pt['tier']}")
+    print("pareto_full_frontier:")
+    for pt in state.get("pareto_full_frontier", []):
+        print(f"  K={pt['k']}: FVU={pt['fvu']:.6f} arch={pt['architecture']}")
     print("proxy_frontier:")
     for k in sorted(state.get("proxy_frontier", {}).keys(), key=int):
         pt = state["proxy_frontier"][k]
         print(f"  K={k}: FVU={pt['fvu']:.6f} arch={pt['architecture']} tier={pt['tier']}")
+    print("pareto_proxy_frontier:")
+    for pt in state.get("pareto_proxy_frontier", []):
+        print(f"  K={pt['k']}: FVU={pt['fvu']:.6f} arch={pt['architecture']}")
     if state.get("last_result"):
         lr = state["last_result"]
         print(f"last: {lr['decision']} | {lr['description']} | fvu={lr.get('val_fvu')}")

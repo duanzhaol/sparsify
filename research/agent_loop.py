@@ -34,6 +34,12 @@ from research.git_ops import (
     cleanup_round_snapshots,
     init_tracked_paths,
 )
+from research.override_registry import (
+    changed_override_keys,
+    determine_parameter_behavior,
+    resolve_baseline_config,
+    validate_env_overrides,
+)
 from research.state_io import (
     HISTORY_DIR,
     LOG_DIR,
@@ -75,7 +81,6 @@ from research.training import (
     DEFAULT_SLOW_RUN_GRACE_SEC,
     DEFAULT_MIN_TOKENS_PER_SEC_RATIO,
     DEFAULT_MIN_PROGRESS_STEPS,
-    validate_env_overrides,
     run_training_round,
     _run_sanity_for_round,
     budget_remaining_sec,
@@ -108,6 +113,7 @@ DEFAULT_AGENT_MAX_RETRIES = 3
 DEFAULT_AGENT_RETRY_BASE_SEC = 10
 DEFAULT_MAX_SESSION_FAILURES = 3
 DEFAULT_AGENT_TIMEOUT_SEC = 10 * 60  # 10 minutes for agent to produce an action
+DEFAULT_DYNAMIC_PROXY_MAX_TOKENS = "20000000"
 
 # Wire up tracked history paths for git_ops
 TRACKED_HISTORY_PATHS = (
@@ -164,6 +170,68 @@ def validate_action_shape(action: dict[str, Any]) -> None:
     missing = [key for key in required if key not in action]
     if missing:
         raise RuntimeError(f"Action missing required keys: {', '.join(missing)}")
+
+
+def _best_known_family_action_defaults(state: dict[str, Any]) -> tuple[str, str]:
+    frontier = state.get("full_frontier") or state.get("frontier") or {}
+    best_entry: dict[str, Any] | None = None
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        if best_entry is None or float(entry.get("fvu", "inf")) < float(best_entry.get("fvu", "inf")):
+            best_entry = entry
+    if not best_entry:
+        return BASE_ENV_DEFAULTS["ARCHITECTURE"], "mainline"
+    config = best_entry.get("config") or {}
+    family_name = str(
+        config.get("family_name")
+        or best_entry.get("architecture")
+        or BASE_ENV_DEFAULTS["ARCHITECTURE"]
+    ).lower()
+    family_stage = str(config.get("family_stage") or "stabilize")
+    return family_name, family_stage
+
+
+def coerce_stop_action(action: dict[str, Any], state: dict[str, Any], round_id: int) -> dict[str, Any]:
+    """Convert legacy stop actions into a runnable fallback action."""
+    coerced = dict(action)
+    family_name, family_stage = _best_known_family_action_defaults(state)
+    stop_summary = str(action.get("summary", "")).strip()
+    fallback_note = (
+        "Runtime converted a stop request into a runnable proxy exploration step "
+        "because autonomous session termination is disabled."
+    )
+
+    coerced["command"] = "run"
+    coerced["hypothesis"] = str(
+        action.get("hypothesis")
+        or f"Continue exploration from the current best {family_name} configuration with one more informative proxy comparison."
+    )
+    coerced["summary"] = (
+        f"{stop_summary} Runtime override: continue the search instead of ending the session."
+        if stop_summary
+        else "Runtime override: continue the search instead of ending the session."
+    )
+    coerced["change_type"] = action.get("change_type") or "param_only"
+    coerced["experiment_tier"] = action.get("experiment_tier") or "proxy"
+    coerced["expected_win"] = action.get("expected_win") or "explore_unknown"
+    coerced["family_name"] = str(action.get("family_name") or family_name)
+    coerced["family_stage"] = str(action.get("family_stage") or family_stage)
+    coerced["self_review"] = str(action.get("self_review") or "Continuing search because session stop is not allowed.")
+    coerced["needs_sanity"] = bool(action.get("needs_sanity", False))
+    coerced["env_overrides"] = list(action.get("env_overrides") or [])
+    coerced["touched_files"] = list(action.get("touched_files") or [])
+    notes = list(action.get("notes_to_memory") or [])
+    notes.append(fallback_note)
+    coerced["notes_to_memory"] = notes[-12:]
+    next_hypotheses = list(action.get("next_hypotheses") or [])
+    if not next_hypotheses:
+        next_hypotheses = [
+            f"round {round_id}: continue exploring around the current best {family_name} configuration instead of stopping"
+        ]
+    coerced["next_hypotheses"] = next_hypotheses[:8]
+    coerced["primary_variable"] = str(action.get("primary_variable") or "other_param")
+    return coerced
 
 
 def run_agent_round(
@@ -634,6 +702,7 @@ def main() -> int:
     parser.add_argument("--model", default=None)
     parser.add_argument("--agent-proxy", default=DEFAULT_AGENT_PROXY)
     parser.add_argument("--proxy-max-tokens", default=DEFAULT_PROXY_MAX_TOKENS)
+    parser.add_argument("--dynamic-proxy-max-tokens", default=DEFAULT_DYNAMIC_PROXY_MAX_TOKENS)
     parser.add_argument("--full-max-tokens", default=DEFAULT_FULL_MAX_TOKENS)
     parser.add_argument("--proxy-timeout-sec", type=int, default=DEFAULT_PROXY_TIMEOUT_SEC)
     parser.add_argument("--full-timeout-sec", type=int, default=DEFAULT_FULL_TIMEOUT_SEC)
@@ -643,8 +712,8 @@ def main() -> int:
     parser.add_argument("--slow-run-grace-sec", type=int, default=DEFAULT_SLOW_RUN_GRACE_SEC)
     parser.add_argument("--min-tokens-per-sec-ratio", type=float, default=DEFAULT_MIN_TOKENS_PER_SEC_RATIO)
     parser.add_argument("--min-progress-steps", type=int, default=DEFAULT_MIN_PROGRESS_STEPS)
-    parser.add_argument("--max-consecutive-crashes", type=int, default=3)
-    parser.add_argument("--max-consecutive-no-improve", type=int, default=15)
+    parser.add_argument("--max-consecutive-crashes", type=int, default=0)
+    parser.add_argument("--max-consecutive-no-improve", type=int, default=0)
     parser.add_argument("--session-mode", choices=["resume-session", "fresh-each-round"], default="resume-session")
     parser.add_argument("--max-session-rounds", type=int, default=DEFAULT_MAX_SESSION_ROUNDS)
     parser.add_argument("--max-session-hours", type=float, default=DEFAULT_MAX_SESSION_HOURS)
@@ -732,23 +801,23 @@ def main() -> int:
         force_param_only = False
         if stagnation["crash_streak"] and int(agent_state.get("consecutive_crashes", 0)) >= 2:
             crash_resets = int(agent_state.get("crash_resets", 0))
-            if crash_resets >= 2:
-                print(
-                    f"Stopping: crash streak persists after {crash_resets} resets "
-                    f"({agent_state['consecutive_crashes']} consecutive crashes)"
-                )
-                break
             print("Crash streak detected; forcing param_only without modifying the worktree")
             agent_state["consecutive_crashes"] = 0
             agent_state["crash_resets"] = crash_resets + 1
             save_state(state)
             stagnation["recommended_mode"] = "stabilize_after_crashes"
             force_param_only = True
+            if crash_resets >= 2:
+                append_timeline_event(
+                    "crash_recovery_persisting", round=None, tier=None, run_name=None,
+                    family_name=None, family_stage=None, status="warning", decision=None,
+                    payload={"crash_resets": crash_resets + 1},
+                )
 
-        if agent_state["consecutive_crashes"] >= args.max_consecutive_crashes:
+        if args.max_consecutive_crashes > 0 and agent_state["consecutive_crashes"] >= args.max_consecutive_crashes:
             print(f"Stopping: consecutive crash limit ({agent_state['consecutive_crashes']} >= {args.max_consecutive_crashes})")
             break
-        if agent_state["consecutive_no_improve"] >= args.max_consecutive_no_improve:
+        if args.max_consecutive_no_improve > 0 and agent_state["consecutive_no_improve"] >= args.max_consecutive_no_improve:
             print(f"Stopping: consecutive no-improve limit ({agent_state['consecutive_no_improve']} >= {args.max_consecutive_no_improve})")
             break
 
@@ -825,11 +894,20 @@ def main() -> int:
         )
 
         if action.get("command") == "stop":
-            print(f"Round {round_id}: agent requested stop: {action.get('summary', '')}")
-            log_round_event(round_ctx, "round_finished", status="stop", decision="stop", summary=action.get("summary", ""))
-            memory.setdefault("recent_insights", []).append(f"round {round_id}: agent stopped: {action.get('summary', '')}")
+            print(f"Round {round_id}: agent requested stop; coercing to run")
+            log_round_event(
+                round_ctx,
+                "agent_stop_overridden",
+                status="warning",
+                decision="run",
+                summary=action.get("summary", ""),
+            )
+            memory.setdefault("recent_insights", []).append(
+                f"round {round_id}: runtime overrode agent stop request and forced continued exploration"
+            )
+            memory["recent_insights"] = memory["recent_insights"][-40:]
             save_json(MEMORY_PATH, memory)
-            break
+            action = coerce_stop_action(action, state, round_id)
 
         if action.get("experiment_tier") == "full" and not args.allow_direct_full:
             print(f"Round {round_id}: direct full request coerced to proxy")
@@ -893,10 +971,19 @@ def main() -> int:
             print(f"Round {round_id}: no code files changed")
         cleanup_round_snapshots(round_id)
 
+        baseline_config = resolve_baseline_config(
+            state,
+            action,
+            tier=action.get("experiment_tier"),
+        )
+
         # --- Validate env_overrides ---
         try:
             overrides = action.get("env_overrides", [])
-            rejected_keys = validate_env_overrides(overrides)
+            rejected_keys = validate_env_overrides(
+                overrides,
+                fallback_architecture=str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+            )
             if rejected_keys:
                 raise RuntimeError(f"env_overrides contain disallowed keys: {', '.join(rejected_keys)}")
         except RuntimeError as exc:
@@ -910,7 +997,9 @@ def main() -> int:
             continue
 
         # --- Variable isolation check (soft enforcement) ---
-        changes = classify_changes(action.get("env_overrides", []), BASE_ENV_DEFAULTS)
+        changes = classify_changes(action.get("env_overrides", []), baseline_config)
+        changed_keys = changed_override_keys(action.get("env_overrides", []), baseline_config)
+        parameter_behavior = determine_parameter_behavior(action.get("change_type", ""), changed_keys)
         isolation_ok, violation_desc = check_variable_isolation(changes, action.get("change_type", ""))
         if not isolation_ok:
             warning = f"Round {round_id}: variable isolation warning: {violation_desc}"
@@ -970,11 +1059,42 @@ def main() -> int:
 
         # --- Dynamic proxy budget ---
         round_proxy_max_tokens = args.proxy_max_tokens
+        proxy_mode = "fast"
+        evaluation_basis = "terminal_only"
         if action.get("experiment_tier") == "proxy":
             adjusted_budget = compute_proxy_budget(action.get("change_type", ""), args.proxy_max_tokens)
-            if adjusted_budget != args.proxy_max_tokens:
+            round_proxy_max_tokens = adjusted_budget
+            if parameter_behavior == "dynamic":
+                round_proxy_max_tokens = str(
+                    max(int(round_proxy_max_tokens), int(args.dynamic_proxy_max_tokens))
+                )
+                proxy_mode = "extended"
+                evaluation_basis = "curve_extended"
+                print(
+                    f"Round {round_id}: dynamic-parameter proxy mode -> extended "
+                    f"({args.proxy_max_tokens} -> {round_proxy_max_tokens} tokens)"
+                )
+                log_round_event(
+                    round_ctx,
+                    "proxy_mode_selected",
+                    tier="proxy",
+                    proxy_mode=proxy_mode,
+                    evaluation_basis=evaluation_basis,
+                    parameter_behavior=parameter_behavior,
+                    proxy_max_tokens=round_proxy_max_tokens,
+                )
+            elif adjusted_budget != args.proxy_max_tokens:
                 print(f"Round {round_id}: dynamic proxy budget: {args.proxy_max_tokens} -> {adjusted_budget}")
-                round_proxy_max_tokens = adjusted_budget
+            if proxy_mode == "fast":
+                log_round_event(
+                    round_ctx,
+                    "proxy_mode_selected",
+                    tier="proxy",
+                    proxy_mode=proxy_mode,
+                    evaluation_basis=evaluation_basis,
+                    parameter_behavior=parameter_behavior,
+                    proxy_max_tokens=round_proxy_max_tokens,
+                )
 
         # --- Budget check before training ---
         remaining_sec = budget_remaining_sec(start_time, args.budget_hours)
@@ -1006,7 +1126,17 @@ def main() -> int:
 
         # --- Training ---
         proxy_override = round_proxy_max_tokens if tier == "proxy" else None
-        result = run_training_round(action, tier, args, round_id, memory, round_ctx, proxy_max_tokens_override=proxy_override)
+        result = run_training_round(
+            action,
+            tier,
+            args,
+            round_id,
+            memory,
+            round_ctx,
+            proxy_max_tokens_override=proxy_override,
+            proxy_mode=proxy_mode if tier == "proxy" else "fast",
+            evaluation_basis=evaluation_basis if tier == "proxy" else "terminal_only",
+        )
         round_ctx["proxy_result"] = result
         print(
             f"Round {round_id} proxy result: "

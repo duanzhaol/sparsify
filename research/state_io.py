@@ -84,6 +84,9 @@ def load_state() -> dict[str, Any]:
     agent_state.setdefault("last_resume_ok_at", None)
     agent_state.setdefault("crash_resets", 0)
     agent_state.setdefault("last_meta_round", 0)
+    state.setdefault("pareto_frontier", state.get("pareto_frontier", []))
+    state.setdefault("pareto_full_frontier", state.get("pareto_full_frontier", state.get("pareto_frontier", [])))
+    state.setdefault("pareto_proxy_frontier", state.get("pareto_proxy_frontier", []))
     return state
 
 
@@ -97,10 +100,10 @@ def load_memory() -> dict[str, Any]:
         MEMORY_PATH,
         {
             "current_focus": (
-                "Treat K=128 only as the initial search anchor, not as a success criterion. "
-                "The research objective is to find configurations whose FVU is dramatically better "
-                "than the current K=128 baseline, with a target on the order of halving that baseline FVU "
-                "before rewarding smaller K or lower cost."
+                "Track a Pareto frontier across reconstruction quality and sparsity/cost. "
+                "Treat K=128 as one anchor point, not the only success criterion. "
+                "Prefer experiments that add non-dominated tradeoff points, including smaller-K runs "
+                "that accept some FVU increase when they improve the overall frontier."
             ),
             "architecture_findings": [],
             "performance_findings": [],
@@ -110,9 +113,9 @@ def load_memory() -> dict[str, Any]:
             "recent_rounds": [],
             "recent_insights": [],
             "next_hypotheses": [
-                "Establish or refresh a trustworthy K=128 quality anchor before rewarding lower-K points.",
-                "Do not treat smaller K as success unless its FVU is materially better than the current K=128 baseline.",
-                "Prefer experiments that can plausibly cut the current K=128 FVU by about half, even if they keep K unchanged at first."
+                "Maintain a Pareto frontier over FVU and K rather than optimizing only the single best FVU point.",
+                "Probe smaller K values even when FVU rises, as long as the new point may improve the tradeoff frontier.",
+                "Use K=128 quality anchors to calibrate tradeoffs, not to suppress lower-K exploration."
             ],
         },
     )
@@ -228,6 +231,7 @@ def load_session_brief() -> dict[str, Any]:
             "active_session_id": None,
             "current_focus": None,
             "best_full_frontier": {},
+            "pareto_full_frontier": [],
             "recent_results": [],
             "recent_round_summaries": [],
             "incubating_families": {},
@@ -268,6 +272,7 @@ def build_session_brief(
         "active_session_id": state.get("agent", {}).get("active_session_id"),
         "current_focus": memory.get("current_focus"),
         "best_full_frontier": state.get("full_frontier", state.get("frontier", {})),
+        "pareto_full_frontier": state.get("pareto_full_frontier", state.get("pareto_frontier", [])),
         "recent_results": summarize_results(recent_results)[-3:],
         "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
         "incubating_families": incubating,

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from research.git_ops import REPO_ROOT, run
+from research.override_registry import (
+    config_from_overrides,
+    validate_env_overrides,
+)
 from research.state_io import (
     BASE_ENV_DEFAULTS,
     LOG_DIR,
@@ -34,51 +38,26 @@ DEFAULT_MIN_TOKENS_PER_SEC_RATIO = 0.25
 DEFAULT_MIN_PROGRESS_STEPS = 4
 DEFAULT_PROCESS_TERM_TIMEOUT_SEC = 15
 
-ALLOWED_ENV_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
-    "NUM_GROUPS",
-    "ACTIVE_GROUPS",
-    "JUMPRELU_INIT_THRESHOLD",
-    "JUMPRELU_BANDWIDTH",
-    "ORTHO_LAMBDA",
-    "RESIDUAL_FROM",
-    "MATRYOSHKA_KS",
-    "MATRYOSHKA_WEIGHTS",
-}
-
-
-def validate_env_overrides(overrides: list | dict) -> list[str]:
-    """Validate env_overrides against the whitelist. Return list of rejected keys."""
-    rejected: list[str] = []
-    if isinstance(overrides, dict):
-        for key in overrides:
-            if key not in ALLOWED_ENV_OVERRIDE_KEYS:
-                rejected.append(key)
-    else:
-        for item in overrides:
-            key = item.get("key")
-            if key and key not in ALLOWED_ENV_OVERRIDE_KEYS:
-                rejected.append(key)
-    return rejected
-
-
 def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, args: Any, proxy_max_tokens_override: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
     env = os.environ.copy()
-    config = dict(BASE_ENV_DEFAULTS)
     overrides = action.get("env_overrides", [])
-    rejected = validate_env_overrides(overrides)
+    rejected = validate_env_overrides(
+        overrides,
+        fallback_architecture=str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+    )
     if rejected:
         raise RuntimeError(
             f"Agent env_overrides contain disallowed keys: {', '.join(rejected)}. "
-            f"Allowed keys: {sorted(ALLOWED_ENV_OVERRIDE_KEYS)}"
+            "Register the architecture-specific keys in research.override_registry."
         )
+    config = config_from_overrides(overrides)
+    has_architecture_override = False
     if isinstance(overrides, dict):
-        config.update({k: str(v) for k, v in overrides.items()})
+        has_architecture_override = "ARCHITECTURE" in overrides
     else:
-        for item in overrides:
-            key = item.get("key")
-            value = item.get("value")
-            if key:
-                config[key] = str(value)
+        has_architecture_override = any(item.get("key") == "ARCHITECTURE" for item in overrides)
+    if action.get("family_name") and not has_architecture_override:
+        config["ARCHITECTURE"] = str(action["family_name"]).lower()
     env.update(config)
     env["RUN_NAME"] = run_name
     env["SAVE_DIR"] = str(save_dir)
@@ -108,6 +87,8 @@ def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, 
         "ACTIVE_GROUPS": ("active_groups", int),
         "JUMPRELU_INIT_THRESHOLD": ("jumprelu_init_threshold", float),
         "JUMPRELU_BANDWIDTH": ("jumprelu_bandwidth", float),
+        "GATED_TEMPERATURE": ("gated_temperature", float),
+        "GATED_INIT_LOGIT": ("gated_init_logit", float),
         "ORTHO_LAMBDA": ("ortho_lambda", float),
         "RESIDUAL_FROM": ("residual_from", str),
         "MATRYOSHKA_KS": ("matryoshka_ks", lambda x: [int(v) for v in x.split(",") if v]),
@@ -168,6 +149,58 @@ def extract_step_fvu(step_record: dict[str, Any] | None) -> float | None:
         if k.endswith("/fvu") and isinstance(v, (int, float))
     ]
     return sum(vals) / len(vals) if vals else None
+
+
+def read_step_records(checkpoint_dir: Path | None) -> list[dict[str, Any]]:
+    if checkpoint_dir is None:
+        return []
+    metrics = checkpoint_dir / "metrics.jsonl"
+    if not metrics.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    with open(metrics) as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") == "step":
+                records.append(rec)
+    return records
+
+
+def summarize_curve_metrics(step_records: list[dict[str, Any]]) -> dict[str, float | bool | None]:
+    if not step_records:
+        return {
+            "curve_start_fvu": None,
+            "curve_mid_fvu": None,
+            "curve_end_fvu": None,
+            "curve_late_slope": None,
+            "curve_still_improving": None,
+        }
+    size = len(step_records)
+    first = step_records[max(0, size // 5 - 1)]
+    mid = step_records[max(0, size // 2 - 1)]
+    end = step_records[-1]
+    tail_start = step_records[max(0, int(size * 0.8) - 1)]
+    start_fvu = extract_step_fvu(first)
+    mid_fvu = extract_step_fvu(mid)
+    end_fvu = extract_step_fvu(end)
+    tail_fvu = extract_step_fvu(tail_start)
+    late_slope = None
+    still_improving = None
+    start_tokens = float(tail_start.get("total_tokens", 0) or 0)
+    end_tokens = float(end.get("total_tokens", 0) or 0)
+    if tail_fvu is not None and end_fvu is not None and end_tokens > start_tokens:
+        late_slope = (end_fvu - tail_fvu) / (end_tokens - start_tokens)
+        still_improving = end_fvu < tail_fvu - 1e-4
+    return {
+        "curve_start_fvu": start_fvu,
+        "curve_mid_fvu": mid_fvu,
+        "curve_end_fvu": end_fvu,
+        "curve_late_slope": late_slope,
+        "curve_still_improving": still_improving,
+    }
 
 
 def run_sanity(config: dict[str, Any]) -> None:
@@ -334,6 +367,8 @@ def run_training_round(
     memory: dict[str, Any],
     round_ctx: dict[str, Any],
     proxy_max_tokens_override: str | None = None,
+    proxy_mode: str = "fast",
+    evaluation_basis: str = "terminal_only",
 ) -> dict[str, str]:
     run_stamp = int(time.time())
     run_name = f"round{round_id:04d}_{tier}_{run_stamp}"
@@ -365,6 +400,8 @@ def run_training_round(
         log_path=str(log_path),
         config=config_json,
         baseline_tokens_per_sec=baseline_tps,
+        proxy_mode=proxy_mode if tier == "proxy" else None,
+        evaluation_basis=evaluation_basis if tier == "proxy" else None,
     )
     write_status(
         "training_started",
@@ -374,6 +411,8 @@ def run_training_round(
         log_path=str(log_path),
         config=config_json,
         baseline_tokens_per_sec=baseline_tps,
+        proxy_mode=proxy_mode if tier == "proxy" else None,
+        evaluation_basis=evaluation_basis if tier == "proxy" else None,
     )
 
     timeout_sec = args.full_timeout_sec if tier == "full" else args.proxy_timeout_sec
@@ -420,6 +459,8 @@ def run_training_round(
                     latest_step=step,
                     latest_tokens_per_sec=latest_tps,
                     baseline_ratio=baseline_ratio,
+                    proxy_mode=proxy_mode if tier == "proxy" else None,
+                    evaluation_basis=evaluation_basis if tier == "proxy" else None,
                 )
                 log_round_event(
                     round_ctx,
@@ -434,6 +475,8 @@ def run_training_round(
                     latest_tokens_per_sec=latest_tps,
                     baseline_ratio=baseline_ratio,
                     latest_total_tokens=total_tokens,
+                    proxy_mode=proxy_mode if tier == "proxy" else None,
+                    evaluation_basis=evaluation_basis if tier == "proxy" else None,
                 )
                 if time.time() - start >= args.slow_run_grace_sec:
                     if latest_tps is not None:
@@ -485,6 +528,8 @@ def run_training_round(
                     latest_tokens_per_sec=None,
                     baseline_ratio=None,
                     latest_total_tokens=None,
+                    proxy_mode=proxy_mode if tier == "proxy" else None,
+                    evaluation_basis=evaluation_basis if tier == "proxy" else None,
                 )
             if time.time() - start > timeout_sec:
                 termination_reason = "hard_timeout"
@@ -502,6 +547,8 @@ def run_training_round(
     process.wait()
     checkpoint_dir = latest_checkpoint_dir(save_dir, run_name)
     last_step_record = read_latest_step_record(checkpoint_dir) or last_step_record
+    step_records = read_step_records(checkpoint_dir)
+    curve_metrics = summarize_curve_metrics(step_records)
     observed_fvu = extract_step_fvu(last_step_record)
     print(
         f"Round {round_id}: {tier} training finished | "
@@ -526,6 +573,15 @@ def run_training_round(
     result["baseline_tokens_per_sec"] = f"{baseline_tps:.6f}" if baseline_tps is not None else ""
     result["baseline_ratio"] = f"{baseline_ratio:.6f}" if baseline_ratio is not None else ""
     result["observed_fvu"] = f"{observed_fvu:.6f}" if observed_fvu is not None else ""
+    result["proxy_mode"] = proxy_mode if tier == "proxy" else ""
+    result["evaluation_basis"] = evaluation_basis if tier == "proxy" else ""
+    for key, value in curve_metrics.items():
+        if value is None:
+            result[key] = ""
+        elif isinstance(value, bool):
+            result[key] = "true" if value else "false"
+        else:
+            result[key] = f"{value:.6f}"
     result["metrics_path"] = (
         str(checkpoint_dir / "metrics.jsonl")
         if checkpoint_dir is not None and (checkpoint_dir / "metrics.jsonl").exists()
@@ -542,6 +598,9 @@ def run_training_round(
         tokens_per_sec=latest_tps,
         baseline_ratio=baseline_ratio,
         decision=result.get("decision"),
+        proxy_mode=proxy_mode if tier == "proxy" else None,
+        evaluation_basis=evaluation_basis if tier == "proxy" else None,
+        **curve_metrics,
     )
     log_round_event(
         round_ctx,
@@ -558,6 +617,9 @@ def run_training_round(
         baseline_ratio=baseline_ratio,
         status=result.get("status"),
         decision=result.get("decision"),
+        proxy_mode=proxy_mode if tier == "proxy" else None,
+        evaluation_basis=evaluation_basis if tier == "proxy" else None,
+        **curve_metrics,
     )
     log_round_event(
         round_ctx,
