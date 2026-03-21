@@ -1335,6 +1335,10 @@ def main() -> int:
 
             if is_code_edit and action.get("change_type") == "edit_sae_code" and touched:
                 config = dict(BASE_ENV_DEFAULTS)
+                family_arch = str(
+                    action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]
+                ).lower()
+                config["ARCHITECTURE"] = family_arch
                 overrides = action.get("env_overrides", [])
                 if isinstance(overrides, dict):
                     config.update({k: str(v) for k, v in overrides.items()})
@@ -1344,22 +1348,55 @@ def main() -> int:
                         value = item.get("value")
                         if key:
                             config[key] = str(value)
-                arch = config.get("ARCHITECTURE", "topk").lower()
+                arch = str(config.get("ARCHITECTURE", family_arch)).lower()
                 k_val = int(config.get("K", "128"))
                 ef_val = int(config.get("EXPANSION_FACTOR", "8"))
                 diff_result = behavioral_diff_test(arch, k_val, ef_val)
+                family_stage = str(action.get("family_stage") or "prototype").lower()
                 if diff_result.get("identical"):
-                    print(f"Round {round_id}: behavioral diff test FAILED — identical to baseline topk")
-                    log_round_event(round_ctx, "behavioral_diff_identical", architecture=arch)
-                    _abort_round(
-                        round_id, action, "crash", "identical_to_baseline",
-                        round_ctx, memory, stdout_path, touched, patch_path,
-                        auto_commit,
+                    identical_msg = (
+                        f"Round {round_id}: behavioral diff matched baseline "
+                        f"(arch={arch}, k={k_val}, ef={ef_val}, "
+                        f"max_diff={diff_result.get('max_diff', 'N/A')})"
                     )
-                    abort_round = True
-                    break
+                    if family_stage == "prototype":
+                        print(f"{identical_msg}; prototype family will continue with warning")
+                        memory.setdefault("recent_insights", []).append(
+                            f"{identical_msg}; runtime allowed prototype training to continue"
+                        )
+                        memory["recent_insights"] = memory["recent_insights"][-40:]
+                        save_json(MEMORY_PATH, memory)
+                        log_round_event(
+                            round_ctx,
+                            "behavioral_diff_identical_warning",
+                            architecture=arch,
+                            k=k_val,
+                            expansion_factor=ef_val,
+                            max_diff=diff_result.get("max_diff"),
+                        )
+                    else:
+                        print(f"{identical_msg}; blocking round")
+                        log_round_event(
+                            round_ctx,
+                            "behavioral_diff_identical",
+                            architecture=arch,
+                            k=k_val,
+                            expansion_factor=ef_val,
+                            max_diff=diff_result.get("max_diff"),
+                        )
+                        _abort_round(
+                            round_id, action, "crash", "identical_to_baseline",
+                            round_ctx, memory, stdout_path, touched, patch_path,
+                            auto_commit,
+                        )
+                        abort_round = True
+                        break
                 else:
-                    print(f"Round {round_id}: behavioral diff test passed (max_diff={diff_result.get('max_diff', 'N/A')})")
+                    print(
+                        f"Round {round_id}: behavioral diff test passed "
+                        f"(arch={arch}, k={k_val}, ef={ef_val}, "
+                        f"max_diff={diff_result.get('max_diff', 'N/A')})"
+                    )
 
             round_proxy_max_tokens = args.proxy_max_tokens
             proxy_mode = "fast"

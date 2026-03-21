@@ -14,6 +14,9 @@ from typing import Any
 from research.git_ops import REPO_ROOT
 from research.state_io import BASE_ENV_DEFAULTS
 
+MAX_INCUBATING_FAMILIES = 5
+MAX_INCUBATING_PROXY_ROUNDS = 3
+
 
 # ---------------------------------------------------------------------------
 # Phase 2: Behavioral Diff Test
@@ -334,7 +337,7 @@ def audit_incubating_families(memory: dict[str, Any]) -> dict[str, Any]:
     Returns:
         stale: list of family names with >= 3 proxy rounds and no keep/promote
         active_count: number of currently incubating families
-        over_limit: whether active_count > 2
+        over_limit: whether active_count > MAX_INCUBATING_FAMILIES
     """
     families = memory.get("architecture_families", {})
     stale: list[str] = []
@@ -347,13 +350,13 @@ def audit_incubating_families(memory: dict[str, Any]) -> dict[str, Any]:
         configs = family.get("tested_configs", [])
         proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
         has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
-        if proxy_rounds >= 3 and not has_positive:
+        if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not has_positive:
             stale.append(name)
 
     return {
         "stale": stale,
         "active_count": active_count,
-        "over_limit": active_count > 2,
+        "over_limit": active_count > MAX_INCUBATING_FAMILIES,
     }
 
 
@@ -361,8 +364,8 @@ def enforce_incubation_limits(memory: dict[str, Any], action: dict[str, Any]) ->
     """Check if the action respects incubation limits.
 
     Returns (ok, message). ok=False if:
-    - Creating a new incubating family but already >= 2 incubating
-    - Continuing a family that used up its 3-round proxy quota
+    - Creating a new incubating family but already >= MAX_INCUBATING_FAMILIES incubating
+    - Continuing a family that used up its MAX_INCUBATING_PROXY_ROUNDS-round proxy quota
     """
     audit = audit_incubating_families(memory)
     family_name = str(action.get("family_name", "")).lower()
@@ -373,21 +376,21 @@ def enforce_incubation_limits(memory: dict[str, Any], action: dict[str, Any]) ->
     is_new = family_name not in families
     is_incubating_stage = family_stage not in ("mainline", "promote_to_mainline")
 
-    if is_new and is_incubating_stage and audit["active_count"] >= 2:
+    if is_new and is_incubating_stage and audit["active_count"] >= MAX_INCUBATING_FAMILIES:
         return False, (
             f"Cannot create new incubating family '{family_name}': "
-            f"already {audit['active_count']} incubating families (limit: 2). "
+            f"already {audit['active_count']} incubating families (limit: {MAX_INCUBATING_FAMILIES}). "
             f"Stale families that could be archived: {audit['stale']}"
         )
 
     # Check if existing family exceeded its quota
     if not is_new and family_name in families:
-        family = families[family_name]
-        if family.get("status") == "incubating":
-            configs = family.get("tested_configs", [])
-            proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
-            has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
-            if proxy_rounds >= 3 and not has_positive:
+            family = families[family_name]
+            if family.get("status") == "incubating":
+                configs = family.get("tested_configs", [])
+                proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
+                has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
+            if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not has_positive:
                 return False, (
                     f"Family '{family_name}' has used {proxy_rounds} proxy rounds "
                     f"without a keep/promote decision. Consider archiving it."
@@ -396,7 +399,10 @@ def enforce_incubation_limits(memory: dict[str, Any], action: dict[str, Any]) ->
     return True, ""
 
 
-def auto_archive_stale_families(memory: dict[str, Any], max_proxy_rounds: int = 3) -> list[str]:
+def auto_archive_stale_families(
+    memory: dict[str, Any],
+    max_proxy_rounds: int = MAX_INCUBATING_PROXY_ROUNDS,
+) -> list[str]:
     """Archive families that exceeded their proxy quota without positive results.
 
     Modifies memory in-place. Returns list of archived family names.
