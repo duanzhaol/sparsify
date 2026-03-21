@@ -115,6 +115,22 @@ DEFAULT_AGENT_RETRY_BASE_SEC = 10
 DEFAULT_MAX_SESSION_FAILURES = 3
 DEFAULT_AGENT_TIMEOUT_SEC = 10 * 60  # 10 minutes for agent to produce an action
 DEFAULT_DYNAMIC_PROXY_MAX_TOKENS = "20000000"
+DEFAULT_MAX_REPAIR_ATTEMPTS = 5
+
+REPAIRABLE_ERROR_TYPES = {
+    "SanityCheckError",
+    "sanity_check_failed",
+    "SyntaxError",
+    "NameError",
+    "AttributeError",
+    "TypeError",
+    "ValueError",
+    "RuntimeError",
+    "AssertionError",
+    "KeyError",
+    "IndexError",
+    "NotImplementedError",
+}
 
 
 def _record_sanity_failure(
@@ -161,6 +177,120 @@ def _record_sanity_failure(
     memory.setdefault("recent_insights", []).append(summary)
     memory["recent_insights"] = memory["recent_insights"][-40:]
     return entry
+
+
+def _coerce_repair_action(
+    base_action: dict[str, Any],
+    repair_action: dict[str, Any],
+    repair_attempt: int,
+) -> dict[str, Any]:
+    """Keep repair attempts narrowly focused on fixing the original blocker."""
+    coerced = dict(repair_action)
+    for key in (
+        "command",
+        "experiment_tier",
+        "expected_win",
+        "family_name",
+        "family_stage",
+        "env_overrides",
+    ):
+        coerced[key] = base_action.get(key)
+    original_change_type = str(base_action.get("change_type", "edit_sae_code"))
+    coerced["change_type"] = (
+        original_change_type if original_change_type in {"edit_sae_code", "edit_perf_code"} else "edit_sae_code"
+    )
+    coerced["needs_sanity"] = True
+    coerced["primary_variable"] = "code_fix"
+    coerced["touched_files"] = list(repair_action.get("touched_files") or [])
+    notes = list(repair_action.get("notes_to_memory") or [])
+    notes.append(
+        f"repair attempt {repair_attempt}: runtime preserved the original experiment target and constrained this step to blocker repair only"
+    )
+    coerced["notes_to_memory"] = notes[-12:]
+    return coerced
+
+
+def _build_repair_prompt(
+    round_id: int,
+    base_action: dict[str, Any],
+    failure_kind: str,
+    failure_payload: dict[str, Any],
+    repair_attempt: int,
+    max_attempts: int,
+) -> str:
+    payload = {
+        "round": round_id,
+        "repair_attempt": repair_attempt,
+        "max_repair_attempts": max_attempts,
+        "failure_kind": failure_kind,
+        "base_action": {
+            "family_name": base_action.get("family_name"),
+            "family_stage": base_action.get("family_stage"),
+            "change_type": base_action.get("change_type"),
+            "experiment_tier": base_action.get("experiment_tier"),
+            "env_overrides": base_action.get("env_overrides"),
+            "summary": base_action.get("summary"),
+            "hypothesis": base_action.get("hypothesis"),
+        },
+        "failure_payload": failure_payload,
+    }
+    return f"""
+Continue the same round {round_id} in repair mode.
+
+The previous code-edit attempt failed with a concrete engineering blocker.
+Do NOT redesign the experiment. Do NOT change family_name, experiment_tier, or env_overrides.
+Your only goal is to patch the existing implementation so the original experiment target can run.
+Stay within sparsify/ only.
+Assume this is repair attempt {repair_attempt} of at most {max_attempts}.
+Return one final JSON object only, matching the established action schema exactly.
+
+Structured repair context:
+{json.dumps(payload, indent=2)}
+""".strip()
+
+
+def _should_attempt_repair(action: dict[str, Any], failure_payload: dict[str, Any]) -> bool:
+    change_type = str(action.get("change_type", ""))
+    if change_type not in {"edit_sae_code", "edit_perf_code"}:
+        return False
+    error_type = str(failure_payload.get("error_type") or "")
+    termination_reason = str(failure_payload.get("termination_reason") or "")
+    no_signal = failure_payload.get("k") in (None, "", "None")
+    if error_type in REPAIRABLE_ERROR_TYPES:
+        return True
+    if termination_reason == "sanity_failed":
+        return True
+    return no_signal and bool(failure_payload.get("error_summary") or failure_payload.get("traceback_excerpt"))
+
+
+def _request_repair_action(
+    round_id: int,
+    base_action: dict[str, Any],
+    failure_kind: str,
+    failure_payload: dict[str, Any],
+    repair_attempt: int,
+    args: argparse.Namespace,
+    round_ctx: dict[str, Any],
+) -> tuple[dict[str, Any], Path, str | None]:
+    prompt = _build_repair_prompt(
+        round_id=round_id,
+        base_action=base_action,
+        failure_kind=failure_kind,
+        failure_payload=failure_payload,
+        repair_attempt=repair_attempt,
+        max_attempts=args.max_repair_attempts,
+    )
+    result_action, stdout_path, returned_session_id, _ = run_agent_round(
+        prompt,
+        round_id,
+        args.model,
+        args.agent_proxy,
+        round_ctx.get("session_id"),
+        timeout_sec=DEFAULT_AGENT_TIMEOUT_SEC,
+        file_tag=f"repair_{repair_attempt}",
+    )
+    coerced = _coerce_repair_action(base_action, result_action, repair_attempt)
+    return coerced, stdout_path, returned_session_id
 
 # Wire up tracked history paths for git_ops
 TRACKED_HISTORY_PATHS = (
@@ -288,10 +418,12 @@ def run_agent_round(
     agent_proxy: str | None,
     session_id: str | None,
     timeout_sec: int = DEFAULT_AGENT_TIMEOUT_SEC,
+    file_tag: str = "",
 ) -> tuple[dict[str, Any], Path, str | None, bool]:
     """Run a single agent invocation. No retries — caller handles that."""
-    action_path = LOG_DIR / f"agent_action_{round_id:04d}.json"
-    stdout_path = LOG_DIR / f"agent_round_{round_id:04d}.stdout.log"
+    suffix = f"_{file_tag}" if file_tag else ""
+    action_path = LOG_DIR / f"agent_action_{round_id:04d}{suffix}.json"
+    stdout_path = LOG_DIR / f"agent_round_{round_id:04d}{suffix}.stdout.log"
     resumed = session_id is not None
     if resumed:
         cmd = [
@@ -774,6 +906,7 @@ def main() -> int:
     parser.add_argument("--agent-max-retries", type=int, default=DEFAULT_AGENT_MAX_RETRIES)
     parser.add_argument("--agent-retry-base-sec", type=int, default=DEFAULT_AGENT_RETRY_BASE_SEC)
     parser.add_argument("--max-session-failures", type=int, default=DEFAULT_MAX_SESSION_FAILURES)
+    parser.add_argument("--max-repair-attempts", type=int, default=DEFAULT_MAX_REPAIR_ATTEMPTS)
     args = parser.parse_args()
 
     auto_commit = not args.no_commit_experiments
@@ -1009,196 +1142,290 @@ def main() -> int:
             )
             is_code_edit = False
 
-        if is_code_edit:
-            after = snapshot_paths()
-            touched = touched_files(before, after)
-        if touched:
-            assert_allowed_changes(touched)
-            print(f"Round {round_id}: touched files -> {', '.join(touched)}")
-            patch_text = build_patch(before, touched, round_id)
-            patch_path = LOG_DIR / f"round_{round_id:04d}.patch"
-            patch_path.write_text(patch_text)
-            print(f"Round {round_id}: patch saved -> {patch_path}")
-        else:
-            print(f"Round {round_id}: no code files changed")
-        cleanup_round_snapshots(round_id)
+        repair_attempt = 0
+        base_action = dict(action)
+        result: dict[str, str] | None = None
+        abort_round = False
+        stop_loop = False
+        while True:
+            touched = []
+            patch_path = None
+            is_code_edit = action.get("change_type") not in ("param_only", "no_change")
 
-        baseline_config = resolve_baseline_config(
-            state,
-            action,
-            tier=action.get("experiment_tier"),
-        )
+            if is_code_edit:
+                after = snapshot_paths()
+                touched = touched_files(before, after)
+            if touched:
+                assert_allowed_changes(touched)
+                print(f"Round {round_id}: touched files -> {', '.join(touched)}")
+                patch_text = build_patch(before, touched, round_id)
+                patch_path = LOG_DIR / f"round_{round_id:04d}.patch"
+                patch_path.write_text(patch_text)
+                print(f"Round {round_id}: patch saved -> {patch_path}")
+            else:
+                print(f"Round {round_id}: no code files changed")
 
-        # --- Validate env_overrides ---
-        try:
-            overrides = action.get("env_overrides", [])
-            rejected_keys = validate_env_overrides(
-                overrides,
-                fallback_architecture=str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+            baseline_config = resolve_baseline_config(
+                state,
+                action,
+                tier=action.get("experiment_tier"),
             )
-            if rejected_keys:
-                raise RuntimeError(f"env_overrides contain disallowed keys: {', '.join(rejected_keys)}")
-        except RuntimeError as exc:
-            print(f"Round {round_id}: env_overrides rejected: {exc}")
-            log_round_event(round_ctx, "env_overrides_rejected", rejected_keys=rejected_keys, error=str(exc))
-            _, memory = _abort_round(
-                round_id, action, "crash", "invalid_env_overrides",
-                round_ctx, memory, stdout_path, touched, patch_path,
-                auto_commit,
-            )
-            continue
 
-        # --- Variable isolation check (soft enforcement) ---
-        changes = classify_changes(action.get("env_overrides", []), baseline_config)
-        changed_keys = changed_override_keys(action.get("env_overrides", []), baseline_config)
-        parameter_behavior = determine_parameter_behavior(action.get("change_type", ""), changed_keys)
-        isolation_ok, violation_desc = check_variable_isolation(changes, action.get("change_type", ""))
-        if not isolation_ok:
-            warning = f"Round {round_id}: variable isolation warning: {violation_desc}"
-            print(warning)
-            memory.setdefault("recent_insights", []).append(warning)
-            log_round_event(round_ctx, "variable_isolation_warning", violation=violation_desc)
-
-        # --- Incubation limits check ---
-        incubation_ok, incubation_msg = enforce_incubation_limits(memory, action)
-        if not incubation_ok:
-            print(f"Round {round_id}: incubation limit hit: {incubation_msg}")
-            newly_archived = auto_archive_stale_families(memory)
-            if newly_archived:
-                print(f"Round {round_id}: freed incubation slots by archiving: {', '.join(newly_archived)}")
-                save_json(MEMORY_PATH, memory)
-            incubation_ok2, incubation_msg2 = enforce_incubation_limits(memory, action)
-            if not incubation_ok2:
-                print(f"Round {round_id}: BLOCKING round — incubation limit still exceeded: {incubation_msg2}")
-                log_round_event(round_ctx, "incubation_limit_blocked", reason=incubation_msg2)
-                memory.setdefault("recent_insights", []).append(
-                    f"round {round_id}: BLOCKED by incubation limit: {incubation_msg2}"
+            try:
+                overrides = action.get("env_overrides", [])
+                rejected_keys = validate_env_overrides(
+                    overrides,
+                    fallback_architecture=str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]),
                 )
-                _abort_round(
-                    round_id, action, "policy_reject", "incubation_limit_exceeded",
+                if rejected_keys:
+                    raise RuntimeError(f"env_overrides contain disallowed keys: {', '.join(rejected_keys)}")
+            except RuntimeError as exc:
+                print(f"Round {round_id}: env_overrides rejected: {exc}")
+                log_round_event(round_ctx, "env_overrides_rejected", rejected_keys=rejected_keys, error=str(exc))
+                _, memory = _abort_round(
+                    round_id, action, "crash", "invalid_env_overrides",
                     round_ctx, memory, stdout_path, touched, patch_path,
                     auto_commit,
                 )
-                continue
-
-        # --- Behavioral diff test for code edits ---
-        if is_code_edit and action.get("change_type") == "edit_sae_code" and touched:
-            config = dict(BASE_ENV_DEFAULTS)
-            overrides = action.get("env_overrides", [])
-            if isinstance(overrides, dict):
-                config.update({k: str(v) for k, v in overrides.items()})
-            else:
-                for item in overrides:
-                    key = item.get("key")
-                    value = item.get("value")
-                    if key:
-                        config[key] = str(value)
-            arch = config.get("ARCHITECTURE", "topk").lower()
-            k_val = int(config.get("K", "128"))
-            ef_val = int(config.get("EXPANSION_FACTOR", "8"))
-            diff_result = behavioral_diff_test(arch, k_val, ef_val)
-            if diff_result.get("identical"):
-                print(f"Round {round_id}: behavioral diff test FAILED — identical to baseline topk")
-                log_round_event(round_ctx, "behavioral_diff_identical", architecture=arch)
-                _abort_round(
-                    round_id, action, "crash", "identical_to_baseline",
-                    round_ctx, memory, stdout_path, touched, patch_path,
-                    auto_commit,
-                )
-                continue
-            else:
-                print(f"Round {round_id}: behavioral diff test passed (max_diff={diff_result.get('max_diff', 'N/A')})")
-
-        # --- Dynamic proxy budget ---
-        round_proxy_max_tokens = args.proxy_max_tokens
-        proxy_mode = "fast"
-        evaluation_basis = "terminal_only"
-        if action.get("experiment_tier") == "proxy":
-            adjusted_budget = compute_proxy_budget(action.get("change_type", ""), args.proxy_max_tokens)
-            round_proxy_max_tokens = adjusted_budget
-            if parameter_behavior == "dynamic":
-                round_proxy_max_tokens = str(
-                    max(int(round_proxy_max_tokens), int(args.dynamic_proxy_max_tokens))
-                )
-                proxy_mode = "extended"
-                evaluation_basis = "curve_extended"
-                print(
-                    f"Round {round_id}: dynamic-parameter proxy mode -> extended "
-                    f"({args.proxy_max_tokens} -> {round_proxy_max_tokens} tokens)"
-                )
-                log_round_event(
-                    round_ctx,
-                    "proxy_mode_selected",
-                    tier="proxy",
-                    proxy_mode=proxy_mode,
-                    evaluation_basis=evaluation_basis,
-                    parameter_behavior=parameter_behavior,
-                    proxy_max_tokens=round_proxy_max_tokens,
-                )
-            elif adjusted_budget != args.proxy_max_tokens:
-                print(f"Round {round_id}: dynamic proxy budget: {args.proxy_max_tokens} -> {adjusted_budget}")
-            if proxy_mode == "fast":
-                log_round_event(
-                    round_ctx,
-                    "proxy_mode_selected",
-                    tier="proxy",
-                    proxy_mode=proxy_mode,
-                    evaluation_basis=evaluation_basis,
-                    parameter_behavior=parameter_behavior,
-                    proxy_max_tokens=round_proxy_max_tokens,
-                )
-
-        # --- Budget check before training ---
-        remaining_sec = budget_remaining_sec(start_time, args.budget_hours)
-        tier = action["experiment_tier"]
-        tier_timeout = args.full_timeout_sec if tier == "full" else args.proxy_timeout_sec
-        if remaining_sec < tier_timeout * 0.5:
-            if tier == "full":
-                print(f"Round {round_id}: insufficient budget for full ({remaining_sec:.0f}s remaining), downgrading to proxy")
-                action["experiment_tier"] = "proxy"
-                tier = "proxy"
-                tier_timeout = args.proxy_timeout_sec
-            if remaining_sec < args.proxy_timeout_sec * 0.5:
-                print(f"Round {round_id}: insufficient budget even for proxy ({remaining_sec:.0f}s remaining), stopping")
+                abort_round = True
                 break
 
-        # --- Sanity check for code edits ---
-        if action.get("needs_sanity") and is_code_edit:
-            try:
-                _run_sanity_for_round(action, tier, round_id, round_ctx)
-            except Exception as sanity_exc:
-                print(f"Round {round_id}: sanity check FAILED: {sanity_exc}")
-                sanity_payload = _record_sanity_failure(
-                    memory, round_id, action, tier, sanity_exc
-                )
-                save_json(MEMORY_PATH, memory)
+            changes = classify_changes(action.get("env_overrides", []), baseline_config)
+            changed_keys = changed_override_keys(action.get("env_overrides", []), baseline_config)
+            parameter_behavior = determine_parameter_behavior(action.get("change_type", ""), changed_keys)
+            isolation_ok, violation_desc = check_variable_isolation(changes, action.get("change_type", ""))
+            if not isolation_ok:
+                warning = f"Round {round_id}: variable isolation warning: {violation_desc}"
+                print(warning)
+                memory.setdefault("recent_insights", []).append(warning)
+                log_round_event(round_ctx, "variable_isolation_warning", violation=violation_desc)
+
+            incubation_ok, incubation_msg = enforce_incubation_limits(memory, action)
+            if not incubation_ok:
+                print(f"Round {round_id}: incubation limit hit: {incubation_msg}")
+                newly_archived = auto_archive_stale_families(memory)
+                if newly_archived:
+                    print(f"Round {round_id}: freed incubation slots by archiving: {', '.join(newly_archived)}")
+                    save_json(MEMORY_PATH, memory)
+                incubation_ok2, incubation_msg2 = enforce_incubation_limits(memory, action)
+                if not incubation_ok2:
+                    print(f"Round {round_id}: BLOCKING round — incubation limit still exceeded: {incubation_msg2}")
+                    log_round_event(round_ctx, "incubation_limit_blocked", reason=incubation_msg2)
+                    memory.setdefault("recent_insights", []).append(
+                        f"round {round_id}: BLOCKED by incubation limit: {incubation_msg2}"
+                    )
+                    _abort_round(
+                        round_id, action, "policy_reject", "incubation_limit_exceeded",
+                        round_ctx, memory, stdout_path, touched, patch_path,
+                        auto_commit,
+                    )
+                    abort_round = True
+                    break
+
+            if is_code_edit and action.get("change_type") == "edit_sae_code" and touched:
+                config = dict(BASE_ENV_DEFAULTS)
+                overrides = action.get("env_overrides", [])
+                if isinstance(overrides, dict):
+                    config.update({k: str(v) for k, v in overrides.items()})
+                else:
+                    for item in overrides:
+                        key = item.get("key")
+                        value = item.get("value")
+                        if key:
+                            config[key] = str(value)
+                arch = config.get("ARCHITECTURE", "topk").lower()
+                k_val = int(config.get("K", "128"))
+                ef_val = int(config.get("EXPANSION_FACTOR", "8"))
+                diff_result = behavioral_diff_test(arch, k_val, ef_val)
+                if diff_result.get("identical"):
+                    print(f"Round {round_id}: behavioral diff test FAILED — identical to baseline topk")
+                    log_round_event(round_ctx, "behavioral_diff_identical", architecture=arch)
+                    _abort_round(
+                        round_id, action, "crash", "identical_to_baseline",
+                        round_ctx, memory, stdout_path, touched, patch_path,
+                        auto_commit,
+                    )
+                    abort_round = True
+                    break
+                else:
+                    print(f"Round {round_id}: behavioral diff test passed (max_diff={diff_result.get('max_diff', 'N/A')})")
+
+            round_proxy_max_tokens = args.proxy_max_tokens
+            proxy_mode = "fast"
+            evaluation_basis = "terminal_only"
+            if action.get("experiment_tier") == "proxy":
+                adjusted_budget = compute_proxy_budget(action.get("change_type", ""), args.proxy_max_tokens)
+                round_proxy_max_tokens = adjusted_budget
+                if parameter_behavior == "dynamic":
+                    round_proxy_max_tokens = str(
+                        max(int(round_proxy_max_tokens), int(args.dynamic_proxy_max_tokens))
+                    )
+                    proxy_mode = "extended"
+                    evaluation_basis = "curve_extended"
+                    print(
+                        f"Round {round_id}: dynamic-parameter proxy mode -> extended "
+                        f"({args.proxy_max_tokens} -> {round_proxy_max_tokens} tokens)"
+                    )
+                    log_round_event(
+                        round_ctx,
+                        "proxy_mode_selected",
+                        tier="proxy",
+                        proxy_mode=proxy_mode,
+                        evaluation_basis=evaluation_basis,
+                        parameter_behavior=parameter_behavior,
+                        proxy_max_tokens=round_proxy_max_tokens,
+                    )
+                elif adjusted_budget != args.proxy_max_tokens:
+                    print(f"Round {round_id}: dynamic proxy budget: {args.proxy_max_tokens} -> {adjusted_budget}")
+                if proxy_mode == "fast":
+                    log_round_event(
+                        round_ctx,
+                        "proxy_mode_selected",
+                        tier="proxy",
+                        proxy_mode=proxy_mode,
+                        evaluation_basis=evaluation_basis,
+                        parameter_behavior=parameter_behavior,
+                        proxy_max_tokens=round_proxy_max_tokens,
+                    )
+
+            remaining_sec = budget_remaining_sec(start_time, args.budget_hours)
+            tier = action["experiment_tier"]
+            tier_timeout = args.full_timeout_sec if tier == "full" else args.proxy_timeout_sec
+            if remaining_sec < tier_timeout * 0.5:
+                if tier == "full":
+                    print(f"Round {round_id}: insufficient budget for full ({remaining_sec:.0f}s remaining), downgrading to proxy")
+                    action["experiment_tier"] = "proxy"
+                    tier = "proxy"
+                    tier_timeout = args.proxy_timeout_sec
+                if remaining_sec < args.proxy_timeout_sec * 0.5:
+                    print(f"Round {round_id}: insufficient budget even for proxy ({remaining_sec:.0f}s remaining), stopping")
+                    abort_round = True
+                    stop_loop = True
+                    break
+
+            if action.get("needs_sanity") and is_code_edit:
+                try:
+                    _run_sanity_for_round(action, tier, round_id, round_ctx)
+                except Exception as sanity_exc:
+                    print(f"Round {round_id}: sanity check FAILED: {sanity_exc}")
+                    sanity_payload = _record_sanity_failure(
+                        memory, round_id, action, tier, sanity_exc
+                    )
+                    save_json(MEMORY_PATH, memory)
+                    log_round_event(
+                        round_ctx,
+                        "sanity_failed",
+                        tier=tier,
+                        error=str(sanity_exc),
+                        sanity_details=sanity_payload,
+                    )
+                    if repair_attempt < args.max_repair_attempts and _should_attempt_repair(action, sanity_payload):
+                        repair_attempt += 1
+                        print(f"Round {round_id}: entering in-round repair loop after sanity failure ({repair_attempt}/{args.max_repair_attempts})")
+                        log_round_event(
+                            round_ctx,
+                            "repair_attempt_started",
+                            tier=tier,
+                            family_name=action.get("family_name"),
+                            family_stage=action.get("family_stage"),
+                            repair_attempt=repair_attempt,
+                            failure_kind="sanity_failed",
+                            error_type=sanity_payload.get("error_type"),
+                            error_summary=sanity_payload.get("traceback_excerpt") or sanity_payload.get("stderr_excerpt"),
+                        )
+                        try:
+                            action, stdout_path, maybe_session_id = _request_repair_action(
+                                round_id,
+                                base_action,
+                                "sanity_failed",
+                                sanity_payload,
+                                repair_attempt,
+                                args,
+                                round_ctx,
+                            )
+                            if maybe_session_id:
+                                round_ctx["session_id"] = maybe_session_id
+                            print(f"Round {round_id}: repair action received | attempt={repair_attempt} log={stdout_path}")
+                            continue
+                        except Exception as repair_exc:
+                            print(f"Round {round_id}: repair attempt failed: {repair_exc}")
+                            log_round_event(
+                                round_ctx,
+                                "repair_attempt_failed",
+                                tier=tier,
+                                repair_attempt=repair_attempt,
+                                failure_kind="sanity_failed",
+                                error=str(repair_exc),
+                            )
+                    _abort_round(
+                        round_id, action, "crash", "sanity_failed",
+                        round_ctx, memory, stdout_path, touched, patch_path,
+                        auto_commit,
+                    )
+                    abort_round = True
+                    break
+
+            proxy_override = round_proxy_max_tokens if tier == "proxy" else None
+            result = run_training_round(
+                action,
+                tier,
+                args,
+                round_id,
+                memory,
+                round_ctx,
+                proxy_max_tokens_override=proxy_override,
+                proxy_mode=proxy_mode if tier == "proxy" else "fast",
+                evaluation_basis=evaluation_basis if tier == "proxy" else "terminal_only",
+            )
+            if (
+                result.get("decision") == "crash"
+                and repair_attempt < args.max_repair_attempts
+                and _should_attempt_repair(action, result)
+            ):
+                repair_attempt += 1
+                print(f"Round {round_id}: entering in-round repair loop after training crash ({repair_attempt}/{args.max_repair_attempts})")
                 log_round_event(
                     round_ctx,
-                    "sanity_failed",
+                    "repair_attempt_started",
                     tier=tier,
-                    error=str(sanity_exc),
-                    sanity_details=sanity_payload,
+                    family_name=action.get("family_name"),
+                    family_stage=action.get("family_stage"),
+                    repair_attempt=repair_attempt,
+                    failure_kind="training_crash",
+                    error_type=result.get("error_type"),
+                    error_summary=result.get("error_summary"),
                 )
-                _abort_round(
-                    round_id, action, "crash", "sanity_failed",
-                    round_ctx, memory, stdout_path, touched, patch_path,
-                    auto_commit,
-                )
-                continue
+                try:
+                    action, stdout_path, maybe_session_id = _request_repair_action(
+                        round_id,
+                        base_action,
+                        "training_crash",
+                        result,
+                        repair_attempt,
+                        args,
+                        round_ctx,
+                    )
+                    if maybe_session_id:
+                        round_ctx["session_id"] = maybe_session_id
+                    print(f"Round {round_id}: repair action received | attempt={repair_attempt} log={stdout_path}")
+                    continue
+                except Exception as repair_exc:
+                    print(f"Round {round_id}: repair attempt failed: {repair_exc}")
+                    log_round_event(
+                        round_ctx,
+                        "repair_attempt_failed",
+                        tier=tier,
+                        repair_attempt=repair_attempt,
+                        failure_kind="training_crash",
+                        error=str(repair_exc),
+                    )
+            break
 
-        # --- Training ---
-        proxy_override = round_proxy_max_tokens if tier == "proxy" else None
-        result = run_training_round(
-            action,
-            tier,
-            args,
-            round_id,
-            memory,
-            round_ctx,
-            proxy_max_tokens_override=proxy_override,
-            proxy_mode=proxy_mode if tier == "proxy" else "fast",
-            evaluation_basis=evaluation_basis if tier == "proxy" else "terminal_only",
-        )
+        if abort_round:
+            cleanup_round_snapshots(round_id)
+            if stop_loop:
+                break
+            continue
         round_ctx["proxy_result"] = result
         print(
             f"Round {round_id} proxy result: "
@@ -1228,6 +1455,7 @@ def main() -> int:
             patch_path, stdout_path,
             auto_commit, effective_session_mode,
         )
+        cleanup_round_snapshots(round_id)
 
     # --- Loop finished ---
     write_status("idle")
