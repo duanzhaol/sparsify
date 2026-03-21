@@ -1,6 +1,6 @@
 {
-  "updated_at": 1774120793,
-  "active_session_id": null,
+  "updated_at": 1774131609,
+  "active_session_id": "019d1279-dd8d-73d2-97df-ff57e75146ab",
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "best_full_frontier": {
     "128": {
@@ -161,16 +161,6 @@
   ],
   "recent_results": [
     {
-      "experiment_id": "proxy_1774118993",
-      "tier": "proxy",
-      "status": "ok",
-      "decision": "discard",
-      "val_fvu": "0.17990098893642426",
-      "k": "128",
-      "architecture": "gated",
-      "description": "Run a gated proxy sweep at K=128 with the stable signum/EF=16 recipe, changing only AUXK_ALPHA to 0.01."
-    },
-    {
       "experiment_id": "proxy_1774119187",
       "tier": "proxy",
       "status": "ok",
@@ -189,6 +179,16 @@
       "k": "128",
       "architecture": "lowrank_residual",
       "description": "Run a proxy `lowrank_residual` comparison at `K=128` using the same strong signum/EF=16/aux-free recipe as the current gated anchor, changing only architecture. No code edit is needed this round because the architecture path already exists and now instantiates successfully."
+    },
+    {
+      "experiment_id": "proxy_1774131609",
+      "tier": "proxy",
+      "status": "ok",
+      "decision": "incubate",
+      "val_fvu": "0.2673991918563843",
+      "k": "128",
+      "architecture": "whitened_topk",
+      "description": "Run a `whitened_topk` proxy comparison at K=128, keeping the current best signum/EF=16/aux-free recipe fixed and changing only architecture."
     }
   ],
   "recent_round_summaries": [
@@ -255,7 +255,7 @@
     },
     "lowrank_residual": {
       "status": "incubating",
-      "design_hypothesis": "Severe stagnation and the policy guidance both point away from more gated-local tuning. The current workspace already contains a `lowrank_residual` implementation that now passes a local forward/backward smoke test, so the least-bad informative move is a clean proxy retry of that fundamentally different family at K=128 under the strongest shared gated recipe. If separating a learned low-rank trunk before TopK makes the residual easier to sparsify, it can lower FVU at fixed K without changing the execution layer.",
+      "design_hypothesis": "`lowrank_residual` produced the strongest non-gated proxy among recent architecture pivots, so the next informative move is a narrow family-specific stabilization pass rather than abandoning it after one prototype result. The current trunk rank formula likely underpowers the dense trunk under the strong EF=16 recipe by collapsing to a near-minimal rank, so increasing the default trunk capacity should remove more shared dense structure before sparse residual coding and improve FVU at fixed K=128.",
       "best_proxy_fvu": null,
       "tested_configs": [
         {
@@ -265,14 +265,43 @@
           "decision": "incubate",
           "val_fvu": "0.22577644512057304",
           "run_health": "normal"
+        },
+        {
+          "round": 5,
+          "stage": "stabilize",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
         }
       ],
       "next_steps": [
-        "If `lowrank_residual` shows promising proxy FVU with normal throughput, keep the family incubating and sweep its internal trunk strength with a narrow code edit next.",
-        "If `lowrank_residual` runs but shows a throughput regression relative to gated, follow with an `edit_perf_code` round before concluding the family is weak.",
-        "If `lowrank_residual` is clearly uncompetitive under the shared strong recipe, pivot to a different fundamentally new family rather than returning to gated-local tweaks."
+        "If the stronger-trunk `lowrank_residual` materially improves proxy FVU, keep incubating the family and then explore lower K within this family or promote to full if the gain is large enough.",
+        "If quality stays similar but throughput regresses, follow with a targeted `edit_perf_code` round rather than treating the family as architecturally weak.",
+        "If the stronger trunk still leaves `lowrank_residual` clearly uncompetitive, pivot to a different fundamentally new architecture family instead of returning to gated-local tuning."
       ],
-      "last_round": 4
+      "last_round": 5
+    },
+    "whitened_topk": {
+      "status": "incubating",
+      "design_hypothesis": "After eight straight no-improve rounds and with gated already mapped at K=32/64/128, the least-bad informative move is a fundamentally different architecture that changes the input geometry rather than doing another local sweep. A `whitened_topk` proxy run at K=128 under the current strongest gated recipe can test whether a learned input preconditioner makes the activation space easier to sparsify and opens a new quality frontier without coupling in optimizer or K changes.",
+      "best_proxy_fvu": null,
+      "tested_configs": [
+        {
+          "round": 6,
+          "stage": "prototype",
+          "k": "128",
+          "decision": "incubate",
+          "val_fvu": "0.2673991918563843",
+          "run_health": "normal"
+        }
+      ],
+      "next_steps": [
+        "If `whitened_topk` is materially better than recent non-gated alternatives, keep incubating it with a family-specific stabilization pass before any full request.",
+        "If `whitened_topk` is clearly uncompetitive, pivot to another genuinely different architecture mechanism rather than returning to minor gated parameter sweeps.",
+        "If quality looks promising but runtime is abnormally slow, follow with an `edit_perf_code` round instead of discarding the family on architecture grounds."
+      ],
+      "last_round": 6
     }
   },
   "recent_performance_findings": [
@@ -292,14 +321,6 @@
     }
   ],
   "recent_training_failures": [
-    {
-      "round": 58,
-      "family_name": "residual_topk",
-      "change_type": "edit_sae_code",
-      "error_type": "ValueError",
-      "termination_reason": "completed",
-      "error_summary": "ValueError: Unknown architecture: 'residual_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk')"
-    },
     {
       "round": 61,
       "family_name": "residual_topk",
@@ -323,13 +344,21 @@
       "error_type": "ValueError",
       "termination_reason": "completed",
       "error_summary": "ValueError: Unknown architecture: 'lowrank_residual'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk')"
+    },
+    {
+      "round": 5,
+      "family_name": "lowrank_residual",
+      "change_type": "edit_sae_code",
+      "error_type": "",
+      "termination_reason": "identical_to_baseline",
+      "error_summary": ""
     }
   ],
   "pending_hints": [],
   "next_move_guidance": [
-    "If `lowrank_residual` shows promising proxy FVU with normal throughput, keep the family incubating and sweep its internal trunk strength with a narrow code edit next.",
-    "If `lowrank_residual` runs but shows a throughput regression relative to gated, follow with an `edit_perf_code` round before concluding the family is weak.",
-    "If `lowrank_residual` is clearly uncompetitive under the shared strong recipe, pivot to a different fundamentally new family rather than returning to gated-local tweaks."
+    "If `whitened_topk` is materially better than recent non-gated alternatives, keep incubating it with a family-specific stabilization pass before any full request.",
+    "If `whitened_topk` is clearly uncompetitive, pivot to another genuinely different architecture mechanism rather than returning to minor gated parameter sweeps.",
+    "If quality looks promising but runtime is abnormally slow, follow with an `edit_perf_code` round instead of discarding the family on architecture grounds."
   ],
-  "last_round": 4
+  "last_round": 6
 }
