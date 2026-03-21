@@ -465,7 +465,7 @@
     "multi_branch_gated": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "`two_stage_residual` remains a real K=128 win, but the front-loaded split change only matched the existing best point instead of extending the frontier, and its lower-K/width behavior still looks brittle. The next informative move is to pivot to a different non-gated family with a different inductive bias: a `multi_branch_gated` SAE that uses several gated encoder branches competing to explain different activation substructures before the final TopK selection, which could preserve the K=128 quality gains while avoiding the narrow tuning sensitivity of the staged-residual prototype.",
+      "design_hypothesis": "`multi_branch_gated` produced the strongest new non-winning proxy signal since `two_stage_residual`, so the next informative move is a family-specific stabilization pass rather than pivoting away immediately. Increasing `EXPANSION_FACTOR` from 16 to 32 at K=128 tests whether the multi-branch gated encoder is capacity-limited under the current strong signum recipe and can close more of the remaining quality gap without changing architecture or optimization.",
       "tested_configs": [
         {
           "round": 11,
@@ -474,38 +474,28 @@
           "decision": "incubate",
           "val_fvu": "0.15793968923389912",
           "run_health": "normal"
+        },
+        {
+          "round": 12,
+          "stage": "stabilize",
+          "k": "128",
+          "decision": "incubate",
+          "val_fvu": "0.25158748403191566",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If the repaired `multi_branch_gated` run now completes and shows competitive proxy FVU, continue the original incubation plan for this family.",
-        "If the next failure is another concrete implementation bug, continue repair mode without changing the experiment target.",
-        "If the run completes but is slow, consider a later performance-focused follow-up rather than abandoning the family immediately."
+        "If `multi_branch_gated` with `EXPANSION_FACTOR=32` improves materially, promote it to full and continue stabilizing the family.",
+        "If EF=32 is flat or worse, test a family-specific branch-allocation or branch-count parameter next rather than continuing generic width sweeps.",
+        "If quality is promising but runtime regresses materially, follow with a targeted performance-focused code pass."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 11
+      "last_round": 12
     }
   },
   "recent_rounds": [
-    {
-      "round": 67,
-      "hypothesis": "The best existing promoted alternatives have now been refreshed and still sit well behind the gated frontier, so the least-bad next informative move is a genuinely new architecture family rather than another local sweep. A `lowrank_residual` SAE that uses a learned low-rank linear trunk plus a sparse residual coder could remove shared dense structure before TopK selection, which is a materially different way to attack the K=128 quality ceiling without changing the execution layer.",
-      "change_type": "edit_sae_code",
-      "expected_win": "explore_unknown",
-      "family_name": "lowrank_residual",
-      "family_stage": "prototype",
-      "decision": "crash",
-      "val_fvu": "None",
-      "observed_fvu": "",
-      "k": "None",
-      "architecture": "lowrank_residual",
-      "touched_files": [],
-      "run_health": "crash",
-      "termination_reason": "completed",
-      "tokens_per_sec": "",
-      "baseline_ratio": ""
-    },
     {
       "round": 1,
       "hypothesis": "The gated family is in exploitation mode and the lower-LR branch already showed regression, so the most informative remaining one-variable probe is the opposite direction: raise signum LR from 1.6e-3 to 3.2e-3 on the stable K=128, EF=16, aux-free anchor. A higher LR may escape the current optimization plateau and improve proxy FVU without changing architecture or cost structure.",
@@ -711,13 +701,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "66570.993203",
       "baseline_ratio": ""
+    },
+    {
+      "round": 12,
+      "hypothesis": "`multi_branch_gated` produced the strongest new non-winning proxy signal since `two_stage_residual`, so the next informative move is a family-specific stabilization pass rather than pivoting away immediately. Increasing `EXPANSION_FACTOR` from 16 to 32 at K=128 tests whether the multi-branch gated encoder is capacity-limited under the current strong signum recipe and can close more of the remaining quality gap without changing architecture or optimization.",
+      "change_type": "param_only",
+      "expected_win": "quality_improve",
+      "family_name": "multi_branch_gated",
+      "family_stage": "stabilize",
+      "decision": "incubate",
+      "val_fvu": "0.25158748403191566",
+      "observed_fvu": "0.250980",
+      "k": "128",
+      "architecture": "multi_branch_gated",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "27669.728223",
+      "baseline_ratio": "0.415642"
     }
   ],
   "recent_insights": [
-    "Round 3: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
-    "Severe stagnation triggered an architecture pivot away from further gated-local tuning.",
-    "This round revisits the best existing non-gated family under the current strongest shared recipe to test whether the search failure is specific to gated rather than the whole regime.",
-    "round 3: Five rounds of gated-local tuning have failed to move the frontier, so the current search direction is likely locally exhausted. The least-disruptive fundamentally different probe is to switch the single primary variable back to architecture and run `jumprelu` at K=128 under the strongest shared signum recipe to test whether a different sparse activation mechanism can reopen quality gains without introducing new code risk. -> incubate (fvu=0.2653468679636717, observed_fvu=0.264683, k=128, health=normal, termination=completed)",
     "Round 4: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
     "Verified in the current workspace that `lowrank_residual` is already registered in `sparsify.config` and `sparsify.sparse_coder`, and a local CPU forward/backward smoke test succeeds.",
     "Given severe stagnation with gated across K={32,64,128}, the next informative move is a clean proxy architecture retry rather than more local hyperparameter tuning.",
@@ -753,12 +757,16 @@
     "Repair attempt 1 for round 11 fixed the concrete startup blocker by registering `multi_branch_gated` in config validation and SAE factory dispatch.",
     "Added a minimal `MultiBranchGatedSparseCoder` implementation in `sparsify/sparse_coder.py`; local instantiate plus forward/backward sanity passed.",
     "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
-    "round 11: `two_stage_residual` remains a real K=128 win, but the front-loaded split change only matched the existing best point instead of extending the frontier, and its lower-K/width behavior still looks brittle. The next informative move is to pivot to a different non-gated family with a different inductive bias: a `multi_branch_gated` SAE that uses several gated encoder branches competing to explain different activation substructures before the final TopK selection, which could preserve the K=128 quality gains while avoiding the narrow tuning sensitivity of the staged-residual prototype. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)"
+    "round 11: `two_stage_residual` remains a real K=128 win, but the front-loaded split change only matched the existing best point instead of extending the frontier, and its lower-K/width behavior still looks brittle. The next informative move is to pivot to a different non-gated family with a different inductive bias: a `multi_branch_gated` SAE that uses several gated encoder branches competing to explain different activation substructures before the final TopK selection, which could preserve the K=128 quality gains while avoiding the narrow tuning sensitivity of the staged-residual prototype. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)",
+    "Round 12: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
+    "`multi_branch_gated` prototype at K=128 reached proxy FVU 0.15793968923389912, making it a competitive incubating family worth stabilization rather than immediate discard.",
+    "This round tests whether the new family is capacity-limited by increasing only `EXPANSION_FACTOR` from 16 to 32 at the K=128 anchor.",
+    "round 12: `multi_branch_gated` produced the strongest new non-winning proxy signal since `two_stage_residual`, so the next informative move is a family-specific stabilization pass rather than pivoting away immediately. Increasing `EXPANSION_FACTOR` from 16 to 32 at K=128 tests whether the multi-branch gated encoder is capacity-limited under the current strong signum recipe and can close more of the remaining quality gap without changing architecture or optimization. -> incubate (fvu=0.25158748403191566, observed_fvu=0.250980, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If the repaired `multi_branch_gated` run now completes and shows competitive proxy FVU, continue the original incubation plan for this family.",
-    "If the next failure is another concrete implementation bug, continue repair mode without changing the experiment target.",
-    "If the run completes but is slow, consider a later performance-focused follow-up rather than abandoning the family immediately."
+    "If `multi_branch_gated` with `EXPANSION_FACTOR=32` improves materially, promote it to full and continue stabilizing the family.",
+    "If EF=32 is flat or worse, test a family-specific branch-allocation or branch-count parameter next rather than continuing generic width sweeps.",
+    "If quality is promising but runtime regresses materially, follow with a targeted performance-focused code pass."
   ],
   "recent_sanity_failures": [
     {
