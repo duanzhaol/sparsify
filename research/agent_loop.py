@@ -133,6 +133,90 @@ REPAIRABLE_ERROR_TYPES = {
 }
 
 
+def _failure_signature(payload: dict[str, Any]) -> str:
+    family = str(payload.get("family_name") or "")
+    error_type = str(payload.get("error_type") or "")
+    termination_reason = str(payload.get("termination_reason") or "")
+    summary = str(
+        payload.get("error_summary")
+        or payload.get("traceback_excerpt")
+        or payload.get("stderr_excerpt")
+        or payload.get("message")
+        or ""
+    ).strip()
+    summary = " ".join(summary.split())[:240]
+    return " | ".join((family, error_type, termination_reason, summary))
+
+
+def _record_repair_metadata(
+    round_ctx: dict[str, Any],
+    repair_attempt: int,
+    failure_kind: str,
+    failure_payload: dict[str, Any],
+    touched: list[str] | None = None,
+    outcome: str = "observed",
+) -> None:
+    attempts = round_ctx.setdefault("repair_attempts", [])
+    entry = {
+        "attempt": repair_attempt,
+        "failure_kind": failure_kind,
+        "error_type": failure_payload.get("error_type"),
+        "termination_reason": failure_payload.get("termination_reason"),
+        "signature": _failure_signature(failure_payload),
+        "outcome": outcome,
+    }
+    if touched is not None:
+        entry["touched_files"] = list(touched)
+    attempts.append(entry)
+
+
+def _should_abort_repair_loop(
+    round_id: int,
+    round_ctx: dict[str, Any],
+    repair_attempt: int,
+    failure_kind: str,
+    failure_payload: dict[str, Any],
+    touched: list[str],
+) -> tuple[bool, str | None]:
+    if repair_attempt <= 0:
+        return False, None
+    if not touched:
+        log_round_event(
+            round_ctx,
+            "repair_loop_blocked",
+            repair_attempt=repair_attempt,
+            failure_kind=failure_kind,
+            reason="no_code_changes",
+            error_type=failure_payload.get("error_type"),
+        )
+        return True, (
+            f"Round {round_id}: aborting repair loop because repair attempt "
+            f"{repair_attempt} produced no code changes"
+        )
+
+    signature = _failure_signature(failure_payload)
+    last_signature = round_ctx.get("last_repair_failure_signature")
+    streak = int(round_ctx.get("same_repair_failure_streak", 0))
+    streak = streak + 1 if signature == last_signature else 1
+    round_ctx["last_repair_failure_signature"] = signature
+    round_ctx["same_repair_failure_streak"] = streak
+    if streak >= 2:
+        log_round_event(
+            round_ctx,
+            "repair_loop_blocked",
+            repair_attempt=repair_attempt,
+            failure_kind=failure_kind,
+            reason="same_root_cause_repeated",
+            error_type=failure_payload.get("error_type"),
+            signature=signature,
+        )
+        return True, (
+            f"Round {round_id}: aborting repair loop because the same root cause "
+            f"persisted after repair attempt {repair_attempt}"
+        )
+    return False, None
+
+
 def _record_sanity_failure(
     memory: dict[str, Any],
     round_id: int,
@@ -1016,6 +1100,9 @@ def main() -> int:
             "timeline_event_ids": [],
             "proxy_result": None,
             "full_result": None,
+            "repair_attempts": [],
+            "last_repair_failure_signature": None,
+            "same_repair_failure_streak": 0,
         }
         print(f"Starting round {round_id}")
         log_round_event(round_ctx, "round_started", status="started")
@@ -1165,6 +1252,30 @@ def main() -> int:
             else:
                 print(f"Round {round_id}: no code files changed")
 
+            if repair_attempt > 0 and not touched:
+                noop_message = (
+                    f"Round {round_id}: aborting repair loop because repair attempt "
+                    f"{repair_attempt} produced no code changes"
+                )
+                print(noop_message)
+                memory.setdefault("recent_insights", []).append(noop_message)
+                memory["recent_insights"] = memory["recent_insights"][-40:]
+                save_json(MEMORY_PATH, memory)
+                log_round_event(
+                    round_ctx,
+                    "repair_loop_blocked",
+                    repair_attempt=repair_attempt,
+                    failure_kind="post_repair_validation",
+                    reason="no_code_changes",
+                )
+                _abort_round(
+                    round_id, action, "crash", "repair_no_effect",
+                    round_ctx, memory, stdout_path, touched, patch_path,
+                    auto_commit,
+                )
+                abort_round = True
+                break
+
             baseline_config = resolve_baseline_config(
                 state,
                 action,
@@ -1311,6 +1422,25 @@ def main() -> int:
                     sanity_payload = _record_sanity_failure(
                         memory, round_id, action, tier, sanity_exc
                     )
+                    _record_repair_metadata(
+                        round_ctx,
+                        repair_attempt,
+                        "sanity_failed",
+                        sanity_payload,
+                        touched=touched,
+                    )
+                    should_abort, abort_message = _should_abort_repair_loop(
+                        round_id,
+                        round_ctx,
+                        repair_attempt,
+                        "sanity_failed",
+                        sanity_payload,
+                        touched,
+                    )
+                    if should_abort and abort_message:
+                        print(abort_message)
+                        memory.setdefault("recent_insights", []).append(abort_message)
+                        memory["recent_insights"] = memory["recent_insights"][-40:]
                     save_json(MEMORY_PATH, memory)
                     log_round_event(
                         round_ctx,
@@ -1319,6 +1449,14 @@ def main() -> int:
                         error=str(sanity_exc),
                         sanity_details=sanity_payload,
                     )
+                    if should_abort:
+                        _abort_round(
+                            round_id, action, "crash", "repair_root_cause_repeated",
+                            round_ctx, memory, stdout_path, touched, patch_path,
+                            auto_commit,
+                        )
+                        abort_round = True
+                        break
                     if repair_attempt < args.max_repair_attempts and _should_attempt_repair(action, sanity_payload):
                         repair_attempt += 1
                         print(f"Round {round_id}: entering in-round repair loop after sanity failure ({repair_attempt}/{args.max_repair_attempts})")
@@ -1377,6 +1515,30 @@ def main() -> int:
                 proxy_mode=proxy_mode if tier == "proxy" else "fast",
                 evaluation_basis=evaluation_basis if tier == "proxy" else "terminal_only",
             )
+            if result.get("decision") == "crash":
+                _record_repair_metadata(
+                    round_ctx,
+                    repair_attempt,
+                    "training_crash",
+                    result,
+                    touched=touched,
+                )
+                should_abort, abort_message = _should_abort_repair_loop(
+                    round_id,
+                    round_ctx,
+                    repair_attempt,
+                    "training_crash",
+                    result,
+                    touched,
+                )
+                if should_abort:
+                    if abort_message:
+                        print(abort_message)
+                        memory.setdefault("recent_insights", []).append(abort_message)
+                        memory["recent_insights"] = memory["recent_insights"][-40:]
+                        save_json(MEMORY_PATH, memory)
+                    result["termination_reason"] = "repair_root_cause_repeated"
+                    break
             if (
                 result.get("decision") == "crash"
                 and repair_attempt < args.max_repair_attempts

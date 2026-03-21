@@ -239,6 +239,7 @@ def build_resume_prompt(
 ) -> str:
     operator_hints, _ = split_hints(load_operator_hints())
     operator_guide_excerpt = load_operator_guide_excerpt()
+    memory_digest = memory_prompt_digest(memory)
     payload = {
         "round": round_id,
         "current_focus": brief.get("current_focus") or memory.get("current_focus"),
@@ -246,9 +247,19 @@ def build_resume_prompt(
         "recent_results": brief.get("recent_results", summarize_results(results)),
         "recent_round_summaries": brief.get("recent_round_summaries", recent_round_summaries_trimmed()),
         "incubating_families": brief.get("incubating_families", {}),
-        "recent_performance_findings": brief.get("recent_performance_findings", memory.get("performance_findings", [])[-8:]),
-        "recent_sanity_failures": brief.get("recent_sanity_failures", memory.get("recent_sanity_failures", [])[-6:]),
-        "recent_training_failures": brief.get("recent_training_failures", memory.get("recent_training_failures", [])[-6:]),
+        "memory_digest": memory_digest,
+        "recent_performance_findings": brief.get(
+            "recent_performance_findings",
+            memory_digest.get("recent_performance_findings", []),
+        ),
+        "recent_sanity_failures": brief.get(
+            "recent_sanity_failures",
+            memory_digest.get("recent_sanity_failures", []),
+        ),
+        "recent_training_failures": brief.get(
+            "recent_training_failures",
+            memory_digest.get("recent_training_failures", []),
+        ),
         "pending_hints": brief.get("pending_hints", operator_hints[:8]),
         "operator_guide_excerpt": operator_guide_excerpt,
         "next_move_guidance": brief.get("next_move_guidance", memory.get("next_hypotheses", [])[:8]),

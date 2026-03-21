@@ -496,6 +496,7 @@ def write_round_summary(
         "timeline_start_event_id": round_ctx.get("timeline_start_event_id"),
         "timeline_end_event_id": round_ctx.get("timeline_end_event_id"),
         "timeline_event_ids": round_ctx.get("timeline_event_ids", []),
+        "repair_attempts": round_ctx.get("repair_attempts", []),
         "experiment_branch": current_git_branch(),
         "experiment_commit_message": commit_message_for_round(round_id, action, result, tier or "proxy"),
         "proxy_result": round_ctx.get("proxy_result"),
