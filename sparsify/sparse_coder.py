@@ -514,7 +514,10 @@ class LowRankResidualSparseCoder(SparseCoder):
         self.d_in = d_in
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        trunk_rank = min(d_in, max(cfg.k, d_in // max(cfg.expansion_factor, 1)))
+        # Keep a meaningfully expressive dense trunk before sparse residual
+        # coding. Tying trunk rank too tightly to expansion factor made the
+        # prototype collapse to a minimal rank under the strong EF=16 recipe.
+        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
         self.trunk_encoder = nn.Linear(
             d_in, trunk_rank, bias=False, device=device, dtype=dtype
         )
