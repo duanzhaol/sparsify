@@ -60,7 +60,6 @@ RESULT_COLUMNS = [
 DEFAULT_AGENT_TIMEOUT_SEC = 10 * 60
 MAX_CONTEXT_RESULTS = 10
 MAX_CONTEXT_ROUNDS = 80
-MAX_ARTIFACTS_IN_CONTEXT = 40
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -621,10 +620,38 @@ def summarize_family(family_name: str, family: dict[str, Any]) -> dict[str, Any]
         "best_full_fvu": family.get("best_full_fvu"),
         "last_round": parse_int(family.get("last_round")),
         "tested_config_count": len(tested),
-        "known_issues": [trim_text(x, limit=140) for x in family.get("known_issues", [])[-2:]],
-        "next_steps": [trim_text(x, limit=140) for x in family.get("next_steps", [])[-2:]],
+        "known_issues": [trim_text(x, limit=110) for x in family.get("known_issues", [])[-1:]],
+        "next_steps": [trim_text(x, limit=110) for x in family.get("next_steps", [])[-1:]],
         "best_tested_config": best_test,
     }
+
+
+def compact_runtime_baselines(baseline_runtime: dict[str, Any]) -> dict[str, Any]:
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for key, value in baseline_runtime.items():
+        if not isinstance(value, dict):
+            continue
+        entries.append((key, value))
+    entries.sort(key=lambda item: item[1].get("updated_at") or 0)
+    compact: dict[str, Any] = {}
+    for key, value in entries[-6:]:
+        compact[key] = {
+            "tokens_per_sec": value.get("tokens_per_sec"),
+            "round": value.get("round"),
+            "tier": value.get("tier"),
+            "architecture": value.get("architecture"),
+            "k": value.get("k"),
+        }
+    return compact
+
+
+def compact_architecture_finding(line: str) -> str:
+    if not isinstance(line, str):
+        return ""
+    prefix, sep, suffix = line.partition(" hypothesis=")
+    if not sep:
+        return trim_text(line, limit=160)
+    return f"{trim_text(prefix, limit=120)} lesson={trim_text(suffix, limit=120)}"
 
 
 def build_round_digest(summary: dict[str, Any], candidate_reasons: dict[int, list[str]]) -> dict[str, Any]:
@@ -655,7 +682,11 @@ def build_round_digest(summary: dict[str, Any], candidate_reasons: dict[int, lis
     }
 
 
-def build_artifact_inventory(src_history: Path, summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_artifact_inventory(
+    src_history: Path,
+    summaries: list[dict[str, Any]],
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     logs_dir = src_history / "logs"
     inventory: dict[str, dict[str, Any]] = {}
     for summary in summaries:
@@ -684,7 +715,7 @@ def build_artifact_inventory(src_history: Path, summaries: list[dict[str, Any]])
     items = sorted(inventory.values(), key=lambda item: ((item["rounds"][0] if item["rounds"] else 10**9), item["name"]))
     for item in items:
         item["size_kb"] = round((item.pop("size_bytes") or 0) / 1024, 1)
-    return items[:MAX_ARTIFACTS_IN_CONTEXT]
+    return items[:limit] if limit is not None else items
 
 
 def build_context_pack(
@@ -815,6 +846,7 @@ Output rules:
 - `safety_checks` must stay true for all hard constraints
 - default to `rebuild_digest` for `timeline_policy` unless per-event filtered history is genuinely needed
 - avoid retaining artifacts or timeline detail when `round_decisions` plus compact memory already preserve the lesson
+- `keep_log_artifacts` and `drop_log_artifacts` refer only to names from `artifact_inventory`; do not list core files like `state.json` or `results.tsv` there
 
 Structured context:
 {json.dumps(context_pack, indent=2, ensure_ascii=False)}
@@ -954,12 +986,34 @@ def validate_compaction_plan(
         raise RuntimeError(f"Compaction plan rejected required safety checks: {', '.join(bad)}")
 
     artifact_names = {item["name"] for item in artifact_inventory}
-    unknown_keep = sorted(set(plan.get("keep_log_artifacts", [])) - artifact_names)
+    core_runtime_files = {
+        "state.json",
+        "frontier.json",
+        "memory.json",
+        "results.tsv",
+        "session_brief.json",
+        "operator_hints.json",
+        "current_status.json",
+        "timeline.jsonl",
+        "compression_manifest.json",
+        "compression_report.md",
+        "compaction_plan.json",
+    }
+    unknown_keep = sorted(
+        set(plan.get("keep_log_artifacts", []))
+        - artifact_names
+        - core_runtime_files
+    )
     if unknown_keep:
         raise RuntimeError(f"Compaction plan references unknown artifacts: {', '.join(unknown_keep[:8])}")
 
     if plan.get("timeline_policy") not in {"full", "filtered", "rebuild_digest"}:
         raise RuntimeError("timeline_policy must be one of: full, filtered, rebuild_digest")
+
+
+def normalize_kept_artifacts(plan: dict[str, Any], artifact_inventory: list[dict[str, Any]]) -> list[str]:
+    artifact_names = {item["name"] for item in artifact_inventory}
+    return sorted(set(name for name in plan.get("keep_log_artifacts", []) if name in artifact_names))
 
 
 def build_dropped_rounds_digest(
@@ -1012,11 +1066,13 @@ def build_compact_memory(
         if not isinstance(family, dict):
             continue
         family_summary = summarize_family(family_name, family)
-        family_summary["kept_rounds"] = [
+        kept_family_rounds = [
             parse_int(cfg.get("round"))
             for cfg in family.get("tested_configs", [])
             if parse_int(cfg.get("round")) in kept_round_set
         ]
+        if kept_family_rounds:
+            family_summary["kept_rounds"] = kept_family_rounds[-3:]
         family_summaries[family_name] = family_summary
 
     architecture_findings = []
@@ -1050,9 +1106,15 @@ def build_compact_memory(
             performance_findings.append(line)
 
     compact["architecture_families"] = family_summaries
-    compact["architecture_findings"] = dedupe_keep_order(architecture_findings)[-12:]
-    compact["performance_findings"] = dedupe_keep_order(performance_findings)[-12:]
-    compact["recent_training_failures"] = summarize_recent_failures(all_summaries, limit=8)
+    compact["architecture_findings"] = [
+        item for item in (
+            compact_architecture_finding(line)
+            for line in dedupe_keep_order(architecture_findings)[-8:]
+        )
+        if item
+    ]
+    compact["performance_findings"] = dedupe_keep_order(performance_findings)[-8:]
+    compact["recent_training_failures"] = summarize_recent_failures(all_summaries, limit=6)
     compact["recent_sanity_failures"] = [
         item for item in (
             compact_failure_entry(entry)
@@ -1083,11 +1145,12 @@ def build_compact_memory(
             "last_round": parse_int(item.get("last_round")) if isinstance(item, dict) else None,
             "run_health": item.get("run_health") if isinstance(item, dict) else None,
             "termination_reason": item.get("termination_reason") if isinstance(item, dict) else None,
-            "pattern": trim_text(item.get("pattern"), limit=220) if isinstance(item, dict) else None,
+            "pattern": trim_text(item.get("pattern"), limit=140) if isinstance(item, dict) else None,
         }
-        for item in compact.get("failure_patterns", [])[-8:]
+        for item in compact.get("failure_patterns", [])[-5:]
         if isinstance(item, dict)
     ]
+    compact["baseline_runtime"] = compact_runtime_baselines(compact.get("baseline_runtime", {}))
     return compact
 
 
@@ -1141,7 +1204,6 @@ def build_session_brief_from_compact(
         "updated_at": int(time.time()),
         "active_session_id": None,
         "current_focus": memory.get("current_focus"),
-        "best_full_frontier": frontier_digest(state.get("full_frontier", state.get("frontier", {}))),
         "pareto_full_frontier": frontier_digest(state.get("pareto_full_frontier", state.get("pareto_frontier", []))),
         "recent_results": summarize_results(results[-3:]),
         "recent_round_summaries": trimmed_rounds,
@@ -1446,6 +1508,8 @@ def main() -> int:
     results = load_results(src_history / "results.tsv")
     all_summaries = [load_json(path, {}) for path in sorted_round_summary_paths(src_history / "round_summaries")]
 
+    full_artifact_inventory = build_artifact_inventory(src_history, all_summaries, limit=None)
+
     context_pack = build_context_pack(
         src_history=src_history,
         state=state,
@@ -1478,11 +1542,11 @@ def main() -> int:
             temp_path = out_dir / temp_name
             if temp_path.exists():
                 temp_path.unlink()
-    validate_compaction_plan(plan, all_summaries, context_pack["artifact_inventory"])
+    validate_compaction_plan(plan, all_summaries, full_artifact_inventory)
 
     kept_rounds = sorted(set(int(r) for r in plan.get("keep_rounds", [])))
     kept_round_set = set(kept_rounds)
-    kept_artifacts = sorted(set(plan.get("keep_log_artifacts", [])))
+    kept_artifacts = normalize_kept_artifacts(plan, full_artifact_inventory)
     copied_logs = copy_selected_artifacts(src_history, out_dir, kept_artifacts)
 
     rewritten_summaries = []

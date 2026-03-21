@@ -16,6 +16,12 @@ from research.state_io import (
 )
 
 
+def trim_text(value: Any, limit: int = 220) -> Any:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[: limit - 32].rstrip() + "\n[truncated]"
+
+
 def baseline_runtime_digest(baseline_runtime: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for key, value in baseline_runtime.items():
@@ -33,6 +39,121 @@ def baseline_runtime_digest(baseline_runtime: dict[str, Any], limit: int = 8) ->
     return entries[-limit:]
 
 
+def family_prompt_digest(all_families: dict[str, Any]) -> dict[str, Any]:
+    digested: dict[str, Any] = {}
+    for fname, fdata in all_families.items():
+        if not isinstance(fdata, dict):
+            continue
+        status = fdata.get("status")
+        base = {
+            "status": status,
+            "best_proxy_fvu": fdata.get("best_proxy_fvu"),
+            "best_full_fvu": fdata.get("best_full_fvu"),
+            "last_round": fdata.get("last_round"),
+        }
+        if status in ("discarded", "archived"):
+            digested[fname] = base
+            continue
+        best_test = fdata.get("best_tested_config")
+        if isinstance(best_test, dict):
+            base["best_tested_config"] = {
+                "round": best_test.get("round"),
+                "stage": best_test.get("stage"),
+                "k": best_test.get("k"),
+                "decision": best_test.get("decision"),
+                "val_fvu": best_test.get("val_fvu"),
+            }
+        next_steps = fdata.get("next_steps", [])
+        if isinstance(next_steps, list) and next_steps:
+            base["next_step"] = trim_text(next_steps[-1], limit=140)
+        known_issues = fdata.get("known_issues", [])
+        if isinstance(known_issues, list) and known_issues:
+            base["known_issue"] = trim_text(known_issues[-1], limit=140)
+        digested[fname] = base
+    return digested
+
+
+def compact_failure_list(items: list[Any], limit: int = 4) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in items[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "round": item.get("round"),
+            "family_name": item.get("family_name"),
+            "error_type": item.get("error_type"),
+            "termination_reason": item.get("termination_reason"),
+            "error_summary": trim_text(item.get("error_summary"), limit=160),
+        })
+    return out
+
+
+def decision_critical_digest(memory: dict[str, Any]) -> dict[str, Any]:
+    families = memory.get("architecture_families", {})
+    blocked_family_lessons: list[str] = []
+    non_gated_positive_evidence: list[str] = []
+    do_not_repeat: list[str] = []
+    repair_only_targets: list[str] = []
+
+    for family_name, fdata in families.items():
+        if not isinstance(fdata, dict):
+            continue
+        status = fdata.get("status")
+        best_full = fdata.get("best_full_fvu")
+        known_issue = ""
+        issues = fdata.get("known_issues", [])
+        if isinstance(issues, list) and issues:
+            known_issue = trim_text(issues[-1], limit=140)
+
+        if status == "archived":
+            do_not_repeat.append(trim_text(
+                f"{family_name}: archived; avoid generic retuning unless there is a new code-path hypothesis.",
+                limit=140,
+            ))
+
+        if known_issue and any(token in known_issue.lower() for token in ("unknown architecture", "sanity", "registration", "invalid_env", "timeout")):
+            blocked_family_lessons.append(trim_text(f"{family_name}: {known_issue}", limit=160))
+            repair_only_targets.append(trim_text(
+                f"{family_name}: only justify revisit via narrow code-fix / compatibility repair, not another blind sweep.",
+                limit=160,
+            ))
+
+        if family_name != "gated" and best_full not in (None, "", "None"):
+            non_gated_positive_evidence.append(trim_text(
+                f"{family_name}: has real full-signal evidence with best_full_fvu={best_full}.",
+                limit=140,
+            ))
+
+    recent_failures = compact_failure_list(memory.get("recent_training_failures", []), limit=4)
+    for item in recent_failures:
+        if item.get("family_name") and item.get("error_summary"):
+            blocked_family_lessons.append(trim_text(
+                f"{item['family_name']}: recent failure -> {item['error_summary']}",
+                limit=160,
+            ))
+
+    return {
+        "blocked_family_lessons": blocked_family_lessons[-4:],
+        "non_gated_positive_evidence": non_gated_positive_evidence[-3:],
+        "do_not_repeat": do_not_repeat[-5:],
+        "repair_only_targets": repair_only_targets[-4:],
+    }
+
+
+def memory_prompt_digest(memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "current_focus": memory.get("current_focus"),
+        "architecture_families": family_prompt_digest(memory.get("architecture_families", {})),
+        "recent_insights": [trim_text(item, limit=140) for item in memory.get("recent_insights", [])[-4:]],
+        "recent_performance_findings": [trim_text(item, limit=140) for item in memory.get("performance_findings", [])[-4:]],
+        "recent_sanity_failures": compact_failure_list(memory.get("recent_sanity_failures", []), limit=3),
+        "recent_training_failures": compact_failure_list(memory.get("recent_training_failures", []), limit=4),
+        "baseline_runtime": baseline_runtime_digest(memory.get("baseline_runtime", {}), limit=5),
+        "next_hypotheses": [trim_text(item, limit=140) for item in memory.get("next_hypotheses", [])[:5]],
+        "decision_critical": decision_critical_digest(memory),
+    }
+
+
 def build_prompt(
     state: dict[str, Any],
     memory: dict[str, Any],
@@ -43,31 +164,7 @@ def build_prompt(
     operator_hints, _ = split_hints(load_operator_hints())
     operator_guide_excerpt = load_operator_guide_excerpt()
 
-    # Trim architecture_families to avoid unbounded prompt growth:
-    # keep only non-discarded/non-archived families, and cap tested_configs per family
-    all_families = memory.get("architecture_families", {})
-    trimmed_families: dict[str, Any] = {}
-    for fname, fdata in all_families.items():
-        if fdata.get("status") in ("discarded", "archived"):
-            # Include a minimal summary for discarded/archived families
-            trimmed_families[fname] = {
-                "status": fdata.get("status"),
-                "best_proxy_fvu": fdata.get("best_proxy_fvu"),
-                "best_full_fvu": fdata.get("best_full_fvu"),
-            }
-        else:
-            trimmed = dict(fdata)
-            # Cap tested_configs to last 5 entries
-            if "tested_configs" in trimmed:
-                trimmed["tested_configs"] = trimmed["tested_configs"][-5:]
-            # Cap known_issues and next_steps
-            if "known_issues" in trimmed:
-                trimmed["known_issues"] = trimmed["known_issues"][-3:]
-            if "next_steps" in trimmed:
-                trimmed["next_steps"] = trimmed["next_steps"][-3:]
-            trimmed_families[fname] = trimmed
-
-    baseline_runtime = memory.get("baseline_runtime", {})
+    memory_digest = memory_prompt_digest(memory)
 
     context = {
         "frontier": frontier,
@@ -77,16 +174,9 @@ def build_prompt(
         "pareto_full_frontier": state.get("pareto_full_frontier", state.get("pareto_frontier", [])),
         "agent_state": state.get("agent", {}),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
-        "current_focus": memory.get("current_focus"),
-        "architecture_families": trimmed_families,
-        "recent_insights": memory.get("recent_insights", [])[-8:],
-        "recent_performance_findings": memory.get("performance_findings", [])[-8:],
-        "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-6:],
-        "recent_training_failures": memory.get("recent_training_failures", [])[-6:],
-        "baseline_runtime": baseline_runtime_digest(baseline_runtime),
+        "memory_digest": memory_digest,
         "operator_hints": operator_hints[:8],
         "operator_guide_excerpt": operator_guide_excerpt,
-        "next_hypotheses": memory.get("next_hypotheses", [])[:8],
         "recent_results": summarize_results(results[-6:]),
         "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
     }
