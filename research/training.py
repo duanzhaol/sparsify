@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -75,6 +76,67 @@ class SanityCheckError(RuntimeError):
             "stderr_excerpt": "\n".join(stderr_lines[-40:]),
             "traceback_excerpt": "\n".join(traceback_lines[-40:]),
         }
+
+
+def _trim_excerpt(lines: list[str], limit: int) -> str:
+    cleaned = [line.rstrip() for line in lines if line.strip()]
+    return "\n".join(cleaned[-limit:])
+
+
+def extract_training_failure_details(log_path: Path) -> dict[str, str]:
+    """Extract a compact crash summary from the merged training log."""
+    if not log_path.exists():
+        return {
+            "error_type": "",
+            "error_summary": "",
+            "log_excerpt": "",
+            "traceback_excerpt": "",
+        }
+
+    lines = log_path.read_text(errors="replace").splitlines()
+    excerpt = _trim_excerpt(lines, 80)
+    traceback_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if (
+            "Traceback" in stripped
+            or stripped.startswith("File ")
+            or stripped.startswith("[rank0]:   File ")
+            or stripped.startswith("[rank1]:   File ")
+            or "Error:" in stripped
+            or stripped.endswith("Error")
+            or stripped.endswith("Exception")
+            or "Root Cause" in stripped
+            or "ChildFailedError" in stripped
+        ):
+            traceback_lines.append(line)
+    traceback_excerpt = _trim_excerpt(traceback_lines, 40)
+
+    error_summary = ""
+    error_type = ""
+    error_pattern = re.compile(r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))\s*:\s*(.+)")
+    matches: list[tuple[str, str]] = []
+    for line in lines:
+        match = error_pattern.search(line)
+        if match:
+            matches.append((match.group(1), match.group(0).strip()))
+    preferred = [m for m in matches if m[0] not in {"ChildFailedError", "CalledProcessError"}]
+    chosen = preferred[-1] if preferred else (matches[-1] if matches else None)
+    if chosen is not None:
+        error_type, error_summary = chosen
+    if not error_summary:
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped:
+                error_summary = stripped
+                break
+
+    return {
+        "error_type": error_type,
+        "error_summary": error_summary,
+        "log_excerpt": excerpt,
+        "traceback_excerpt": traceback_excerpt,
+    }
 
 def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, args: Any, proxy_max_tokens_override: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
     env = os.environ.copy()
@@ -622,7 +684,7 @@ def run_training_round(
     run_health = "normal"
     if termination_reason == "throughput_too_low":
         run_health = "perf_regression"
-    elif termination_reason != "completed":
+    elif termination_reason != "completed" or result.get("decision") == "crash":
         run_health = "crash"
     result["termination_reason"] = termination_reason
     result["run_health"] = run_health
@@ -644,6 +706,9 @@ def run_training_round(
         if checkpoint_dir is not None and (checkpoint_dir / "metrics.jsonl").exists()
         else ""
     )
+    if result.get("decision") == "crash":
+        failure_details = extract_training_failure_details(log_path)
+        result.update(failure_details)
     write_status(
         "training_finished",
         round=round_id,

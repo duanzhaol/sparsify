@@ -129,6 +129,7 @@ def load_memory() -> dict[str, Any]:
             "recent_rounds": [],
             "recent_insights": [],
             "recent_sanity_failures": [],
+            "recent_training_failures": [],
             "next_hypotheses": [
                 "Maintain a Pareto frontier over FVU and K rather than optimizing only the single best FVU point.",
                 "Probe smaller K values even when FVU rises, as long as the new point may improve the tradeoff frontier.",
@@ -253,6 +254,7 @@ def load_session_brief() -> dict[str, Any]:
             "recent_round_summaries": [],
             "incubating_families": {},
             "recent_performance_findings": [],
+            "recent_training_failures": [],
             "pending_hints": [],
             "next_move_guidance": [],
         },
@@ -295,6 +297,7 @@ def build_session_brief(
         "incubating_families": incubating,
         "recent_performance_findings": memory.get("performance_findings", [])[-4:],
         "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-4:],
+        "recent_training_failures": memory.get("recent_training_failures", [])[-4:],
         "pending_hints": operator_hints[:4],
         "next_move_guidance": memory.get("next_hypotheses", [])[:5],
         "last_round": round_id,
@@ -430,6 +433,29 @@ def append_memory(memory: dict[str, Any], action: dict[str, Any], result: dict[s
             }
         )
         memory["failure_patterns"] = memory["failure_patterns"][-20:]
+    if result.get("decision") == "crash":
+        training_failure = {
+            "round": round_id,
+            "tier": action.get("experiment_tier"),
+            "family_name": family_name,
+            "change_type": action.get("change_type"),
+            "primary_variable": action.get("primary_variable"),
+            "hypothesis": action.get("hypothesis"),
+            "termination_reason": result.get("termination_reason"),
+            "error_type": result.get("error_type", ""),
+            "error_summary": result.get("error_summary", ""),
+            "traceback_excerpt": result.get("traceback_excerpt", ""),
+            "log_excerpt": result.get("log_excerpt", ""),
+            "log_path": result.get("log_path", ""),
+        }
+        failures = memory.setdefault("recent_training_failures", [])
+        failures.append(training_failure)
+        memory["recent_training_failures"] = failures[-12:]
+        if training_failure["error_summary"]:
+            family.setdefault("known_issues", []).append(
+                f"round {round_id}: training crash for {family_name} | {training_failure['error_summary']}"
+            )
+            family["known_issues"] = family["known_issues"][-20:]
 
     memory["next_hypotheses"] = action.get("next_hypotheses", [])[:12]
     family["next_steps"] = action.get("next_hypotheses", [])[:8]
