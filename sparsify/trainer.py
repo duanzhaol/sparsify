@@ -291,12 +291,26 @@ class Trainer(CheckpointMixin):
             total=num_batches,
         )
 
-        # Buffer to collect fired latent indices during each step.
-        # Replaces the old did_fire bool mask + per-forward scatter_ with a
-        # single cat+unique at step end, avoiding expensive AI_CPU fallback.
-        fired_indices: dict[str, list[torch.Tensor]] = {
-            name: [] for name in self.saes
-        }
+        # Track which latents fired during the current optimizer step.
+        # CUDA benefits from an incremental boolean mask because it avoids a
+        # large cat+index update on the first optimizer step. NPU keeps the
+        # deferred index-list path to avoid per-forward AI_CPU fallbacks.
+        use_incremental_fired_mask = device.type != "npu"
+        fired_masks: dict[str, torch.Tensor] = (
+            {
+                name: torch.zeros(
+                    sae.num_latents, device=device, dtype=torch.bool
+                )
+                for name, sae in self.saes.items()
+            }
+            if use_incremental_fired_mask
+            else {}
+        )
+        fired_indices: dict[str, list[torch.Tensor]] = (
+            {name: [] for name in self.saes}
+            if not use_incremental_fired_mask
+            else {}
+        )
 
         acc_steps = self.cfg.grad_acc_steps * self.cfg.micro_acc_steps
         denom = acc_steps * self.cfg.wandb_log_frequency
@@ -460,8 +474,11 @@ class Trainer(CheckpointMixin):
                         ),
                     )
 
-                    # Collect fired latent indices (deferred update at optimizer step)
-                    fired_indices[sae_key].append(out.latent_indices.flatten())
+                    # Collect fired latent indices for dead-feature bookkeeping.
+                    if use_incremental_fired_mask:
+                        fired_masks[sae_key][out.latent_indices.flatten()] = True
+                    else:
+                        fired_indices[sae_key].append(out.latent_indices.flatten())
 
                     # Accumulate metrics locally (allreduce deferred to log step)
                     avg_fvu[sae_key] += float(out.fvu.detach() / denom)
@@ -670,7 +687,9 @@ class Trainer(CheckpointMixin):
                     # expensive per-forward scatter_ (AI_CPU fallback on NPU).
                     for name, counts in self.num_tokens_since_fired.items():
                         counts += num_tokens_in_step
-                        if fired_indices[name]:
+                        if use_incremental_fired_mask:
+                            counts.masked_fill_(fired_masks[name], 0)
+                        elif fired_indices[name]:
                             idx = torch.cat(fired_indices[name])
                             # No unique() needed: writing 0 to duplicate
                             # indices is idempotent, and unique() falls back
@@ -735,8 +754,12 @@ class Trainer(CheckpointMixin):
 
                     # Reset fired indices buffer for next step
                     num_tokens_in_step = 0
-                    for buf in fired_indices.values():
-                        buf.clear()
+                    if use_incremental_fired_mask:
+                        for mask in fired_masks.values():
+                            mask.zero_()
+                    else:
+                        for buf in fired_indices.values():
+                            buf.clear()
 
                 if (step + 1) % self.cfg.save_every == 0:
                     self.save()
