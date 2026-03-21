@@ -385,11 +385,11 @@ def enforce_incubation_limits(memory: dict[str, Any], action: dict[str, Any]) ->
 
     # Check if existing family exceeded its quota
     if not is_new and family_name in families:
-            family = families[family_name]
-            if family.get("status") == "incubating":
-                configs = family.get("tested_configs", [])
-                proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
-                has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
+        family = families[family_name]
+        if family.get("status") == "incubating":
+            configs = family.get("tested_configs", [])
+            proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
+            has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
             if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not has_positive:
                 return False, (
                     f"Family '{family_name}' has used {proxy_rounds} proxy rounds "

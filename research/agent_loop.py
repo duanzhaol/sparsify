@@ -683,7 +683,7 @@ def _close_round(
 
     round_summary_path = ROUND_SUMMARIES_DIR / f"round_{round_id:04d}.json"
     existing_families = set(memory.get("architecture_families", {}).keys())
-    memory = append_memory(memory, action, result, round_id, touched)
+    memory = append_memory(memory, action, result, round_id, touched, round_ctx=round_ctx)
     save_json(MEMORY_PATH, memory)
     if apply_hint_updates:
         mark_hints_applied(round_id)

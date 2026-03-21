@@ -315,7 +315,14 @@ def build_session_brief(
     }
 
 
-def append_memory(memory: dict[str, Any], action: dict[str, Any], result: dict[str, str], round_id: int, touched: list[str]) -> dict[str, Any]:
+def append_memory(
+    memory: dict[str, Any],
+    action: dict[str, Any],
+    result: dict[str, str],
+    round_id: int,
+    touched: list[str],
+    round_ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     overrides = action.get("env_overrides", [])
     if isinstance(overrides, dict):
         arch = overrides.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
@@ -382,6 +389,22 @@ def append_memory(memory: dict[str, Any], action: dict[str, Any], result: dict[s
     )
     family["tested_configs"] = family["tested_configs"][-20:]
 
+    proxy_result = (round_ctx or {}).get("proxy_result") if round_ctx else None
+    if isinstance(proxy_result, dict) and proxy_result.get("decision") == "promote":
+        try:
+            proxy_val_fvu = (
+                float(proxy_result.get("val_fvu"))
+                if proxy_result.get("val_fvu") not in (None, "")
+                else None
+            )
+        except (TypeError, ValueError):
+            proxy_val_fvu = None
+        if proxy_val_fvu is not None and (
+            family.get("best_proxy_fvu") is None
+            or proxy_val_fvu < float(family["best_proxy_fvu"])
+        ):
+            family["best_proxy_fvu"] = proxy_val_fvu
+
     try:
         val_fvu = float(result.get("val_fvu")) if result.get("val_fvu") not in (None, "") else None
     except (TypeError, ValueError):
@@ -401,8 +424,13 @@ def append_memory(memory: dict[str, Any], action: dict[str, Any], result: dict[s
     elif result.get("decision") == "incubate":
         family["status"] = "incubating"
     elif result.get("decision") == "discard":
+        proxy_promoted_this_round = isinstance(proxy_result, dict) and proxy_result.get("decision") == "promote"
+        if proxy_promoted_this_round and family_stage != "mainline":
+            # A prototype family that earned a proxy promote but failed full
+            # still produced meaningful signal; keep it incubating.
+            family["status"] = "incubating"
         # Do not demote families that already have proven results
-        if family.get("status") not in ("active", "promoted"):
+        elif family.get("status") not in ("active", "promoted"):
             family["status"] = "discarded"
 
     for note in action.get("notes_to_memory", []):
