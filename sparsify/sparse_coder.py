@@ -305,6 +305,8 @@ def _get_sae_class(architecture: str) -> type:
         return FactorizedTopKSparseCoder
     if architecture == "lowrank_residual":
         return LowRankResidualSparseCoder
+    if architecture == "two_stage_residual":
+        return TwoStageResidualSparseCoder
     raise ValueError(f"Unknown architecture: {architecture!r}")
 
 
@@ -625,6 +627,115 @@ class LowRankResidualSparseCoder(SparseCoder):
             sae_out,
             top_acts,
             top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class TwoStageResidualSparseCoder(SparseCoder):
+    """Allocate a fixed total K across two sparse residual passes."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        self.stage1_k = max(1, cfg.k // 2)
+        self.stage2_k = max(1, cfg.k - self.stage1_k)
+
+        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+        self.encoder.bias.data.zero_()
+        self.residual_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.residual_encoder.bias.data.zero_()
+
+        if decoder:
+            decoder_init = 0.5 * (
+                self.encoder.weight.data + self.residual_encoder.weight.data
+            )
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+
+        stage1_acts, stage1_indices, stage1_pre = fused_encoder(
+            x_centered, self.encoder.weight, self.encoder.bias, self.stage1_k
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual = x_centered - stage1_out
+        stage2_acts, stage2_indices, stage2_pre = fused_encoder(
+            residual,
+            self.residual_encoder.weight,
+            self.residual_encoder.bias,
+            self.stage2_k,
+        )
+        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
+
+        sae_out = stage1_out + stage2_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+
+            aux1_k = min(self.stage1_k, k_aux)
+            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
+
+            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+            aux1_out = self._decode_sparse(aux1_acts, aux1_indices)
+
+            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+            aux2_out = self._decode_sparse(aux2_acts, aux2_indices)
+
+            e_hat = aux1_out + aux2_out + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
             fvu,
             auxk_loss,
         )
