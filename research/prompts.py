@@ -10,11 +10,27 @@ from research.state_io import (
     load_json,
     load_operator_guide_excerpt,
     load_operator_hints,
+    recent_round_summaries_trimmed,
     split_hints,
     summarize_results,
-    recent_round_summaries,
-    recent_round_summaries_trimmed,
 )
+
+
+def baseline_runtime_digest(baseline_runtime: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for key, value in baseline_runtime.items():
+        if not isinstance(value, dict):
+            continue
+        entries.append({
+            "key": key,
+            "tokens_per_sec": value.get("tokens_per_sec"),
+            "round": value.get("round"),
+            "tier": value.get("tier"),
+            "architecture": value.get("architecture"),
+            "k": value.get("k"),
+        })
+    entries.sort(key=lambda item: (item.get("round") or 0, item.get("tokens_per_sec") or 0))
+    return entries[-limit:]
 
 
 def build_prompt(
@@ -67,12 +83,12 @@ def build_prompt(
         "recent_performance_findings": memory.get("performance_findings", [])[-8:],
         "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-6:],
         "recent_training_failures": memory.get("recent_training_failures", [])[-6:],
-        "baseline_runtime": baseline_runtime,
+        "baseline_runtime": baseline_runtime_digest(baseline_runtime),
         "operator_hints": operator_hints[:8],
         "operator_guide_excerpt": operator_guide_excerpt,
         "next_hypotheses": memory.get("next_hypotheses", [])[:8],
-        "recent_results": summarize_results(results[-8:]),
-        "recent_round_summaries": recent_round_summaries(),
+        "recent_results": summarize_results(results[-6:]),
+        "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
     }
     policy_section = ""
     if policy_context:
@@ -136,7 +152,6 @@ def build_resume_prompt(
     payload = {
         "round": round_id,
         "current_focus": brief.get("current_focus") or memory.get("current_focus"),
-        "best_full_frontier": brief.get("best_full_frontier", state.get("full_frontier", {})),
         "pareto_full_frontier": brief.get("pareto_full_frontier", state.get("pareto_full_frontier", state.get("pareto_frontier", []))),
         "recent_results": brief.get("recent_results", summarize_results(results)),
         "recent_round_summaries": brief.get("recent_round_summaries", recent_round_summaries_trimmed()),

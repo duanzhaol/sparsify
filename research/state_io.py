@@ -241,6 +241,17 @@ def recent_round_summaries_trimmed(limit: int = 3) -> list[dict[str, Any]]:
     return trimmed
 
 
+def compact_failure_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "round": entry.get("round"),
+        "family_name": entry.get("family_name"),
+        "change_type": entry.get("change_type"),
+        "error_type": entry.get("error_type"),
+        "termination_reason": entry.get("termination_reason"),
+        "error_summary": entry.get("error_summary") or entry.get("stderr_excerpt") or entry.get("traceback_excerpt"),
+    }
+
+
 def load_session_brief() -> dict[str, Any]:
     return load_json(
         SESSION_BRIEF_PATH,
@@ -296,8 +307,8 @@ def build_session_brief(
         "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
         "incubating_families": incubating,
         "recent_performance_findings": memory.get("performance_findings", [])[-4:],
-        "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-4:],
-        "recent_training_failures": memory.get("recent_training_failures", [])[-4:],
+        "recent_sanity_failures": [compact_failure_entry(item) for item in memory.get("recent_sanity_failures", [])[-4:] if isinstance(item, dict)],
+        "recent_training_failures": [compact_failure_entry(item) for item in memory.get("recent_training_failures", [])[-4:] if isinstance(item, dict)],
         "pending_hints": operator_hints[:4],
         "next_move_guidance": memory.get("next_hypotheses", [])[:5],
         "last_round": round_id,
