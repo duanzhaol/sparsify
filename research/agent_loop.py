@@ -81,6 +81,7 @@ from research.training import (
     DEFAULT_SLOW_RUN_GRACE_SEC,
     DEFAULT_MIN_TOKENS_PER_SEC_RATIO,
     DEFAULT_MIN_PROGRESS_STEPS,
+    SanityCheckError,
     run_training_round,
     _run_sanity_for_round,
     budget_remaining_sec,
@@ -114,6 +115,52 @@ DEFAULT_AGENT_RETRY_BASE_SEC = 10
 DEFAULT_MAX_SESSION_FAILURES = 3
 DEFAULT_AGENT_TIMEOUT_SEC = 10 * 60  # 10 minutes for agent to produce an action
 DEFAULT_DYNAMIC_PROXY_MAX_TOKENS = "20000000"
+
+
+def _record_sanity_failure(
+    memory: dict[str, Any],
+    round_id: int,
+    action: dict[str, Any],
+    tier: str,
+    exc: Exception,
+) -> dict[str, Any]:
+    payload: dict[str, Any]
+    if isinstance(exc, SanityCheckError):
+        payload = exc.to_payload()
+    else:
+        payload = {
+            "error_type": exc.__class__.__name__,
+            "message": str(exc),
+            "stdout_excerpt": "",
+            "stderr_excerpt": "",
+            "traceback_excerpt": "",
+        }
+    family_name = str(
+        action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]
+    ).lower()
+    entry = {
+        "round": round_id,
+        "tier": tier,
+        "family_name": family_name,
+        "change_type": action.get("change_type"),
+        "primary_variable": action.get("primary_variable"),
+        "hypothesis": action.get("hypothesis"),
+        **payload,
+    }
+    failures = memory.setdefault("recent_sanity_failures", [])
+    failures.append(entry)
+    memory["recent_sanity_failures"] = failures[-12:]
+    summary = (
+        f"round {round_id}: sanity failed for {family_name} "
+        f"({payload.get('error_type')})"
+    )
+    if payload.get("traceback_excerpt"):
+        summary += f" | traceback: {payload['traceback_excerpt'].splitlines()[-1]}"
+    elif payload.get("stderr_excerpt"):
+        summary += f" | stderr: {payload['stderr_excerpt'].splitlines()[-1]}"
+    memory.setdefault("recent_insights", []).append(summary)
+    memory["recent_insights"] = memory["recent_insights"][-40:]
+    return entry
 
 # Wire up tracked history paths for git_ops
 TRACKED_HISTORY_PATHS = (
@@ -1121,7 +1168,17 @@ def main() -> int:
                 _run_sanity_for_round(action, tier, round_id, round_ctx)
             except Exception as sanity_exc:
                 print(f"Round {round_id}: sanity check FAILED: {sanity_exc}")
-                log_round_event(round_ctx, "sanity_failed", tier=tier, error=str(sanity_exc))
+                sanity_payload = _record_sanity_failure(
+                    memory, round_id, action, tier, sanity_exc
+                )
+                save_json(MEMORY_PATH, memory)
+                log_round_event(
+                    round_ctx,
+                    "sanity_failed",
+                    tier=tier,
+                    error=str(sanity_exc),
+                    sanity_details=sanity_payload,
+                )
                 _abort_round(
                     round_id, action, "crash", "sanity_failed",
                     round_ctx, memory, stdout_path, touched, patch_path,

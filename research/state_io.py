@@ -112,6 +112,7 @@ def load_memory() -> dict[str, Any]:
             "architecture_families": {},
             "recent_rounds": [],
             "recent_insights": [],
+            "recent_sanity_failures": [],
             "next_hypotheses": [
                 "Maintain a Pareto frontier over FVU and K rather than optimizing only the single best FVU point.",
                 "Probe smaller K values even when FVU rises, as long as the new point may improve the tradeoff frontier.",
@@ -277,6 +278,7 @@ def build_session_brief(
         "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
         "incubating_families": incubating,
         "recent_performance_findings": memory.get("performance_findings", [])[-4:],
+        "recent_sanity_failures": memory.get("recent_sanity_failures", [])[-4:],
         "pending_hints": operator_hints[:4],
         "next_move_guidance": memory.get("next_hypotheses", [])[:5],
         "last_round": round_id,

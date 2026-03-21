@@ -38,6 +38,44 @@ DEFAULT_MIN_TOKENS_PER_SEC_RATIO = 0.25
 DEFAULT_MIN_PROGRESS_STEPS = 4
 DEFAULT_PROCESS_TERM_TIMEOUT_SEC = 15
 
+
+class SanityCheckError(RuntimeError):
+    """Structured sanity-check failure with captured subprocess output."""
+
+    def __init__(
+        self,
+        cmd: list[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        super().__init__(
+            f"Sanity check failed with exit code {returncode}: {' '.join(cmd)}"
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        stderr_lines = [line for line in self.stderr.splitlines() if line.strip()]
+        stdout_lines = [line for line in self.stdout.splitlines() if line.strip()]
+        traceback_lines = [
+            line for line in stderr_lines
+            if line.startswith("Traceback")
+            or line.startswith("  File ")
+            or line.endswith("Error")
+            or line.endswith("Exception")
+        ]
+        return {
+            "error_type": "sanity_check_failed",
+            "returncode": self.returncode,
+            "cmd": self.cmd,
+            "stdout_excerpt": "\n".join(stdout_lines[-20:]),
+            "stderr_excerpt": "\n".join(stderr_lines[-40:]),
+            "traceback_excerpt": "\n".join(traceback_lines[-40:]),
+        }
+
 def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, args: Any, proxy_max_tokens_override: str | None = None) -> tuple[dict[str, str], dict[str, Any]]:
     env = os.environ.copy()
     overrides = action.get("env_overrides", [])
@@ -225,7 +263,17 @@ def run_sanity(config: dict[str, Any]) -> None:
             "out = sae(x); out.fvu.backward(); print('sanity: OK')"
         ),
     ]
-    subprocess.run(cmd, cwd=REPO_ROOT, check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(
+            cmd, cwd=REPO_ROOT, check=True, capture_output=True, text=True
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SanityCheckError(
+            cmd=cmd,
+            returncode=exc.returncode,
+            stdout=exc.stdout or "",
+            stderr=exc.stderr or "",
+        ) from exc
 
 
 def terminate_process_group(process: subprocess.Popen, timeout: int = DEFAULT_PROCESS_TERM_TIMEOUT_SEC) -> None:
