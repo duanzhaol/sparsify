@@ -201,6 +201,14 @@
       "architecture": "routed",
       "k": 128,
       "updated_at": 1774034261
+    },
+    "proxy|factorized_topk|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 83008.18483613592,
+      "round": 53,
+      "tier": "proxy",
+      "architecture": "factorized_topk",
+      "k": 128,
+      "updated_at": 1774101276
     }
   },
   "architecture_families": {
@@ -631,9 +639,9 @@
       "last_round": 41
     },
     "factorized_topk": {
-      "status": "archived",
+      "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime.",
+      "design_hypothesis": "Stable gated low-K refreshes have restored a clean baseline but are not advancing the quality target, and the session is overdue for a real new-family readout. The least-bad informative move is to run the now-registered `factorized_topk` prototype at K=128 under the current strongest signum regime so the family finally gets a comparable proxy measurement.",
       "tested_configs": [
         {
           "round": 43,
@@ -682,6 +690,14 @@
           "decision": "crash",
           "val_fvu": null,
           "run_health": "crash"
+        },
+        {
+          "round": 53,
+          "stage": "prototype",
+          "k": "128",
+          "decision": "incubate",
+          "val_fvu": "0.3275916539132595",
+          "run_health": "normal"
         }
       ],
       "known_issues": [
@@ -689,36 +705,16 @@
         "round 49: training crash for factorized_topk | ValueError: Unknown architecture: 'factorized_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk')"
       ],
       "next_steps": [
-        "If `factorized_topk` completes and shows promising proxy FVU, keep the family alive and stabilize its internal width/throughput tradeoff next.",
-        "If it runs but is clearly worse than gated and plain top-k, archive this shallow factorized path and move to a different encoder-expressivity family.",
-        "If quality is plausible but runtime is poor, follow with an `edit_perf_code` round focused on the factorized encoder path rather than discarding the family."
+        "If `factorized_topk` shows promising proxy FVU, keep the family alive and tune its internal width or routing shape next.",
+        "If it runs normally but is clearly behind gated and plain top-k, archive this factorized path and move to a different architecture family.",
+        "If runtime is the main failure mode while quality looks plausible, follow with a focused performance/code-fix round on the factorized encoder path."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 52
+      "last_round": 53
     }
   },
   "recent_rounds": [
-    {
-      "round": 41,
-      "hypothesis": "The recent `first_step_timeout` crashes are not specific to `group_topk`: the gated AUXK=0 recovery run also advanced through the first few microbatches and then stalled at the first optimizer step. That points to a shared training-path bottleneck rather than an architecture verdict. Replacing CUDA's per-step fired-latent `cat`+advanced-index update with an incremental boolean fired mask in `sparsify/trainer.py` should remove that first-step spike and let the unresolved `group_topk` K=128 proxy run complete under the current strongest regime.",
-      "change_type": "edit_perf_code",
-      "expected_win": "explore_unknown",
-      "family_name": "group_topk",
-      "family_stage": "prototype",
-      "decision": "crash",
-      "val_fvu": null,
-      "observed_fvu": null,
-      "k": null,
-      "architecture": "group_topk",
-      "touched_files": [
-        "sparsify/trainer.py"
-      ],
-      "run_health": "crash",
-      "termination_reason": "sanity_failed",
-      "tokens_per_sec": null,
-      "baseline_ratio": null
-    },
     {
       "round": 42,
       "hypothesis": "After multiple rounds dominated by gated-local tuning and unresolved crash recovery, the most informative next move is to advance an already-incubating alternate family rather than spend another round near the current gated anchor. A clean `topk` K=128 proxy run under the current strongest gated training regime tests whether simpler support selection benefits more from the improved optimizer and regularization settings than it did in earlier comparisons.",
@@ -919,14 +915,27 @@
       "termination_reason": "identical_to_baseline",
       "tokens_per_sec": null,
       "baseline_ratio": null
+    },
+    {
+      "round": 53,
+      "hypothesis": "Stable gated low-K refreshes have restored a clean baseline but are not advancing the quality target, and the session is overdue for a real new-family readout. The least-bad informative move is to run the now-registered `factorized_topk` prototype at K=128 under the current strongest signum regime so the family finally gets a comparable proxy measurement.",
+      "change_type": "param_only",
+      "expected_win": "explore_unknown",
+      "family_name": "factorized_topk",
+      "family_stage": "prototype",
+      "decision": "incubate",
+      "val_fvu": "0.3275916539132595",
+      "observed_fvu": "0.328329",
+      "k": "128",
+      "architecture": "factorized_topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "83008.184836",
+      "baseline_ratio": ""
     }
   ],
   "recent_insights": [
-    "Keeping architecture, K, optimizer, AUXK, and expansion fixed isolates learning rate as the only changed variable on the strongest current baseline.",
-    "round 44: The cleanest next move is to stay on the strongest stable gated K=128 anchor and test a lower learning rate as a single-variable stabilization sweep. If the current `1.6e-3` regime is slightly overshooting, `2e-4` may improve reconstruction quality without changing architecture, sparsity mechanism, or expansion. -> discard (fvu=0.2658645771443844, observed_fvu=0.276852, k=128, health=normal, termination=completed)",
-    "`LR=2e-4` was a healthy but worse gated K=128 run, so lower-LR exploitation does not currently look promising.",
-    "This round closes the remaining obvious one-parameter gated sweep by testing the untried `EXPANSION_FACTOR=4` point on the strongest stable anchor.",
-    "Keeping architecture, K, optimizer, LR, and AUXK fixed isolates expansion factor as the only changed variable and gives a direct read on the quality-capacity tradeoff at the anchor K.",
     "round 45: The lower-LR gated sweep was a clean regression, so the next narrow exploitation move is to test the remaining untried capacity point on the best stable family. Reducing gated `EXPANSION_FACTOR` from 16 to 4 at K=128 may reveal a non-dominated quality-cost tradeoff and will close the last obvious one-parameter sweep on the current anchor before returning to broader architecture work. -> discard (fvu=0.2916756868362427, observed_fvu=0.290843, k=128, health=normal, termination=completed)",
     "Round 46: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
     "round 46: sanity failed for factorized_topk (sanity_check_failed) | traceback:   File \"<string>\", line 1",
@@ -961,12 +970,17 @@
     "Registered `factorized_topk` in `SparseCoderConfig` validation and SAE class dispatch so the execution layer can actually launch the family.",
     "Implemented a minimal `factorized_topk` prototype with a low-rank ReLU mixing stage before latent scoring; hidden width is derived from existing config (`max(d_in/2, 4*K)`) so no launcher changes are required.",
     "Local forward/backward sanity passed for `factorized_topk` at K=128, so the prior failure mode was a code-integration blocker rather than an architecture-quality result.",
-    "round 52: Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
+    "round 52: Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closing the quality gap, and the session has gone eight rounds without advancing a new family. A minimal `factorized_topk` prototype that inserts a low-rank ReLU mixing stage before hard top-k selection could improve support quality at K=128 while staying cheaper than a full dense two-branch encoder, so the next round should finally give this family a real proxy measurement under the current strongest signum regime. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
+    "Round 53: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
+    "`factorized_topk` is now wired into `sparsify/` and should be evaluated as a normal proxy architecture rather than treated as blocked by registration.",
+    "The stable gated K=32 and K=64 confirmations improved confidence in the current frontier shape but did not close the quality gap to the K=128 anchor, so another local gated sweep would be low-value.",
+    "This round is the first intended real quality measurement for `factorized_topk` after resolving its earlier execution-layer blocker.",
+    "round 53: Stable gated low-K refreshes have restored a clean baseline but are not advancing the quality target, and the session is overdue for a real new-family readout. The least-bad informative move is to run the now-registered `factorized_topk` prototype at K=128 under the current strongest signum regime so the family finally gets a comparable proxy measurement. -> incubate (fvu=0.3275916539132595, observed_fvu=0.328329, k=128, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If `factorized_topk` completes and shows promising proxy FVU, keep the family alive and stabilize its internal width/throughput tradeoff next.",
-    "If it runs but is clearly worse than gated and plain top-k, archive this shallow factorized path and move to a different encoder-expressivity family.",
-    "If quality is plausible but runtime is poor, follow with an `edit_perf_code` round focused on the factorized encoder path rather than discarding the family."
+    "If `factorized_topk` shows promising proxy FVU, keep the family alive and tune its internal width or routing shape next.",
+    "If it runs normally but is clearly behind gated and plain top-k, archive this factorized path and move to a different architecture family.",
+    "If runtime is the main failure mode while quality looks plausible, follow with a focused performance/code-fix round on the factorized encoder path."
   ],
   "recent_sanity_failures": [
     {
