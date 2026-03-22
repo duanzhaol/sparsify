@@ -570,14 +570,16 @@ class StateManager:
 
         family["last_round"] = round_id
         family["design_hypothesis"] = action.hypothesis
-        family.setdefault("tested_configs", []).append({
-            "round": round_id,
-            "stage": family_stage,
-            "k": result.k,
-            "decision": result.decision,
-            "val_fvu": result.val_fvu,
-            "run_health": result.run_health,
-        })
+        # Only record actual training runs, not policy rejections
+        if result.decision != "policy_reject":
+            family.setdefault("tested_configs", []).append({
+                "round": round_id,
+                "stage": family_stage,
+                "k": result.k,
+                "decision": result.decision,
+                "val_fvu": result.val_fvu,
+                "run_health": result.run_health,
+            })
         family["tested_configs"] = family["tested_configs"][-20:]
 
         # Update best FVU and family status based on decision

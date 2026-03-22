@@ -108,27 +108,22 @@ def decide(
     key = frontier_key(int(k), int(ef))
     current = frontier.get(key)
 
-    # Check: improvement at same (K, EF) slot?
-    improve_same_slot = False
-    if current is None:
-        improve_same_slot = True
-    else:
+    # Same-slot comparison takes priority over Pareto check
+    if current is not None:
         cur_fvu = float(current.get("fvu", float("inf")))
         if fvu < cur_fvu - FVU_TOL:
-            improve_same_slot = True
+            return "keep"  # strict improvement at same (K, EF)
+        if abs(fvu - cur_fvu) <= FVU_TOL:
+            return "archive"  # within tolerance, not an improvement
+        return "discard"  # worse than current at same slot
 
-    # Check: Pareto non-dominated across all (K, EF, FVU)?
+    # New (K, EF) slot: check Pareto non-dominated across frontier
     candidate = {"k": int(k), "ef": int(ef), "fvu": fvu}
     current_points = _frontier_points(frontier)
-    pareto_non_dominated = not current_points or not any(
+    if not current_points or not any(
         _pareto_dominates(pt, candidate) for pt in current_points
-    )
-
-    if improve_same_slot or pareto_non_dominated:
-        return "keep"
-
-    if current is not None and abs(fvu - float(current.get("fvu", float("inf")))) <= FVU_TOL:
-        return "archive"
+    ):
+        return "keep"  # non-dominated, adds to frontier
 
     return "discard"
 
