@@ -120,6 +120,14 @@ def commit_round_state(
     paths = [REPO_ROOT / path for path in touched]
     paths.extend(TRACKED_HISTORY_PATHS)
     paths.append(round_summary_path)
+    # Also stage logs and patches for this round
+    log_dir = round_summary_path.parent.parent / "logs"
+    patch_dir = round_summary_path.parent.parent / "patches"
+    for d in (log_dir, patch_dir):
+        if d.is_dir():
+            for f in d.iterdir():
+                if f.is_file() and f"_{round_id:04d}" in f.name:
+                    paths.append(f)
     stage_paths(paths)
     if git(["diff", "--cached", "--quiet"], check=False).returncode == 0:
         return None, current_git_branch()
