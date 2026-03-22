@@ -207,12 +207,12 @@
       "updated_at": 1774144042
     },
     "proxy|adaptive_budget_topk|layers.[3].self_attn.o_proj": {
-      "tokens_per_sec": 33300.345311366844,
-      "round": 35,
+      "tokens_per_sec": 41504.621057705925,
+      "round": 54,
       "tier": "proxy",
       "architecture": "adaptive_budget_topk",
-      "k": 128,
-      "updated_at": 1774149253
+      "k": 40,
+      "updated_at": 1774163159
     },
     "proxy|batch_topk|layers.[3].self_attn.o_proj": {
       "tokens_per_sec": 83008.08984558696,
@@ -859,7 +859,7 @@
     "adaptive_budget_topk": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "Ten no-improve rounds indicate the current fixed-per-sample-K search direction is fundamentally flawed, and recent pivots like `jumprelu` and `two_stage_residual` still stayed far behind the frontier. The next coherent architecture move is to change the sparsity mechanism itself: add `adaptive_budget_topk`, which keeps the same overall batch budget but allocates support dynamically across samples based on encoding difficulty instead of enforcing a rigid per-sample K. If hard examples need more active features and easy examples need fewer, this dynamic-budget routing could improve the quality frontier without changing the execution layer.",
+      "design_hypothesis": "The failure of both `lowrank_gated_residual` and `batch_topk` at the current lower-K small-EF target suggests the bottleneck may be rigid support allocation rather than just encoder form. `adaptive_budget_topk` is the next fundamentally different mechanism to test at `K=40`, `EF=8`, because it relaxes fixed per-sample allocation while staying in the same fair-capacity comparison band.",
       "tested_configs": [
         {
           "round": 35,
@@ -868,17 +868,24 @@
           "decision": "incubate",
           "val_fvu": "0.22683675587177277",
           "run_health": "normal"
+        },
+        {
+          "round": 54,
+          "stage": "mainline_comparison",
+          "k": "40",
+          "decision": "incubate",
+          "val_fvu": "0.42443543300032616",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `adaptive_budget_topk` is competitive at K=128 proxy, keep the family alive and promote to full before local tuning.",
-        "If quality is promising but runtime is flagged as poor, follow with a narrow performance-oriented `code_fix` on the dynamic-budget path rather than discarding the family immediately.",
-        "If `adaptive_budget_topk` remains clearly behind, archive dynamic-budget routing and pivot to a different fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
+        "If `adaptive_budget_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
+        "If `adaptive_budget_topk` at `K=40`, `EF=8` is also clearly weak, pivot to another fundamentally different mechanism at the same target, such as `bucketed_topk`, rather than resuming local sweeps on the current families."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 35
+      "last_round": 54
     },
     "batch_topk": {
       "status": "incubating",
@@ -1004,24 +1011,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 42,
-      "hypothesis": "Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count.",
-      "change_type": "param_only",
-      "expected_win": "smaller_k",
-      "family_name": "lowrank_gated_residual",
-      "family_stage": "stabilize",
-      "decision": "keep",
-      "val_fvu": "0.07289826218038797",
-      "observed_fvu": "0.071441",
-      "k": "96",
-      "architecture": "lowrank_gated_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "57897.485194",
-      "baseline_ratio": "0.652766"
-    },
     {
       "round": 43,
       "hypothesis": "`lowrank_gated_residual` has already shown that quality degrades smoothly between `K=128` and `K=64`, with the new `K=96` point landing much closer to the anchor than to the lower-K regime. A proxy run at `K=80` on the same proven recipe is the cleanest next Pareto probe: it prioritizes lower-K exploration, keeps expansion factor fixed for a fair within-family comparison, and can reveal a new non-dominated tradeoff between the existing `K=64` and `K=96` frontier points.",
@@ -1219,13 +1208,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83008.089846",
       "baseline_ratio": "1.246170"
+    },
+    {
+      "round": 54,
+      "hypothesis": "The failure of both `lowrank_gated_residual` and `batch_topk` at the current lower-K small-EF target suggests the bottleneck may be rigid support allocation rather than just encoder form. `adaptive_budget_topk` is the next fundamentally different mechanism to test at `K=40`, `EF=8`, because it relaxes fixed per-sample allocation while staying in the same fair-capacity comparison band.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "adaptive_budget_topk",
+      "family_stage": "mainline_comparison",
+      "decision": "incubate",
+      "val_fvu": "0.42443543300032616",
+      "observed_fvu": "0.423201",
+      "k": "40",
+      "architecture": "adaptive_budget_topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "41504.621058",
+      "baseline_ratio": "1.246372"
     }
   ],
   "recent_insights": [
-    "Crash-recovery policy required a param-only round on the best working configuration; this round uses `lowrank_gated_residual` with only `K` changed substantively.",
-    "`K=96` is an explicit mid-frontier probe between the established `K=64` and `K=128` points, aimed at expanding Pareto coverage rather than only improving the anchor.",
-    "round 42: Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count. -> keep (fvu=0.07289826218038797, observed_fvu=0.071441, k=96, health=normal, termination=completed)",
-    "Round 42 established `K=96` as a real frontier point for `lowrank_gated_residual`, so the most informative next K-only follow-up is to fill the open gap below it rather than reopen anchor tuning.",
     "`K=80` is currently untested in the recorded history and is a fair same-EF within-family comparison point between the existing `K=64` and `K=96` frontier results.",
     "round 43: `lowrank_gated_residual` has already shown that quality degrades smoothly between `K=128` and `K=64`, with the new `K=96` point landing much closer to the anchor than to the lower-K regime. A proxy run at `K=80` on the same proven recipe is the cleanest next Pareto probe: it prioritizes lower-K exploration, keeps expansion factor fixed for a fair within-family comparison, and can reveal a new non-dominated tradeoff between the existing `K=64` and `K=96` frontier points. -> keep (fvu=0.07682335376739502, observed_fvu=0.075357, k=80, health=normal, termination=completed)",
     "Round 43 full confirmed `K=80` as a real intermediate frontier point for `lowrank_gated_residual`, strengthening the case for a denser local K sweep below 80 before any EF change.",
@@ -1261,11 +1264,15 @@
     "Round 53: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
     "Severe-stagnation pivot: stop minor `lowrank_gated_residual` parameter tweaks and switch to a fundamentally different sparse-allocation mechanism at the same lower-K, same-EF target.",
     "Use `batch_topk` as the next fair lower-K architecture comparison point because it previously showed the strongest proxy signal among the existing non-residual alternative mechanisms and directly tests whether global batch-level support allocation helps at `K=40`, `EF=8`.",
-    "round 53: The current `lowrank_gated_residual` small-EF track looks exhausted at the lower-K anchor, so the next informative move is a fundamentally different sparsity mechanism rather than another local tweak. `batch_topk` is the strongest existing non-residual challenger and may preserve more quality at `K=40` by allocating support globally across the batch instead of enforcing rigid per-sample selection. -> incubate (fvu=0.405234944075346, observed_fvu=0.404905, k=40, health=normal, termination=completed)"
+    "round 53: The current `lowrank_gated_residual` small-EF track looks exhausted at the lower-K anchor, so the next informative move is a fundamentally different sparsity mechanism rather than another local tweak. `batch_topk` is the strongest existing non-residual challenger and may preserve more quality at `K=40` by allocating support globally across the batch instead of enforcing rigid per-sample selection. -> incubate (fvu=0.405234944075346, observed_fvu=0.404905, k=40, health=normal, termination=completed)",
+    "Round 54: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
+    "Round 53 showed `batch_topk` is extremely weak at `K=40`, `EF=8` (`val_fvu=0.405234944075346`), so batch-global support selection does not rescue the current lower-K small-capacity regime.",
+    "Next severe-stagnation move is another same-EF architecture comparison with a fundamentally different allocation mechanism: test `adaptive_budget_topk` at `K=40`, `EF=8` before considering any return to local tuning.",
+    "round 54: The failure of both `lowrank_gated_residual` and `batch_topk` at the current lower-K small-EF target suggests the bottleneck may be rigid support allocation rather than just encoder form. `adaptive_budget_topk` is the next fundamentally different mechanism to test at `K=40`, `EF=8`, because it relaxes fixed per-sample allocation while staying in the same fair-capacity comparison band. -> incubate (fvu=0.42443543300032616, observed_fvu=0.423201, k=40, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If `batch_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
-    "If `batch_topk` at `K=40`, `EF=8` is clearly weak, pivot to another fundamentally different mechanism at the same target, such as `adaptive_budget_topk`, rather than resuming local sweeps on `lowrank_gated_residual`."
+    "If `adaptive_budget_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
+    "If `adaptive_budget_topk` at `K=40`, `EF=8` is also clearly weak, pivot to another fundamentally different mechanism at the same target, such as `bucketed_topk`, rather than resuming local sweeps on the current families."
   ],
   "recent_sanity_failures": [
     {
