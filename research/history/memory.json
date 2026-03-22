@@ -4,7 +4,8 @@
     "r1 lowrank_two_stage_residual edit_sae_code k32 -> crash [crash]",
     "r8 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Variable isolation violated: Multiple primary variables: code_edit, architecture, k, ef, lr)",
     "r19 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Variable isolation violated: Multiple primary variables: code_edit, architecture, k, ef, lr)",
-    "r32 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked)"
+    "r32 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked)",
+    "r50 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked)"
   ],
   "performance_findings": [],
   "failure_patterns": [
@@ -114,6 +115,13 @@
       "architecture": "codebook_topk",
       "k": 24,
       "updated_at": 1774219878
+    },
+    "standard|two_code_residual_vq|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 151388.5354090662,
+      "round": 51,
+      "architecture": "two_code_residual_vq",
+      "k": 24,
+      "updated_at": 1774220373
     }
   },
   "architecture_families": {
@@ -295,7 +303,7 @@
     },
     "routed_lowrank_two_stage_residual": {
       "status": "incubating",
-      "design_hypothesis": "`routed_lowrank_two_stage_residual` likely has a training-time compatibility bug under the fixed launcher despite earlier smoke success; repairing that runtime failure and rerunning the same `K=16, EF=12` recipe is the highest-value next step because the architecture comparison is currently blocked by implementation stability rather than scientific signal.",
+      "design_hypothesis": "`routed_lowrank_two_stage_residual` was previously blocked by a training-graph issue: its routers only influenced top-k indices, so DDP could treat router parameters as unused. Routing the selected activation magnitudes themselves should stabilize training and give the architecture a fair mid-K test against the current `K=16` frontier point.",
       "tested_configs": [
         {
           "round": 31,
@@ -310,12 +318,12 @@
         "round 31: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by"
       ],
       "next_steps": [
-        "If the repaired `routed_lowrank_two_stage_residual` runs cleanly and beats the current `K=16` point, continue the same architecture-only comparison at `K=24`.",
-        "If it runs cleanly but loses at `K=16`, keep the result as a valid negative and switch to a different substantial architecture branch next round.",
-        "If the rerun still crashes after a targeted fix, treat the family as blocked on engineering reliability and move to another fundamentally different architecture."
+        "If the repaired `routed_lowrank_two_stage_residual` runs cleanly and beats the current `K=16` point, run the same family at `K=24, EF=12` to test whether routing helps across the mid-K band.",
+        "If it runs cleanly but is clearly worse than the current `K=16` frontier point, retire this routed branch and return to a genuinely new architecture family next round.",
+        "If it still crashes under the fixed launcher, treat the remaining issue as trainer/runtime integration rather than architecture quality and inspect the distributed training path before further family search."
       ],
       "best_fvu": null,
-      "last_round": 32
+      "last_round": 50
     },
     "lowrank_residual": {
       "status": "active",
@@ -604,45 +612,31 @@
       ],
       "best_fvu": null,
       "last_round": 49
+    },
+    "two_code_residual_vq": {
+      "status": "discarded",
+      "design_hypothesis": "After `residual_vq` and `codebook_topk` both underperformed at `K=24`, a deeper discrete coarse stage is the next fundamentally different architecture worth testing: `two_code_residual_vq` may recover more shared structure before sparse correction and produce a better mid-K FVU/K tradeoff than the single-code discrete families.",
+      "tested_configs": [
+        {
+          "round": 51,
+          "stage": "prototype",
+          "k": "24",
+          "decision": "discard",
+          "val_fvu": "0.2632826268672943",
+          "run_health": "normal"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `two_code_residual_vq` is competitive but slightly worse at K=24, test it at K=16 to see whether the deeper discrete hierarchy helps more under tighter sparsity.",
+        "If `two_code_residual_vq` clearly loses at K=24, retire this discrete-deeper branch and move to another fundamentally different family rather than any scalar sweep.",
+        "If `two_code_residual_vq` wins at K=24, follow with K=16 or K=32 to map whether the gain generalizes across the mid-K band."
+      ],
+      "best_fvu": null,
+      "last_round": 51
     }
   },
   "recent_rounds": [
-    {
-      "round": 38,
-      "hypothesis": "After three straight non-improving rounds, the policy says to switch to exploitation on the current best family rather than open new branches. The cleanest one-variable test is to keep the `lowrank_two_stage_residual` `K=32, EF=12` anchor fixed and sweep the last untried learning rate `4e-4`, which checks whether a moderately smaller step size can improve the strongest low-EF frontier point without changing architecture or sparsity.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "lowrank_two_stage_residual",
-      "family_stage": "mainline",
-      "decision": "discard",
-      "val_fvu": "0.10886160284280777",
-      "observed_fvu": "0.108862",
-      "k": "32",
-      "architecture": "lowrank_two_stage_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "104084.605351",
-      "baseline_ratio": "0.749973"
-    },
-    {
-      "round": 39,
-      "hypothesis": "The `LR=4e-4` exploitation test clearly underperformed on the `lowrank_two_stage_residual` `K=32, EF=12` anchor, so the settled learning rate should remain `3.2e-3`. The next clean one-variable exploitation step is to sweep `AUXK_ALPHA` on that same anchor, and the most informative remaining value is `0.01`, which tests whether a smaller nonzero auxiliary pressure helps without the regression seen at `0.03125`.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "lowrank_two_stage_residual",
-      "family_stage": "mainline",
-      "decision": "archive",
-      "val_fvu": "0.08961910009384155",
-      "observed_fvu": "0.089619",
-      "k": "32",
-      "architecture": "lowrank_two_stage_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "118955.995066",
-      "baseline_ratio": "0.857127"
-    },
     {
       "round": 40,
       "hypothesis": "Five rounds of stagnation mean scalar tweaks are exhausted, so the next move should be a fundamentally different architecture under a controlled recipe rather than more LR or aux changes. `lowrank_grouped_residual` is a materially different low-EF family that enforces group-local competition, and testing it at the frontier-relevant `K=16, EF=12` slot can reveal whether structured support selection improves the mid-K tradeoff over `lowrank_two_stage_residual`.",
@@ -822,17 +816,47 @@
       "termination_reason": "completed",
       "tokens_per_sec": "208171.998089",
       "baseline_ratio": null
+    },
+    {
+      "round": 50,
+      "hypothesis": "`routed_lowrank_two_stage_residual` was previously blocked by a training-graph issue: its routers only influenced top-k indices, so DDP could treat router parameters as unused. Routing the selected activation magnitudes themselves should stabilize training and give the architecture a fair mid-K test against the current `K=16` frontier point.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "routed_lowrank_two_stage_residual",
+      "family_stage": "stabilize",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "routed_lowrank_two_stage_residual",
+      "touched_files": [
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "normal",
+      "termination_reason": "Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
+    },
+    {
+      "round": 51,
+      "hypothesis": "After `residual_vq` and `codebook_topk` both underperformed at `K=24`, a deeper discrete coarse stage is the next fundamentally different architecture worth testing: `two_code_residual_vq` may recover more shared structure before sparse correction and produce a better mid-K FVU/K tradeoff than the single-code discrete families.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "two_code_residual_vq",
+      "family_stage": "prototype",
+      "decision": "discard",
+      "val_fvu": "0.2632826268672943",
+      "observed_fvu": "0.263283",
+      "k": "24",
+      "architecture": "two_code_residual_vq",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "151388.535409",
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "NOTE: The next one-variable test is `AUXK_ALPHA=0.01`, chosen as the mildest remaining nonzero aux sweep to determine whether the prior `0.03125` regression was due to excessive auxiliary pressure rather than aux being categorically harmful.",
-    "r39 lowrank_two_stage_residual param_only k32 -> archive fvu=0.08961910009384155",
-    "NOTE: Round 40 exits the failed scalar-exploitation loop under severe stagnation and opens a materially different architecture branch instead of continuing LR or aux sweeps.",
-    "NOTE: The new test is `lowrank_grouped_residual` at `K=16, EF=12` under the settled `signum`, `LR=3.2e-3`, `AUXK_ALPHA=0.0` recipe to evaluate whether group-local sparse competition improves the mid-K frontier band.",
-    "r40 lowrank_grouped_residual param_only k16 -> discard fvu=0.1106170266866684",
-    "NOTE: Round 41 rejects `lowrank_grouped_residual` at `K=16` and continues the severe-stagnation architecture search with another materially different built-in family rather than returning to LR or aux sweeps.",
-    "NOTE: The new test is `whitened_lowrank_gated_residual` at `K=16, EF=12` under the settled `signum`, `LR=3.2e-3`, `AUXK_ALPHA=0.0` recipe to evaluate whether residual preconditioning plus gating improves the frontier-relevant mid-K band.",
-    "r41 whitened_lowrank_gated_residual param_only k16 -> discard fvu=7.8931779861450195",
     "NOTE: Round 42 should open a new architecture family because severe stagnation has reached 7 consecutive non-improving rounds.",
     "NOTE: Use a strict architecture-only comparison at K=24, EF=12 with all recipe fields pinned explicitly to avoid env drift.",
     "NOTE: `multi_branch_gated` is available in the current codebase and represents a materially different branch-mixing support-selection mechanism from the recent low-rank residual family sweep.",
@@ -864,7 +888,15 @@
     "NOTE: Round 49 continues severe-stagnation recovery with another fundamentally different built-in family after `group_topk` also failed badly at K=24.",
     "NOTE: Keep the run architecture-only at K=24, EF=12 with all recipe fields pinned explicitly.",
     "NOTE: `codebook_topk` tests a direct codebook-plus-sparse hybrid as a qualitatively different mid-K mechanism from the recent continuous support-selection and residual branches.",
-    "r49 codebook_topk param_only k24 -> discard fvu=0.2688399851322174"
+    "r49 codebook_topk param_only k24 -> discard fvu=0.2688399851322174",
+    "NOTE: Patched `routed_lowrank_two_stage_residual` so router gates modulate selected activation magnitudes; this keeps router parameters on the reconstruction path and should prevent DDP unused-parameter failures.",
+    "NOTE: Local smoke test passed after the patch: both router branches received non-zero gradients on backward, and routed encode support differed from plain `lowrank_two_stage_residual` on the same input.",
+    "NOTE: Use the exact pinned `K=16, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe for the first post-fix run so the round isolates the code repair.",
+    "r50 routed_lowrank_two_stage_residual edit_sae_code k? -> policy_reject (Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked)",
+    "NOTE: Round 51 continues severe-stagnation recovery with an architecture-only test of `two_code_residual_vq` after both `residual_vq` and `codebook_topk` lost badly at K=24.",
+    "NOTE: Keep the run pinned at `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` so architecture is the only primary variable.",
+    "NOTE: `two_code_residual_vq` tests whether two hard coarse code selections plus sparse residual correction work better than the single-code discrete hybrids already tried.",
+    "r51 two_code_residual_vq param_only k24 -> discard fvu=0.2632826268672943"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [
@@ -896,8 +928,8 @@
     }
   ],
   "next_hypotheses": [
-    "If `codebook_topk` is competitive but slightly worse at K=24, test K=16 to see whether coarse codebook structure helps more under tighter sparsity.",
-    "If `codebook_topk` clearly loses at K=24, reject this branch and move to another fundamentally different family such as `adaptive_budget_topk` or `bucketed_topk` rather than any scalar sweep.",
-    "If `codebook_topk` wins at K=24, follow with K=16 or K=32 to map whether the gain generalizes across the mid-K band."
+    "If `two_code_residual_vq` is competitive but slightly worse at K=24, test it at K=16 to see whether the deeper discrete hierarchy helps more under tighter sparsity.",
+    "If `two_code_residual_vq` clearly loses at K=24, retire this discrete-deeper branch and move to another fundamentally different family rather than any scalar sweep.",
+    "If `two_code_residual_vq` wins at K=24, follow with K=16 or K=32 to map whether the gain generalizes across the mid-K band."
   ]
 }
