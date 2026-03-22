@@ -194,6 +194,7 @@ class TrainConfig(Serializable):
             "topk",
             "batch_topk",
             "adaptive_budget_topk",
+            "bucketed_topk",
             "jumprelu",
             "gated",
             "routed",

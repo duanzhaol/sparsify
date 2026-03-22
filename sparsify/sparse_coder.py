@@ -295,6 +295,8 @@ def _get_sae_class(architecture: str) -> type:
         return BatchTopKSparseCoder
     if architecture == "adaptive_budget_topk":
         return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
     if architecture == "whitened_topk":
         return WhitenedTopKSparseCoder
     if architecture == "jumprelu":
@@ -438,6 +440,68 @@ class BatchTopKSparseCoder(SparseCoder):
         selected.view(-1).scatter_(0, flat_indices, flat.index_select(0, flat_indices))
 
         top_acts, top_indices = torch.topk(selected, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class BucketedTopKSparseCoder(SparseCoder):
+    """Route samples between two dictionaries based on activation norm."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        self.low_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.high_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.low_encoder.bias.data.zero_()
+        self.high_encoder.bias.data.zero_()
+        self.high_encoder.weight.data.mul_(1.05)
+
+        self.bucket_scale = nn.Parameter(
+            torch.tensor(2.0, device=device, dtype=dtype)
+        )
+        self.bucket_bias = nn.Parameter(
+            torch.tensor(0.0, device=device, dtype=dtype)
+        )
+
+        if decoder:
+            decoder_init = 0.5 * (
+                self.low_encoder.weight.data + self.high_encoder.weight.data
+            )
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        low_acts = F.relu(F.linear(x, self.low_encoder.weight, self.low_encoder.bias))
+        high_acts = F.relu(
+            F.linear(x, self.high_encoder.weight, self.high_encoder.bias)
+        )
+
+        norms = x.norm(dim=-1, keepdim=True)
+        centered_norms = norms - norms.mean()
+        gate = torch.sigmoid(self.bucket_scale * centered_norms + self.bucket_bias)
+        acts = (1.0 - gate) * low_acts + gate * high_acts
+
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
         return EncoderOutput(top_acts, top_indices, acts)
 
 
