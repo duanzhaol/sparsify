@@ -250,6 +250,7 @@ def generate_stagnation_guidance(level: str, memory: dict[str, Any], state: dict
             "Consider switching to exploitation mode:\n"
             "- Do a systematic hyperparameter sweep on the current best configuration\n"
             "- Try different learning rates, auxk_alpha values\n"
+            "- Keep K reduction ahead of expansion_factor reduction; do not postpone K exploration for a larger-EF run\n"
             "- If a promising incubating family exists, focus on stabilizing it\n"
             "- Avoid introducing new architecture families until current ones are exhausted"
         )
@@ -261,7 +262,8 @@ def generate_stagnation_guidance(level: str, memory: dict[str, Any], state: dict
             "1. If K=128 is the only tested K value, you MUST explore K=64 or K=32 on the best architecture\n"
             "2. If multiple K values have been tested, try a fundamentally different architecture approach\n"
             f"3. Do NOT continue minor parameter tweaks — they have not worked for {no_improve} rounds\n"
-            "4. Consider whether the current search direction is fundamentally flawed"
+            "4. Do not treat a larger expansion_factor as a free quality win; same-EF comparisons are more informative\n"
+            "5. Consider whether the current search direction is fundamentally flawed"
         )
 
     return ""
@@ -527,7 +529,7 @@ def generate_sweep_guidance(
 
     all_lrs = ["2e-4", "4e-4", "8e-4", "1.6e-3", "3.2e-3"]
     all_auxk = ["0", "0.01", "0.03125", "0.0625"]
-    all_efs = [4, 8, 16]
+    all_efs = [4, 8, 12]
 
     untested_lrs = [v for v in all_lrs if v not in tested_lrs]
     untested_auxk = [v for v in all_auxk if v not in tested_auxk]
@@ -543,7 +545,10 @@ def generate_sweep_guidance(
     else:
         suggestions.append("All candidate auxk_alpha values have been tested")
     if untested_efs:
-        suggestions.append(f"Untested expansion_factor values: {', '.join(str(e) for e in untested_efs)}")
+        suggestions.append(
+            "Untested expansion_factor values (small-first capacity sweep): "
+            + ", ".join(str(e) for e in untested_efs)
+        )
     else:
         suggestions.append("All candidate expansion_factor values have been tested")
 
@@ -553,12 +558,14 @@ def generate_sweep_guidance(
     if not untested_lrs and not untested_auxk and not untested_efs:
         return (
             f"EXPLOITATION MODE: All standard hyperparameter candidates have been tested for {family_label} {tested_info}.\n"
-            "Consider exploring K values (K=64, K=32) or trying a new architecture approach."
+            "Consider exploring K values (K=64, K=32) before reopening EF, or try a new architecture approach."
         )
 
     return (
         "EXPLOITATION MODE — Systematic Hyperparameter Sweep:\n"
         f"Target family: {family_label}. Already tested {tested_info}\n"
+        "Priority order: K first, then capacity-efficiency work on EF.\n"
+        "Use EF only as a capacity axis: compare architectures at the same EF when possible, start new family checks from EF=8 by default, and prefer smaller EF before larger EF.\n"
         "Focus on this architecture and sweep these parameters one at a time:\n"
         + "\n".join(f"- {s}" for s in suggestions)
         + "\n\nUse param_only with env_overrides. Change ONE parameter per round."

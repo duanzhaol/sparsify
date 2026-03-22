@@ -39,9 +39,78 @@ def baseline_runtime_digest(baseline_runtime: dict[str, Any], limit: int = 8) ->
     return entries[-limit:]
 
 
+def frontier_prompt_digest(frontier: dict[str, Any], limit: int = 4) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for key, value in frontier.items():
+        if not isinstance(value, dict):
+            continue
+        config = value.get("config", {})
+        entries.append({
+            "k": int(key) if str(key).isdigit() else value.get("k"),
+            "fvu": value.get("fvu"),
+            "architecture": value.get("architecture"),
+            "expansion_factor": config.get("expansion_factor"),
+            "lr": config.get("lr"),
+            "optimizer": config.get("optimizer"),
+            "family_name": config.get("family_name"),
+            "tier": value.get("tier"),
+            "round_commit": str(value.get("commit", ""))[:8],
+        })
+    entries.sort(key=lambda item: ((item.get("k") or 0), item.get("fvu") or float("inf")))
+    return entries[:limit]
+
+
+def pareto_prompt_digest(points: list[dict[str, Any]], limit: int = 4) -> list[dict[str, Any]]:
+    digested: list[dict[str, Any]] = []
+    for point in points[:limit]:
+        if not isinstance(point, dict):
+            continue
+        config = point.get("config", {})
+        digested.append({
+            "k": point.get("k"),
+            "fvu": point.get("fvu"),
+            "architecture": point.get("architecture"),
+            "expansion_factor": config.get("expansion_factor"),
+            "lr": config.get("lr"),
+            "optimizer": config.get("optimizer"),
+            "family_name": config.get("family_name"),
+            "tier": point.get("tier"),
+            "round_commit": str(point.get("commit", ""))[:8],
+        })
+    return digested
+
+
+def recent_results_digest(rows: list[dict[str, str]], limit: int = 4) -> list[dict[str, str]]:
+    digested: list[dict[str, str]] = []
+    for row in rows[-limit:]:
+        digested.append({
+            "experiment_id": row.get("experiment_id", ""),
+            "tier": row.get("tier", ""),
+            "decision": row.get("decision", ""),
+            "val_fvu": row.get("val_fvu", ""),
+            "k": row.get("k", ""),
+            "architecture": row.get("architecture", ""),
+        })
+    return digested
+
+
 def family_prompt_digest(all_families: dict[str, Any]) -> dict[str, Any]:
+    def _family_priority(item: tuple[str, Any]) -> tuple[int, int]:
+        _, fdata = item
+        status = str(fdata.get("status", ""))
+        priority = {
+            "promoted": 0,
+            "active": 1,
+            "incubating": 2,
+            "archived": 3,
+            "discarded": 4,
+        }.get(status, 5)
+        last_round = int(fdata.get("last_round") or -1)
+        return (priority, -last_round)
+
     digested: dict[str, Any] = {}
-    for fname, fdata in all_families.items():
+    ranked_families = sorted(all_families.items(), key=_family_priority)
+    for fname, fdata in ranked_families[:8]:
         if not isinstance(fdata, dict):
             continue
         status = fdata.get("status")
@@ -167,18 +236,17 @@ def build_prompt(
     memory_digest = memory_prompt_digest(memory)
 
     context = {
-        "frontier": frontier,
-        "proxy_frontier": state.get("proxy_frontier", {}),
-        "full_frontier": state.get("full_frontier", frontier),
-        "pareto_proxy_frontier": state.get("pareto_proxy_frontier", []),
-        "pareto_full_frontier": state.get("pareto_full_frontier", state.get("pareto_frontier", [])),
+        "best_proxy_frontier": frontier_prompt_digest(state.get("proxy_frontier", {}), limit=4),
+        "best_full_frontier": frontier_prompt_digest(state.get("full_frontier", frontier), limit=4),
+        "pareto_proxy_frontier": pareto_prompt_digest(state.get("pareto_proxy_frontier", []), limit=4),
+        "pareto_full_frontier": pareto_prompt_digest(state.get("pareto_full_frontier", state.get("pareto_frontier", [])), limit=4),
         "agent_state": state.get("agent", {}),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
         "memory_digest": memory_digest,
         "operator_hints": operator_hints[:8],
         "operator_guide_excerpt": operator_guide_excerpt,
-        "recent_results": summarize_results(results[-6:]),
-        "recent_round_summaries": recent_round_summaries_trimmed(limit=3),
+        "recent_results": recent_results_digest(results, limit=4),
+        "recent_round_summaries": recent_round_summaries_trimmed(limit=2),
     }
     policy_section = ""
     if policy_context:
@@ -190,6 +258,7 @@ Primary objective:
 - maintain and improve the Pareto frontier across FVU, K, and available cost signals
 - K=128 is an initial anchor point, not the only success criterion
 - smaller K is intrinsically valuable when it creates a non-dominated tradeoff, even if FVU is somewhat worse
+- reducing K is more important than reducing expansion_factor; prefer K exploration before EF exploration when both are open
 - reduce FVU where possible, but do not suppress lower-K exploration just because it does not beat the K=128 quality anchor
 - improve throughput / memory when that strengthens the Pareto frontier
 
@@ -215,6 +284,11 @@ Important rules:
 - If a new architecture family seems promising, you may add it under sparsify/ as long as the change is coherent and compatible with the existing execution layer.
 - Encoder design is part of the search space. You may change routing, gating, intermediate width, branch structure, activation form, grouping strategy, or other internal encoder mechanisms when justified.
 - When exploring a new architecture family, also consider its own important hyperparameters, for example intermediate width or routing width in an ICE/MoE-style encoder.
+- Treat `expansion_factor` as a model-capacity axis, not a neutral parameter. Cross-EF results are not a fair pure architecture comparison.
+- When comparing architecture families, prefer the same `expansion_factor` first.
+- Use `expansion_factor=8` as the default starting point for a new family or a refreshed architecture comparison unless there is strong contrary evidence in memory.
+- The goal for EF is to achieve the lowest practical FVU with the smallest feasible EF. Prefer smaller EF values before larger ones.
+- If you run an EF sweep, prefer small-capacity probes first, especially `EF in {4, 8, 12}`, and justify any move to larger EF explicitly.
 - Slow runs may indicate implementation bottlenecks rather than bad architectures.
 - If a recent run was a performance regression, prefer an edit_perf_code follow-up over drawing a negative architecture conclusion.
 - If parameter-only search is not closing the quality gap, escalate to architecture exploration rather than continuing a weak local search.
@@ -278,6 +352,12 @@ The JSON must match the same shape as the established action contract:
 - family_name, family_stage, self_review, needs_sanity
 - env_overrides, touched_files, notes_to_memory, next_hypotheses
 - primary_variable (which single dimension this round changes: architecture, optimizer, lr, k, expansion_factor, other_param, or code_fix)
+Runtime priorities that override weak local heuristics:
+- Lower K is the top priority. If K exploration and EF exploration are both plausible, do K first.
+- Treat expansion_factor as a capacity axis. Do not claim an architecture win from cross-EF comparisons alone.
+- Prefer same-EF architecture comparisons.
+- Default EF for a new family or refreshed comparison is 8 unless strong prior evidence says otherwise.
+- Aim for the smallest EF that preserves quality; prefer EF {4, 8, 12} before moving upward.
 {policy_section}
 Structured update:
 {json.dumps(payload, indent=2)}

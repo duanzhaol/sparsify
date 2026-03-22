@@ -52,16 +52,16 @@ def save_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
-def load_operator_guide_excerpt(max_chars: int = 6000) -> str:
-    """Load a compact operator guidance excerpt for prompt injection.
+def load_operator_guide_excerpt(max_chars: int | None = None) -> str:
+    """Load operator guidance for prompt injection.
 
-    The file is optional. When present, trim it to a bounded size so one
-    large operator note cannot dominate the prompt context window.
+    The file is optional. By default the full guide is returned so the
+    operator can fully override the default search behavior when needed.
     """
     if not OPERATOR_GUIDE_PATH.exists():
         return ""
     text = OPERATOR_GUIDE_PATH.read_text().strip()
-    if len(text) <= max_chars:
+    if max_chars is None or len(text) <= max_chars:
         return text
     head = text[: max_chars - 64].rstrip()
     return head + "\n\n[truncated: operator guide excerpt clipped for prompt budget]"
