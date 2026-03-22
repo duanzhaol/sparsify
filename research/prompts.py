@@ -314,6 +314,20 @@ def build_resume_prompt(
     operator_hints, _ = split_hints(load_operator_hints())
     operator_guide_excerpt = load_operator_guide_excerpt()
     memory_digest = memory_prompt_digest(memory)
+    latest_pending_hints = operator_hints[:8]
+    brief_pending_hints = brief.get("pending_hints", [])
+    merged_pending_hints: list[dict[str, Any]] = []
+    seen_messages: set[str] = set()
+    for hint in latest_pending_hints + brief_pending_hints:
+        if not isinstance(hint, dict):
+            continue
+        message = str(hint.get("message") or "")
+        if not message or message in seen_messages:
+            continue
+        merged_pending_hints.append(hint)
+        seen_messages.add(message)
+        if len(merged_pending_hints) >= 8:
+            break
     payload = {
         "round": round_id,
         "current_focus": brief.get("current_focus") or memory.get("current_focus"),
@@ -334,7 +348,7 @@ def build_resume_prompt(
             "recent_training_failures",
             memory_digest.get("recent_training_failures", []),
         ),
-        "pending_hints": brief.get("pending_hints", operator_hints[:8]),
+        "pending_hints": merged_pending_hints,
         "operator_guide_excerpt": operator_guide_excerpt,
         "next_move_guidance": brief.get("next_move_guidance", memory.get("next_hypotheses", [])[:8]),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
