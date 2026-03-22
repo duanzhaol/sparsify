@@ -683,9 +683,9 @@
       "last_round": 13
     },
     "lowrank_gated_residual": {
-      "status": "promoted",
+      "status": "active",
       "goal": "new_family",
-      "design_hypothesis": "Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count.",
+      "design_hypothesis": "`lowrank_gated_residual` has already shown that quality degrades smoothly between `K=128` and `K=64`, with the new `K=96` point landing much closer to the anchor than to the lower-K regime. A proxy run at `K=80` on the same proven recipe is the cleanest next Pareto probe: it prioritizes lower-K exploration, keeps expansion factor fixed for a fair within-family comparison, and can reveal a new non-dominated tradeoff between the existing `K=64` and `K=96` frontier points.",
       "tested_configs": [
         {
           "round": 22,
@@ -766,16 +766,24 @@
           "decision": "keep",
           "val_fvu": "0.07289826218038797",
           "run_health": "normal"
+        },
+        {
+          "round": 43,
+          "stage": "mainline",
+          "k": "80",
+          "decision": "keep",
+          "val_fvu": "0.07682335376739502",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `K=96` proxy is close to the `K=128` proxy anchor, promote it to full as a likely non-dominated Pareto point.",
-        "If `K=96` falls much closer to the `K=64` quality level than the `K=128` level, keep `K` focus but try a nearby midpoint like `K=80` only if policy still prefers stable param-only frontier mapping."
+        "If `K=80` is promoted and lands close to the `K=96` quality level, promote it to full as a likely new non-dominated Pareto point.",
+        "If `K=80` falls back toward the `K=64` regime, continue K exploration with one lower nearby point such as `K=72` rather than shifting to EF tuning."
       ],
       "best_proxy_fvu": 0.0663293064571917,
       "best_full_fvu": 0.06634617038071156,
-      "last_round": 42
+      "last_round": 43
     },
     "adaptive_budget_topk": {
       "status": "incubating",
@@ -918,26 +926,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 31,
-      "hypothesis": "Round 30 showed that the revised `whitened_topk` path still trips the runtime's behavioral-diff gate as identical to baseline, so this round should repair that blocker instead of opening another architecture or returning to exhausted lowrank-gated sweeps. By making `whitened_topk` explicitly mean-center each sample and inject a fixed cross-channel roll mix before the learned low-rank preconditioner, the family should become observably distinct from plain top-k at step 0 while preserving the same input-geometry hypothesis.",
-      "change_type": "edit_sae_code",
-      "expected_win": "lower_fvu",
-      "family_name": "whitened_topk",
-      "family_stage": "stabilize",
-      "decision": "crash",
-      "val_fvu": null,
-      "observed_fvu": null,
-      "k": null,
-      "architecture": "whitened_topk",
-      "touched_files": [
-        "sparsify/sparse_coder.py"
-      ],
-      "run_health": "crash",
-      "termination_reason": "identical_to_baseline",
-      "tokens_per_sec": null,
-      "baseline_ratio": null
-    },
     {
       "round": 32,
       "hypothesis": "Crash recovery mode requires returning to the best known working family and making only a small stable parameter change. The recent lowrank_gated_residual sweeps showed that higher LR, added aux pressure, and larger EF all regress at K=128, so the clean remaining stability-oriented probe is to reduce only `EXPANSION_FACTOR` from 32 to 16 on the same winning signum recipe and test whether the family is over-parameterized at the anchor.",
@@ -1147,12 +1135,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "57897.485194",
       "baseline_ratio": "0.652766"
+    },
+    {
+      "round": 43,
+      "hypothesis": "`lowrank_gated_residual` has already shown that quality degrades smoothly between `K=128` and `K=64`, with the new `K=96` point landing much closer to the anchor than to the lower-K regime. A proxy run at `K=80` on the same proven recipe is the cleanest next Pareto probe: it prioritizes lower-K exploration, keeps expansion factor fixed for a fair within-family comparison, and can reveal a new non-dominated tradeoff between the existing `K=64` and `K=96` frontier points.",
+      "change_type": "param_only",
+      "expected_win": "smaller_k",
+      "family_name": "lowrank_gated_residual",
+      "family_stage": "mainline",
+      "decision": "keep",
+      "val_fvu": "0.07682335376739502",
+      "observed_fvu": "0.075357",
+      "k": "80",
+      "architecture": "lowrank_gated_residual",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "73965.603803",
+      "baseline_ratio": "0.833926"
     }
   ],
   "recent_insights": [
-    "Registered `adaptive_budget_topk` in the existing architecture validation and factory paths under `sparsify/` only.",
-    "Local smoke test passed for `adaptive_budget_topk` forward/backward execution, and the encoded supports showed non-uniform per-sample active counts under batch execution.",
-    "round 35: Ten no-improve rounds indicate the current fixed-per-sample-K search direction is fundamentally flawed, and recent pivots like `jumprelu` and `two_stage_residual` still stayed far behind the frontier. The next coherent architecture move is to change the sparsity mechanism itself: add `adaptive_budget_topk`, which keeps the same overall batch budget but allocates support dynamically across samples based on encoding difficulty instead of enforcing a rigid per-sample K. If hard examples need more active features and easy examples need fewer, this dynamic-budget routing could improve the quality frontier without changing the execution layer. -> incubate (fvu=0.22683675587177277, observed_fvu=0.220857, k=128, health=normal, termination=completed)",
     "Round 36: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
     "Round 36: behavioral diff matched baseline (arch=batch_topk, k=128, ef=32, max_diff=0.0); runtime allowed prototype training to continue",
     "Added `batch_topk`, a new sparse architecture that selects features under a global batch-level budget instead of enforcing fixed per-sample K.",
@@ -1189,11 +1192,14 @@
     "round 41: `product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
     "Crash-recovery policy required a param-only round on the best working configuration; this round uses `lowrank_gated_residual` with only `K` changed substantively.",
     "`K=96` is an explicit mid-frontier probe between the established `K=64` and `K=128` points, aimed at expanding Pareto coverage rather than only improving the anchor.",
-    "round 42: Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count. -> keep (fvu=0.07289826218038797, observed_fvu=0.071441, k=96, health=normal, termination=completed)"
+    "round 42: Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count. -> keep (fvu=0.07289826218038797, observed_fvu=0.071441, k=96, health=normal, termination=completed)",
+    "Round 42 established `K=96` as a real frontier point for `lowrank_gated_residual`, so the most informative next K-only follow-up is to fill the open gap below it rather than reopen anchor tuning.",
+    "`K=80` is currently untested in the recorded history and is a fair same-EF within-family comparison point between the existing `K=64` and `K=96` frontier results.",
+    "round 43: `lowrank_gated_residual` has already shown that quality degrades smoothly between `K=128` and `K=64`, with the new `K=96` point landing much closer to the anchor than to the lower-K regime. A proxy run at `K=80` on the same proven recipe is the cleanest next Pareto probe: it prioritizes lower-K exploration, keeps expansion factor fixed for a fair within-family comparison, and can reveal a new non-dominated tradeoff between the existing `K=64` and `K=96` frontier points. -> keep (fvu=0.07682335376739502, observed_fvu=0.075357, k=80, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If `K=96` proxy is close to the `K=128` proxy anchor, promote it to full as a likely non-dominated Pareto point.",
-    "If `K=96` falls much closer to the `K=64` quality level than the `K=128` level, keep `K` focus but try a nearby midpoint like `K=80` only if policy still prefers stable param-only frontier mapping."
+    "If `K=80` is promoted and lands close to the `K=96` quality level, promote it to full as a likely new non-dominated Pareto point.",
+    "If `K=80` falls back toward the `K=64` regime, continue K exploration with one lower nearby point such as `K=72` rather than shifting to EF tuning."
   ],
   "recent_sanity_failures": [
     {
