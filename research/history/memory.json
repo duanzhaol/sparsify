@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 7: family=gated stage=prototype change=edit_sae_code decision=crash fvu=None termination=identical_to_baseline lesson=A gated SAE that decouples latent support selection from reconstruction magnitude can be\n[truncated for compact history]",
     "round 26: family=routed stage=prototype change=edit_sae_code decision=crash fvu=None termination=identical_to_baseline lesson=Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectura\n[truncated for compact history]",
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None\n[truncated for compact history] lesson=Severe stagnation and two non-competitive K=128 architecture probes suggest the current\n[truncated for compact history]",
     "round 41: family=group_topk stage=prototype change=edit_perf_code decision=crash fvu=None termination=sanity_failed lesson=The recent `first_step_timeout` crashes are not specific to `group_topk`: the gated AUXK\n[truncated for compact history]",
@@ -20,7 +19,8 @@
     "round 35: Ten no-improve rounds indicate the current fixed-per-sample-K search direction is fundamentally flawed, and recent pivots like `jumprelu` and `two_stage_residual` still stayed far behind the frontier. The next coherent architecture move is to change the sparsity mechanism itself: add `adaptive_budget_topk`, which keeps the same overall batch budget but allocates support dynamically across samples based on encoding difficulty instead of enforcing a rigid per-sample K. If hard examples need more active features and easy examples need fewer, this dynamic-budget routing could improve the quality frontier without changing the execution layer. -> incubate (fvu=0.22683675587177277, observed_fvu=0.220857, k=128, health=normal, termination=completed)",
     "round 36: Eleven no-improve rounds indicate the fixed-per-sample sparse allocation direction is fundamentally flawed, and recent alternatives like `jumprelu`, `two_stage_residual`, and `adaptive_budget_topk` still stayed far behind the frontier. The next coherent architecture move is to test a cleaner batch-level sparsity mechanism: add `batch_topk`, which enforces the same total activation budget across the batch but selects features globally rather than distributing them per sample or via a heuristic quota. If the main failure mode is rigid per-sample support allocation, true batch-level competition could improve reconstruction quality at fixed average sparsity. -> incubate (fvu=0.1644012425094843, observed_fvu=0.160082, k=128, health=normal, termination=completed)",
     "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)",
-    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
+    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
+    "round 39: Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -851,27 +851,33 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 38
+    },
+    "product_codebook_topk": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections.",
+      "tested_configs": [
+        {
+          "round": 39,
+          "stage": "prototype",
+          "k": null,
+          "decision": "policy_reject",
+          "val_fvu": null,
+          "run_health": "policy_reject"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `product_codebook_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
+        "If `product_codebook_topk` shows promising quality with poor throughput, follow with a narrow `code_fix` on codeword lookup or routing rather than discarding the family immediately.",
+        "If `product_codebook_topk` remains clearly behind, archive additive product-codebook routing and pivot to a different fundamentally different direction such as input-space preprocessing or output-aware objectives, not more sparse-allocation tweaks."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 39
     }
   },
   "recent_rounds": [
-    {
-      "round": 27,
-      "hypothesis": "`lowrank_gated_residual` remains the best full-signal family, but the recent `AUXK_ALPHA=0.01` and `LR=1.2e-3` probes both regressed at the K=128 anchor, so the optimization-side local moves look weak. The next clean single-variable stabilization move is to increase `EXPANSION_FACTOR` from 32 to 48 at K=128 while keeping the winning signum/LR/aux recipe fixed, testing whether the gated residual selector is now capacity-limited rather than optimization-limited.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "lowrank_gated_residual",
-      "family_stage": "stabilize",
-      "decision": "discard",
-      "val_fvu": "0.13058725278824568",
-      "observed_fvu": "0.129615",
-      "k": "128",
-      "architecture": "lowrank_gated_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "41504.482279",
-      "baseline_ratio": "0.623588"
-    },
     {
       "round": 28,
       "hypothesis": "`lowrank_gated_residual` remains the best full-signal family, and the recent exploitation probes show that adding aux pressure, lowering LR, or increasing EF all hurt the K=128 proxy anchor. The next clean single-variable sweep point is the untested high-LR side: raising `LR` from `1.6e-3` to `3.2e-3` at K=128 while keeping `AUXK_ALPHA=0` and `EXPANSION_FACTOR=32` fixed tests whether the current mainline family benefits from a more aggressive signum step rather than the smaller-step regime already shown to regress.",
@@ -1085,15 +1091,27 @@
       "termination_reason": "incubation_limit_exceeded",
       "tokens_per_sec": null,
       "baseline_ratio": null
+    },
+    {
+      "round": 39,
+      "hypothesis": "Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections.",
+      "change_type": "edit_sae_code",
+      "expected_win": "Best case: materially outperform recent alternative families like `batch_topk` and `bucketed_topk`, with proxy FVU moving toward the low-0.14s or better. Failure case: quickly falsify the discrete additive-codebook direction and archive it.",
+      "family_name": "product_codebook_topk",
+      "family_stage": "prototype",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "product_codebook_topk",
+      "touched_files": [],
+      "run_health": "policy_reject",
+      "termination_reason": "incubation_limit_exceeded",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "This round should be interpreted as a blocker-removal pass for the incubating input-preconditioning family, not as another new-family launch or a lowrank_gated_residual retune.",
-    "round 31: Round 30 showed that the revised `whitened_topk` path still trips the runtime's behavioral-diff gate as identical to baseline, so this round should repair that blocker instead of opening another architecture or returning to exhausted lowrank-gated sweeps. By making `whitened_topk` explicitly mean-center each sample and inject a fixed cross-channel roll mix before the learned low-rank preconditioner, the family should become observably distinct from plain top-k at step 0 while preserving the same input-geometry hypothesis. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
-    "Crash recovery mode forced a return to param-only search on the best working family, `lowrank_gated_residual`, with no code edits.",
-    "After regressions from higher LR, nonzero aux, and larger EF, the remaining low-risk probe is to reduce `EXPANSION_FACTOR` below the current EF=32 default at K=128.",
-    "This round also tests whether the winning family can retain anchor quality with lower dictionary capacity and better cost/stability characteristics.",
-    "round 32: Crash recovery mode requires returning to the best known working family and making only a small stable parameter change. The recent lowrank_gated_residual sweeps showed that higher LR, added aux pressure, and larger EF all regress at K=128, so the clean remaining stability-oriented probe is to reduce only `EXPANSION_FACTOR` from 32 to 16 on the same winning signum recipe and test whether the family is over-parameterized at the anchor. -> discard (fvu=0.13520684465765953, observed_fvu=0.134153, k=128, health=normal, termination=completed)",
     "Round 33: variable isolation warning: Multiple primary variables changed simultaneously: architecture, lr",
     "Severe stagnation forced a pivot away from further lowrank_gated_residual parameter sweeps and back to a fundamentally different architecture.",
     "`jumprelu` is the selected comparison target because it is the only remaining incubating family with a stable existing code path and no new implementation risk this round.",
@@ -1127,12 +1145,18 @@
     "Added `codebook_topk`, a new architecture that reconstructs a coarse learned codebook vector first and then applies TopK only to the residual.",
     "Registered `codebook_topk` in the existing architecture validation and factory paths under `sparsify/` only.",
     "Local smoke test passed for `codebook_topk` forward/backward execution, confirming the discrete-codebook residual path is trainable in the current codebase.",
-    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
+    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
+    "Round 39: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "round 39: BLOCKED by incubation limit: Cannot create new incubating family 'product_codebook_topk': already 6 incubating families (limit: 5). Stale families that could be archived: []",
+    "Round 39 pivots to a new discrete additive architecture family, `product_codebook_topk`, after continuous sparse-support variants underperformed for 13 rounds.",
+    "The design hypothesis is that multiple retrieved codewords should absorb shared coarse structure, allowing the residual TopK path to spend capacity on only fine corrections.",
+    "Keep this round strictly architecture-only at proxy tier under the strong shared recipe; require a local forward/backward sanity check before trusting training results.",
+    "round 39: Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "next_hypotheses": [
-    "If `codebook_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
-    "If `codebook_topk` shows promising quality with poor throughput, follow with a narrow performance-oriented `code_fix` on the codebook-selection path rather than discarding the family immediately.",
-    "If `codebook_topk` remains clearly behind, archive coarse codebook-plus-residual approaches and pivot to another fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
+    "If `product_codebook_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
+    "If `product_codebook_topk` shows promising quality with poor throughput, follow with a narrow `code_fix` on codeword lookup or routing rather than discarding the family immediately.",
+    "If `product_codebook_topk` remains clearly behind, archive additive product-codebook routing and pivot to a different fundamentally different direction such as input-space preprocessing or output-aware objectives, not more sparse-allocation tweaks."
   ],
   "recent_sanity_failures": [
     {
