@@ -529,7 +529,7 @@ def generate_sweep_guidance(
 
     all_lrs = ["2e-4", "4e-4", "8e-4", "1.6e-3", "3.2e-3"]
     all_auxk = ["0", "0.01", "0.03125", "0.0625"]
-    all_efs = [4, 8, 12]
+    all_efs = [12, 16, 8]
 
     untested_lrs = [v for v in all_lrs if v not in tested_lrs]
     untested_auxk = [v for v in all_auxk if v not in tested_auxk]
@@ -546,7 +546,7 @@ def generate_sweep_guidance(
         suggestions.append("All candidate auxk_alpha values have been tested")
     if untested_efs:
         suggestions.append(
-            "Untested expansion_factor values (small-first capacity sweep): "
+            "Untested expansion_factor values (priority capacity sweep, favoring the stronger current band first): "
             + ", ".join(str(e) for e in untested_efs)
         )
     else:
@@ -558,14 +558,15 @@ def generate_sweep_guidance(
     if not untested_lrs and not untested_auxk and not untested_efs:
         return (
             f"EXPLOITATION MODE: All standard hyperparameter candidates have been tested for {family_label} {tested_info}.\n"
-            "Consider exploring K values (K=64, K=32) before reopening EF, or try a new architecture approach."
+            "Consider exploring K values before reopening EF, or try a new architecture approach."
         )
 
     return (
         "EXPLOITATION MODE — Systematic Hyperparameter Sweep:\n"
         f"Target family: {family_label}. Already tested {tested_info}\n"
         "Priority order: K first, then capacity-efficiency work on EF.\n"
-        "Use EF only as a capacity axis: compare architectures at the same EF when possible, start new family checks from EF=8 by default, and prefer smaller EF before larger EF.\n"
+        "Use EF only as a capacity axis: compare architectures at the same EF when possible.\n"
+        "Current evidence says EF=8 is usually a lower-bound check, not the main default. Spend most EF search on 12/16, and only use EF=8 sparingly to confirm capacity limits.\n"
         "Focus on this architecture and sweep these parameters one at a time:\n"
         + "\n".join(f"- {s}" for s in suggestions)
         + "\n\nUse param_only with env_overrides. Change ONE parameter per round."

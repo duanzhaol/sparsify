@@ -286,9 +286,10 @@ Important rules:
 - When exploring a new architecture family, also consider its own important hyperparameters, for example intermediate width or routing width in an ICE/MoE-style encoder.
 - Treat `expansion_factor` as a model-capacity axis, not a neutral parameter. Cross-EF results are not a fair pure architecture comparison.
 - When comparing architecture families, prefer the same `expansion_factor` first.
-- Use `expansion_factor=8` as the default starting point for a new family or a refreshed architecture comparison unless there is strong contrary evidence in memory.
-- The goal for EF is to achieve the lowest practical FVU with the smallest feasible EF. Prefer smaller EF values before larger ones.
-- If you run an EF sweep, prefer small-capacity probes first, especially `EF in {4, 8, 12}`, and justify any move to larger EF explicitly.
+- Recent evidence indicates that `expansion_factor=8` is often too capacity-constrained for the current frontier targets. Do not treat EF=8 as the main default search regime.
+- Use `expansion_factor=12` or `16` as the primary comparison band unless memory contains strong contrary evidence for a specific family.
+- Treat `expansion_factor=8` mainly as a lower-bound / capacity-floor check, not as the primary place to spend many consecutive rounds.
+- The goal for EF is to achieve the lowest practical FVU under the `EF<=16` cap, with most search effort concentrated on `EF in {12, 16}` and only limited validation at `EF=8`.
 - Slow runs may indicate implementation bottlenecks rather than bad architectures.
 - If a recent run was a performance regression, prefer an edit_perf_code follow-up over drawing a negative architecture conclusion.
 - If parameter-only search is not closing the quality gap, escalate to architecture exploration rather than continuing a weak local search.
@@ -370,8 +371,9 @@ Runtime priorities that override weak local heuristics:
 - Lower K is the top priority. If K exploration and EF exploration are both plausible, do K first.
 - Treat expansion_factor as a capacity axis. Do not claim an architecture win from cross-EF comparisons alone.
 - Prefer same-EF architecture comparisons.
-- Default EF for a new family or refreshed comparison is 8 unless strong prior evidence says otherwise.
-- Aim for the smallest EF that preserves quality; prefer EF {4, 8, 12} before moving upward.
+- Default EF for a new family or refreshed comparison is 12 unless strong prior evidence says 16 is the better mainline band for that family.
+- Treat EF=8 as a lower-bound check rather than the primary comparison target.
+- Under the current evidence, prefer EF {12, 16} for most meaningful comparisons and use EF=8 sparingly to validate capacity limits.
 {policy_section}
 Structured update:
 {json.dumps(payload, indent=2)}
