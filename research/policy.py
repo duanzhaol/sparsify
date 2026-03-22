@@ -14,7 +14,7 @@ from typing import Any
 from research.git_ops import REPO_ROOT
 from research.state_io import BASE_ENV_DEFAULTS
 
-MAX_INCUBATING_FAMILIES = 5
+MAX_INCUBATING_FAMILIES = 10
 MAX_INCUBATING_PROXY_ROUNDS = 3
 LANE_HIGH_K_THRESHOLD = 64
 
