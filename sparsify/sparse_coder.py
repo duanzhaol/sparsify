@@ -546,7 +546,14 @@ class CodebookTopKSparseCoder(SparseCoder):
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
         code_indices = logits.argmax(dim=-1)
-        coarse = self.codebook.index_select(0, code_indices)
+        probs = logits.softmax(dim=-1)
+        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
+            dtype=probs.dtype
+        )
+        # Keep the routed code hard in the forward pass while preserving a gradient
+        # path through the router so DDP does not see unused parameters.
+        routing = hard_assign + probs - probs.detach()
+        coarse = routing @ self.codebook
         return coarse, logits
 
     def encode(self, x: Tensor) -> EncoderOutput:

@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 41: family=group_topk stage=prototype change=edit_perf_code decision=crash fvu=None termination=sanity_failed lesson=The recent `first_step_timeout` crashes are not specific to `group_topk`: the gated AUXK\n[truncated for compact history]",
     "round 52: family=factorized_topk stage=prototype change=edit_sae_code decision=crash fvu\n[truncated for compact history] lesson=Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closi\n[truncated for compact history]",
     "round 57: family=residual_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=completed lesson=Five rounds of factorized-topk stabilization failed to approach the gated frontier, so t\n[truncated for compact history]",
     "round 67: family=lowrank_residual stage=prototype change=edit_sae_code decision=crash fvu=None termination=completed lesson=The best existing promoted alternatives have now been refreshed and still sit well behin\n[truncated for compact history]",
@@ -20,7 +19,8 @@
     "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 39: Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 40: The search has already covered multiple K values on the best mainline and recent continuous-support pivots have all underperformed, so the next informative step is to actually benchmark the newly added discrete additive family rather than return to more tuning. `product_codebook_topk` tests whether representing coarse structure with multiple retrieved codewords before a sparse residual correction can break the current fixed-TopK quality ceiling. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
-    "round 41: `product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)"
+    "round 41: `product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
+    "round 58: The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -104,6 +104,13 @@
       "last_round": 57,
       "run_health": "crash",
       "termination_reason": "completed"
+    },
+    {
+      "pattern": "The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug.",
+      "count": 1,
+      "last_round": 58,
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline"
     }
   ],
   "baseline_runtime": {
@@ -966,7 +973,7 @@
     "codebook_topk": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "The `K=40`, `EF=8` search cluster now looks broadly exhausted across low-rank residual, batch/global allocation, adaptive-budget routing, bucketed routing, and JumpReLU, so the next informative move is to test a qualitatively different representation family rather than another sparse-support variant. `codebook_topk` is the strongest remaining same-EF architecture probe because it changes the problem from pure sparse combination to coarse prototype retrieval plus sparse residual correction.",
+      "design_hypothesis": "The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug.",
       "tested_configs": [
         {
           "round": 38,
@@ -983,18 +990,27 @@
           "decision": "crash",
           "val_fvu": "None",
           "run_health": "crash"
+        },
+        {
+          "round": 58,
+          "stage": "stabilize",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
         }
       ],
       "known_issues": [
         "round 57: training crash for codebook_topk | RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by"
       ],
       "next_steps": [
-        "If `codebook_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
-        "If `codebook_topk` at `K=40`, `EF=8` is also clearly weak or rejected, treat the current `K=40`, `EF=8` regime as broadly exhausted and pivot next to a more radical architecture or objective reformulation rather than another nearby variant."
+        "If the repaired `codebook_topk` proxy run completes and is competitive, promote it before any family-local tuning.",
+        "If the repaired run completes but is clearly weak, treat the current `K=40`, `EF=8` comparison band as broadly exhausted and pivot next to a more radical architecture or objective reformulation rather than another nearby variant.",
+        "If the repaired run still crashes, inspect for any remaining architecture-local parameters that are conditionally disconnected under the training loss before changing experiment design."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 57
+      "last_round": 58
     },
     "product_codebook_topk": {
       "status": "archived",
@@ -1041,24 +1057,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 46,
-      "hypothesis": "`lowrank_gated_residual` has now produced a smooth chain of valid lower-K full points through `K=56`, so the remaining high-value question is how much farther this family can extend the Pareto frontier below the old `K=64` anchor before quality bends too sharply. A proxy probe at `K=48` on the unchanged recipe is the cleanest next step to test that lower-K boundary while staying within the strongest validated family and same-EF comparison regime.",
-      "change_type": "param_only",
-      "expected_win": "smaller_k",
-      "family_name": "lowrank_gated_residual",
-      "family_stage": "mainline",
-      "decision": "keep",
-      "val_fvu": "0.08739485312253237",
-      "observed_fvu": "0.085376",
-      "k": "48",
-      "architecture": "lowrank_gated_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "66538.234407",
-      "baseline_ratio": "0.750186"
-    },
     {
       "round": 47,
       "hypothesis": "`lowrank_gated_residual` still supports a coherent lower-K Pareto curve through `K=48`, with quality degrading smoothly rather than collapsing to the `K=32` endpoint. The next most informative K-first move is a proxy probe at `K=40` on the unchanged recipe, which tests whether this family can still add one more non-dominated smaller-K point before the search pivots back to architecture.",
@@ -1256,15 +1254,29 @@
       "termination_reason": "completed",
       "tokens_per_sec": "",
       "baseline_ratio": ""
+    },
+    {
+      "round": 58,
+      "hypothesis": "The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "codebook_topk",
+      "family_stage": "stabilize",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "codebook_topk",
+      "touched_files": [
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "`K=40` is the next clean same-family, same-EF test between the established `K=32` and `K=48` points, and should clarify whether the family still yields useful non-dominated tradeoffs below 48.",
-    "round 47: `lowrank_gated_residual` still supports a coherent lower-K Pareto curve through `K=48`, with quality degrading smoothly rather than collapsing to the `K=32` endpoint. The next most informative K-first move is a proxy probe at `K=40` on the unchanged recipe, which tests whether this family can still add one more non-dominated smaller-K point before the search pivots back to architecture. -> keep (fvu=0.09111861046403646, observed_fvu=0.088967, k=40, health=normal, termination=completed)",
-    "Round 48: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
-    "Round 47 full showed the `lowrank_gated_residual` `EF=32` K sweep has reached a useful boundary at `K=40`, and a new operator hint now forbids further `EF=32` experiments.",
-    "The next search phase should use `EF<=16` and prefer `EF=8`, so refreshed architecture comparisons should restart in that smaller-capacity regime rather than claiming wins from the old `EF=32` frontier.",
-    "round 48: The `lowrank_gated_residual` K sweep at `EF=32` has now mapped a clear lower-K frontier down to `K=40`, and the new operator hint explicitly rules out further `EF=32` runs. The next most informative move is a same-EF architecture comparison at lower K: run `lowrank_residual` at `K=40`, `EF=8` under the shared stable optimizer/LR recipe to test whether a simpler low-rank residual family preserves more quality at small K when capacity is reduced to the newly preferred regime. -> incubate (fvu=0.1793901640921831, observed_fvu=0.178429, k=40, health=normal, termination=completed)",
     "Round 48 showed `lowrank_residual` at `K=40`, `EF=8` is not competitive enough in proxy, so the next fair step is another same-`K`, same-`EF` architecture comparison rather than changing capacity.",
     "The operator guidance now requires ending the old `EF=32` track and rebuilding comparisons at `EF=8`, so `lowrank_gated_residual` needs a clean `K=40`, `EF=8` benchmark before broader conclusions about low-K viability at small EF are made.",
     "round 49: `lowrank_residual` at `K=40`, `EF=8` was clearly weak in proxy, so the next fair small-capacity comparison should keep the same `K=40`, `EF=8`, optimizer, and LR while switching only architecture. Testing `lowrank_gated_residual` at `K=40`, `EF=8` is the strongest same-EF follow-up because it is the current best overall family and will show whether the low-K frontier remains viable once the operator-mandated capacity cap is enforced. -> discard (fvu=0.17895471677184105, observed_fvu=0.178071, k=40, health=normal, termination=completed)",
@@ -1298,11 +1310,18 @@
     "Round 57: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
     "Round 56 showed `jumprelu` is also weak at `K=40`, `EF=8` (`val_fvu=0.36313553526997566`), so changing the sparse activation rule alone does not rescue the current lower-K small-capacity regime.",
     "Next severe-stagnation move is a same-EF comparison with a discrete retrieval-style architecture: test `codebook_topk` at `K=40`, `EF=8` before escalating to more invasive code or objective changes.",
-    "round 57: The `K=40`, `EF=8` search cluster now looks broadly exhausted across low-rank residual, batch/global allocation, adaptive-budget routing, bucketed routing, and JumpReLU, so the next informative move is to test a qualitatively different representation family rather than another sparse-support variant. `codebook_topk` is the strongest remaining same-EF architecture probe because it changes the problem from pure sparse combination to coarse prototype retrieval plus sparse residual correction. -> crash (fvu=None, observed_fvu=, k=40, health=crash, termination=completed)"
+    "round 57: The `K=40`, `EF=8` search cluster now looks broadly exhausted across low-rank residual, batch/global allocation, adaptive-budget routing, bucketed routing, and JumpReLU, so the next informative move is to test a qualitatively different representation family rather than another sparse-support variant. `codebook_topk` is the strongest remaining same-EF architecture probe because it changes the problem from pure sparse combination to coarse prototype retrieval plus sparse residual correction. -> crash (fvu=None, observed_fvu=, k=40, health=crash, termination=completed)",
+    "Round 58: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "Round 58: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "Round 58 repair attempt 1: fixed `codebook_topk` DDP unused-parameter failure in `sparsify/sparse_coder.py` by replacing pure `argmax`/`index_select` routing with a straight-through hard assignment over `softmax(code_router(x))` so `code_router.weight` and `code_router.bias` stay in the gradient graph.",
+    "Local validation after the patch: `python -m py_compile sparsify/sparse_coder.py` passed, and a direct backward check on `CodebookTopKSparseCoder` produced nonzero grads for `code_router.weight` and `code_router.bias`, matching the suspected root cause from parameter indices 3 and 4 in the crash log.",
+    "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
+    "round 58: The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "next_hypotheses": [
-    "If `codebook_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
-    "If `codebook_topk` at `K=40`, `EF=8` is also clearly weak or rejected, treat the current `K=40`, `EF=8` regime as broadly exhausted and pivot next to a more radical architecture or objective reformulation rather than another nearby variant."
+    "If the repaired `codebook_topk` proxy run completes and is competitive, promote it before any family-local tuning.",
+    "If the repaired run completes but is clearly weak, treat the current `K=40`, `EF=8` comparison band as broadly exhausted and pivot next to a more radical architecture or objective reformulation rather than another nearby variant.",
+    "If the repaired run still crashes, inspect for any remaining architecture-local parameters that are conditionally disconnected under the training loss before changing experiment design."
   ],
   "recent_sanity_failures": [
     {
@@ -1315,14 +1334,6 @@
     }
   ],
   "recent_training_failures": [
-    {
-      "round": 52,
-      "family_name": "factorized_topk",
-      "change_type": "edit_sae_code",
-      "termination_reason": "identical_to_baseline",
-      "error_type": null,
-      "error_summary": null
-    },
     {
       "round": 57,
       "family_name": "residual_topk",
@@ -1446,6 +1457,20 @@
       "traceback_excerpt": "[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 215, in run\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 640, in fit\n[rank0]:   File \"/root/sparsify-ascend/sparsify/utils.py\", line 146, in partial_forward_to_layer\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/generic.py\", line 1072, in wrapper\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 410, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 414, in __call__\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 832, in compile_wrapper\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/modeling_layers.py\", line 94, in __call__\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 260, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 229, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1881, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1842, in inner\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 1044, in _fn\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 467, in _hook_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1657, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1546, in _pre_forward\n[rank0]: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
       "log_excerpt": "[rank0]:     hidden_states, _ = self.self_attn(\n[rank0]:                        ^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:     return forward_call(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:     return func(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 229, in forward\n[rank0]:     attn_output = self.o_proj(attn_output)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1881, in _call_impl\n[rank0]:     return inner()\n[rank0]:            ^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1842, in inner\n[rank0]:     hook_result = hook(self, args, result)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 1044, in _fn\n[rank0]:     return fn(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 467, in _hook_impl\n[rank0]:     out = wrapped(\n[rank0]:           ^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:     return forward_call(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1657, in forward\n[rank0]:     inputs, kwargs = self._pre_forward(*inputs, **kwargs)\n[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1546, in _pre_forward\n[rank0]:     if torch.is_grad_enabled() and self.reducer._rebuild_buckets():\n[rank0]:                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by\n[rank0]: making sure all `forward` function outputs participate in calculating loss.\n[rank0]: If you already have done the above, then the distributed data parallel module wasn't able to locate the output tensors in the return value of your module's `forward` function. Please include the loss function and the structure of the return value of `forward` of your module when reporting this issue (e.g. list, dict, iterable).\n[rank0]: Parameter indices which did not receive grad for rank 0: 3 4\n[rank0]:  In addition, you can set the environment variable TORCH_DISTRIBUTED_DEBUG to either INFO or DETAIL to print out information about which particular parameters did not receive gradient on this rank as part of this error\nW0322 15:14:50.274000 231705 site-packages/torch/distributed/elastic/multiprocessing/api.py:908] Sending process 231745 closing signal SIGTERM\nE0322 15:14:50.438000 231705 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 1 (pid: 231746) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n  <NO_OTHER_FAILURES>\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-22_15:14:50\n  host      : iZwz9abj7gsvix03ksg3uvZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 231746)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================",
       "log_path": "/root/sparsify-ascend/research/history/logs/proxy_1774163704.log"
+    },
+    {
+      "round": 58,
+      "tier": "proxy",
+      "family_name": "codebook_topk",
+      "change_type": "edit_sae_code",
+      "primary_variable": "code_fix",
+      "hypothesis": "The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug.",
+      "termination_reason": "identical_to_baseline",
+      "error_type": "",
+      "error_summary": "",
+      "traceback_excerpt": "",
+      "log_excerpt": "",
+      "log_path": ""
     }
   ],
   "code_history_summary": {
