@@ -301,6 +301,8 @@ def _get_sae_class(architecture: str) -> type:
         return CodebookTopKSparseCoder
     if architecture == "residual_vq":
         return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
     if architecture == "whitened_topk":
         return WhitenedTopKSparseCoder
     if architecture == "jumprelu":
@@ -677,6 +679,105 @@ class ResidualVQSparseCoder(SparseCoder):
     ) -> ForwardOutput:
         x_centered = x - self.b_dec
         coarse, _ = self._select_code(x_centered)
+        residual = x_centered - coarse
+        top_acts, top_indices, pre_acts = fused_encoder(
+            residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        sparse_residual = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        sae_out = coarse + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            aux_sparse = decoder_impl(auxk_indices, auxk_acts.to(self.dtype), self.W_dec.mT)
+            e_hat = coarse + aux_sparse + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
+    """Two hard codebook reconstructions followed by sparse residual correction."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.second_codebook = nn.Parameter(
+            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+        )
+        self.second_code_router = nn.Linear(
+            d_in, self.num_codes, device=device, dtype=dtype
+        )
+        self.second_code_router.bias.data.zero_()
+
+    def _select_code_from(
+        self, x: Tensor, router: nn.Linear, codebook: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        logits = router(x)
+        code_indices = logits.argmax(dim=-1)
+        probs = logits.softmax(dim=-1)
+        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
+            dtype=probs.dtype
+        )
+        routing = hard_assign + probs - probs.detach()
+        coarse = routing @ codebook
+        return coarse, logits
+
+    def _select_codes(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        first_coarse, first_logits = self._select_code_from(
+            x, self.code_router, self.codebook
+        )
+        second_input = x - first_coarse
+        second_coarse, second_logits = self._select_code_from(
+            second_input, self.second_code_router, self.second_codebook
+        )
+        combined = first_coarse + second_coarse
+        return combined, first_logits, second_logits
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        coarse, _, _ = self._select_codes(x)
+        residual = x - coarse
+        return fused_encoder(
+            residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        coarse, _, _ = self._select_codes(x_centered)
         residual = x_centered - coarse
         top_acts, top_indices, pre_acts = fused_encoder(
             residual, self.encoder.weight, self.encoder.bias, self.cfg.k

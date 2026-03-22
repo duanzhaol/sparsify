@@ -197,6 +197,7 @@ class TrainConfig(Serializable):
             "bucketed_topk",
             "codebook_topk",
             "residual_vq",
+            "two_code_residual_vq",
             "jumprelu",
             "gated",
             "routed",
