@@ -35,11 +35,12 @@ def validate_action(
     if force_param_only and action.is_code_edit:
         action = _force_param_only(action)
 
-    # Variable isolation
-    changes = _classify_changes(action.env_overrides, BASE_ENV_DEFAULTS)
-    ok, msg = check_variable_isolation(changes, action.change_type)
-    if not ok:
-        return action, f"Variable isolation violated: {msg}"
+    # Variable isolation (skip when frontier is empty — first rounds need to set baseline)
+    if state.frontier:
+        changes = _classify_changes(action.env_overrides, BASE_ENV_DEFAULTS)
+        ok, msg = check_variable_isolation(changes, action.change_type)
+        if not ok:
+            return action, f"Variable isolation violated: {msg}"
 
     # Incubation limits
     ok, msg = check_incubation_limits(
