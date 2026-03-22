@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 1: family=jumprelu stage=prototype change=edit_sae_code decision=crash fvu=None termination=identical_to_baseline lesson=A JumpReLU encoder with learnable per-latent thresholds can improve the K=128 quality an\n[truncated for compact history]",
     "round 7: family=gated stage=prototype change=edit_sae_code decision=crash fvu=None termination=identical_to_baseline lesson=A gated SAE that decouples latent support selection from reconstruction magnitude can be\n[truncated for compact history]",
     "round 26: family=routed stage=prototype change=edit_sae_code decision=crash fvu=None termination=identical_to_baseline lesson=Recent gated LR sweeps regressed, which suggests the quality ceiling is now architectura\n[truncated for compact history]",
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None\n[truncated for compact history] lesson=Severe stagnation and two non-competitive K=128 architecture probes suggest the current\n[truncated for compact history]",
@@ -20,7 +19,8 @@
     "round 31: Round 30 showed that the revised `whitened_topk` path still trips the runtime's behavioral-diff gate as identical to baseline, so this round should repair that blocker instead of opening another architecture or returning to exhausted lowrank-gated sweeps. By making `whitened_topk` explicitly mean-center each sample and inject a fixed cross-channel roll mix before the learned low-rank preconditioner, the family should become observably distinct from plain top-k at step 0 while preserving the same input-geometry hypothesis. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 35: Ten no-improve rounds indicate the current fixed-per-sample-K search direction is fundamentally flawed, and recent pivots like `jumprelu` and `two_stage_residual` still stayed far behind the frontier. The next coherent architecture move is to change the sparsity mechanism itself: add `adaptive_budget_topk`, which keeps the same overall batch budget but allocates support dynamically across samples based on encoding difficulty instead of enforcing a rigid per-sample K. If hard examples need more active features and easy examples need fewer, this dynamic-budget routing could improve the quality frontier without changing the execution layer. -> incubate (fvu=0.22683675587177277, observed_fvu=0.220857, k=128, health=normal, termination=completed)",
     "round 36: Eleven no-improve rounds indicate the fixed-per-sample sparse allocation direction is fundamentally flawed, and recent alternatives like `jumprelu`, `two_stage_residual`, and `adaptive_budget_topk` still stayed far behind the frontier. The next coherent architecture move is to test a cleaner batch-level sparsity mechanism: add `batch_topk`, which enforces the same total activation budget across the batch but selects features globally rather than distributing them per sample or via a heuristic quota. If the main failure mode is rigid per-sample support allocation, true batch-level competition could improve reconstruction quality at fixed average sparsity. -> incubate (fvu=0.1644012425094843, observed_fvu=0.160082, k=128, health=normal, termination=completed)",
-    "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)"
+    "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)",
+    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -827,27 +827,33 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 37
+    },
+    "codebook_topk": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer.",
+      "tested_configs": [
+        {
+          "round": 38,
+          "stage": "prototype",
+          "k": null,
+          "decision": "policy_reject",
+          "val_fvu": null,
+          "run_health": "policy_reject"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `codebook_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
+        "If `codebook_topk` shows promising quality with poor throughput, follow with a narrow performance-oriented `code_fix` on the codebook-selection path rather than discarding the family immediately.",
+        "If `codebook_topk` remains clearly behind, archive coarse codebook-plus-residual approaches and pivot to another fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 38
     }
   },
   "recent_rounds": [
-    {
-      "round": 26,
-      "hypothesis": "`AUXK_ALPHA=0.01` clearly regressed proxy quality for `lowrank_gated_residual` at the K=128 anchor, so the family default should stay at `AUXK_ALPHA=0`. The next clean single-variable stabilization move is to lower LR slightly from `1.6e-3` to `1.2e-3` at K=128, testing whether the gated residual mainline is overshooting near convergence and can realize a modest quality gain through a narrower optimization step without changing architecture, K, or aux behavior.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "lowrank_gated_residual",
-      "family_stage": "stabilize",
-      "decision": "discard",
-      "val_fvu": "0.08242063876241446",
-      "observed_fvu": "0.086884",
-      "k": "128",
-      "architecture": "lowrank_gated_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "47569.811317",
-      "baseline_ratio": "0.714717"
-    },
     {
       "round": 27,
       "hypothesis": "`lowrank_gated_residual` remains the best full-signal family, but the recent `AUXK_ALPHA=0.01` and `LR=1.2e-3` probes both regressed at the K=128 anchor, so the optimization-side local moves look weak. The next clean single-variable stabilization move is to increase `EXPANSION_FACTOR` from 32 to 48 at K=128 while keeping the winning signum/LR/aux recipe fixed, testing whether the gated residual selector is now capacity-limited rather than optimization-limited.",
@@ -1058,15 +1064,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "60522.664875",
       "baseline_ratio": ""
+    },
+    {
+      "round": 38,
+      "hypothesis": "Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "codebook_topk",
+      "family_stage": "prototype",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "codebook_topk",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "policy_reject",
+      "termination_reason": "incubation_limit_exceeded",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "Reworked `WhitenedTopKSparseCoder` to encode from RMS-normalized activations passed through a low-rank residual preconditioner initialized near identity, replacing the earlier shallow dense raw preconditioner.",
-    "Local CPU forward/backward smoke test passed for the edited `whitened_topk` implementation.",
-    "round 30: Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
-    "Round 31: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
-    "Repaired the `whitened_topk` encode path after round 30's `identical_to_baseline` abort by adding per-sample centering and a fixed rolled-channel mix before sparse selection.",
-    "Local differential smoke check against plain `topk` now shows clear step-0 divergence for `whitened_topk` with shared encoder weights, including nonzero top-activation differences and changed support indices.",
     "This round should be interpreted as a blocker-removal pass for the incubating input-preconditioning family, not as another new-family launch or a lowrank_gated_residual retune.",
     "round 31: Round 30 showed that the revised `whitened_topk` path still trips the runtime's behavioral-diff gate as identical to baseline, so this round should repair that blocker instead of opening another architecture or returning to exhausted lowrank-gated sweeps. By making `whitened_topk` explicitly mean-center each sample and inject a fixed cross-channel roll mix before the learned low-rank preconditioner, the family should become observably distinct from plain top-k at step 0 while preserving the same input-geometry hypothesis. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "Crash recovery mode forced a return to param-only search on the best working family, `lowrank_gated_residual`, with no code edits.",
@@ -1100,12 +1121,18 @@
     "Added `bucketed_topk`, a conditional dictionary architecture that mixes separate low-norm and high-norm encoder branches before TopK selection.",
     "Registered `bucketed_topk` in the existing architecture validation and factory paths under `sparsify/` only.",
     "Local smoke test passed for `bucketed_topk` forward/backward execution, confirming the new route is trainable under the current codebase.",
-    "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)"
+    "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)",
+    "Round 38: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "round 38: BLOCKED by incubation limit: Cannot create new incubating family 'codebook_topk': already 5 incubating families (limit: 5). Stale families that could be archived: []",
+    "Added `codebook_topk`, a new architecture that reconstructs a coarse learned codebook vector first and then applies TopK only to the residual.",
+    "Registered `codebook_topk` in the existing architecture validation and factory paths under `sparsify/` only.",
+    "Local smoke test passed for `codebook_topk` forward/backward execution, confirming the discrete-codebook residual path is trainable in the current codebase.",
+    "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "next_hypotheses": [
-    "If `bucketed_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
-    "If `bucketed_topk` shows promising quality with poor throughput, follow with a narrow performance-oriented `code_fix` on the conditional routing path rather than discarding the family immediately.",
-    "If `bucketed_topk` remains clearly behind, archive norm-bucketed conditional dictionaries and pivot to another fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
+    "If `codebook_topk` is competitive at K=128 proxy, keep the family alive and promote it to full before any local tuning.",
+    "If `codebook_topk` shows promising quality with poor throughput, follow with a narrow performance-oriented `code_fix` on the codebook-selection path rather than discarding the family immediately.",
+    "If `codebook_topk` remains clearly behind, archive coarse codebook-plus-residual approaches and pivot to another fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
   ],
   "recent_sanity_failures": [
     {
