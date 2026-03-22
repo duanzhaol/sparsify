@@ -291,6 +291,8 @@ def _get_sae_class(architecture: str) -> type:
     """Return the SparseCoder subclass for the given architecture string."""
     if architecture == "topk":
         return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
     if architecture == "adaptive_budget_topk":
         return AdaptiveBudgetTopKSparseCoder
     if architecture == "whitened_topk":
@@ -410,6 +412,32 @@ class AdaptiveBudgetTopKSparseCoder(SparseCoder):
         rank = torch.arange(self.cfg.k, device=acts.device)
         active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
         top_acts = top_acts * active_mask.to(top_acts.dtype)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class BatchTopKSparseCoder(SparseCoder):
+    """Select top activations under a global batch-level budget."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+        batch_size = acts.shape[0]
+        if batch_size == 1:
+            top_acts, top_indices = torch.topk(
+                acts, self.cfg.k, dim=-1, sorted=False
+            )
+            return EncoderOutput(top_acts, top_indices, acts)
+
+        flat = acts.reshape(-1)
+        total_budget = batch_size * self.cfg.k
+        total_budget = min(total_budget, flat.numel())
+        _, flat_indices = torch.topk(flat, total_budget, sorted=False)
+
+        selected = acts.new_zeros(acts.shape)
+        selected.view(-1).scatter_(0, flat_indices, flat.index_select(0, flat_indices))
+
+        top_acts, top_indices = torch.topk(selected, self.cfg.k, dim=-1, sorted=False)
         return EncoderOutput(top_acts, top_indices, acts)
 
 
