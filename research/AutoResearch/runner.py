@@ -104,7 +104,7 @@ def run_training(
     save_dir = SAVE_ROOT / f"round_{round_id:04d}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    env, config_json = _build_env(action, run_name, save_dir, config)
+    env, config_json = _build_env(action, run_name, save_dir, config, state.frontier)
     baseline_key = _baseline_key(config_json)
     baseline_tps = state.get_baseline_tps(
         config_json["architecture"], config_json["hookpoints"]
@@ -401,13 +401,77 @@ def check_agent_backend_reachable(agent_proxy: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_base_config(
+    action: Action,
+    frontier: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Find the best frontier config to use as base for partial overrides.
+
+    Looks for a frontier entry matching the action's family_name. If found,
+    converts its stored config dict back to env-var format. Falls back to
+    BASE_ENV_DEFAULTS if no match.
+    """
+    if not frontier:
+        return dict(BASE_ENV_DEFAULTS)
+
+    family = (action.family_name or "").lower()
+    best_entry = None
+    best_fvu = float("inf")
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        arch = str(cfg.get("architecture", "")).lower()
+        if arch == family:
+            fvu = float(entry.get("fvu", float("inf")))
+            if fvu < best_fvu:
+                best_fvu = fvu
+                best_entry = entry
+
+    if best_entry is None:
+        return dict(BASE_ENV_DEFAULTS)
+
+    # Build env-var dict from frontier config
+    cfg = best_entry["config"]
+    base = dict(BASE_ENV_DEFAULTS)
+    key_map = {
+        "architecture": "ARCHITECTURE",
+        "expansion_factor": "EXPANSION_FACTOR",
+        "k": "K",
+        "optimizer": "OPTIMIZER",
+        "lr": "LR",
+        "hookpoints": "HOOKPOINTS",
+        "batch_size": "BATCH_SIZE",
+        "grad_acc_steps": "GRAD_ACC_STEPS",
+        "micro_acc_steps": "MICRO_ACC_STEPS",
+        "auxk_alpha": "AUXK_ALPHA",
+        "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
+        "use_hadamard": "USE_HADAMARD",
+    }
+    for json_key, env_key in key_map.items():
+        val = cfg.get(json_key)
+        if val is not None:
+            if env_key == "USE_HADAMARD":
+                base[env_key] = "1" if bool(val) else "0"
+            else:
+                base[env_key] = str(val)
+    return base
+
+
 def _build_env(
     action: Action,
     run_name: str,
     save_dir: Path,
     config: LoopConfig,
+    frontier: dict[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Build subprocess env vars and config JSON from action."""
+    """Build subprocess env vars and config JSON from action.
+
+    When frontier is provided, uses the best matching frontier entry's config
+    as the base (instead of BASE_ENV_DEFAULTS) so that partial overrides
+    inherit the winning recipe rather than falling back to global defaults.
+    """
     env = os.environ.copy()
     overrides = action.env_overrides
     rejected = validate_env_overrides(
@@ -417,7 +481,8 @@ def _build_env(
     if rejected:
         raise RuntimeError(f"Disallowed env override keys: {', '.join(rejected)}")
 
-    merged = config_from_overrides(overrides)
+    base_config = _resolve_base_config(action, frontier)
+    merged = config_from_overrides(overrides, base_config=base_config)
     # If family_name set but no explicit ARCHITECTURE override, use family_name
     has_arch = any(item.get("key") == "ARCHITECTURE" for item in overrides)
     if action.family_name and not has_arch:

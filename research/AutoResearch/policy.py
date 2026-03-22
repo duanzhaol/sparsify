@@ -37,7 +37,8 @@ def validate_action(
 
     # Variable isolation (skip when frontier is empty — first rounds need to set baseline)
     if state.frontier:
-        changes = _classify_changes(action.env_overrides, BASE_ENV_DEFAULTS)
+        baseline = _resolve_baseline_for_policy(action, state.frontier)
+        changes = _classify_changes(action.env_overrides, baseline)
         ok, msg = check_variable_isolation(changes, action.change_type)
         if not ok:
             return action, f"Variable isolation violated: {msg}"
@@ -284,6 +285,58 @@ print(f"DIFF:{{'identical' if torch.equal(ba, ca) and torch.equal(bi, ci) else '
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_baseline_for_policy(action: Action, frontier: dict[str, Any]) -> dict[str, str]:
+    """Find the best frontier config matching the action's family to use as baseline.
+
+    This ensures variable isolation is checked against the actual winning recipe,
+    not against BASE_ENV_DEFAULTS. When agent sends ARCHITECTURE+K+EF+LR matching
+    a frontier entry and only changes K, this correctly detects a single-variable change.
+    """
+    family = (action.family_name or "").lower()
+    best_entry = None
+    best_fvu = float("inf")
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        arch = str(cfg.get("architecture", "")).lower()
+        if arch == family:
+            fvu = float(entry.get("fvu", float("inf")))
+            if fvu < best_fvu:
+                best_fvu = fvu
+                best_entry = entry
+
+    if best_entry is None:
+        return dict(BASE_ENV_DEFAULTS)
+
+    # Convert frontier config to env-var format
+    cfg = best_entry["config"]
+    base = dict(BASE_ENV_DEFAULTS)
+    key_map = {
+        "architecture": "ARCHITECTURE",
+        "expansion_factor": "EXPANSION_FACTOR",
+        "k": "K",
+        "optimizer": "OPTIMIZER",
+        "lr": "LR",
+        "hookpoints": "HOOKPOINTS",
+        "batch_size": "BATCH_SIZE",
+        "grad_acc_steps": "GRAD_ACC_STEPS",
+        "micro_acc_steps": "MICRO_ACC_STEPS",
+        "auxk_alpha": "AUXK_ALPHA",
+        "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
+        "use_hadamard": "USE_HADAMARD",
+    }
+    for json_key, env_key in key_map.items():
+        val = cfg.get(json_key)
+        if val is not None:
+            if env_key == "USE_HADAMARD":
+                base[env_key] = "1" if bool(val) else "0"
+            else:
+                base[env_key] = str(val)
+    return base
 
 
 def _force_param_only(action: Action) -> Action:
