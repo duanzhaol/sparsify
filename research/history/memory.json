@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 4: Severe stagnation and the policy guidance both point away from more gated-local tuning. The current workspace already contains a `lowrank_residual` implementation that now passes a local forward/backward smoke test, so the least-bad informative move is a clean proxy retry of that fundamentally different family at K=128 under the strongest shared gated recipe. If separating a learned low-rank trunk before TopK makes the residual easier to sparsify, it can lower FVU at fixed K without changing the execution layer. -> incubate (fvu=0.22577644512057304, observed_fvu=0.225367, k=128, health=normal, termination=completed)",
     "round 5: `lowrank_residual` produced the strongest non-gated proxy among recent architecture pivots, so the next informative move is a narrow family-specific stabilization pass rather than abandoning it after one prototype result. The current trunk rank formula likely underpowers the dense trunk under the strong EF=16 recipe by collapsing to a near-minimal rank, so increasing the default trunk capacity should remove more shared dense structure before sparse residual coding and improve FVU at fixed K=128. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 7: Recent alternative families remain well behind gated at K=128, so the next informative move is a genuinely different encoder structure rather than another local sweep. A new `two_stage_residual` SAE that allocates the same total K across a coarse sparse pass and a residual sparse pass may recover more variance at fixed sparsity by turning single-shot TopK selection into staged residual reconstruction. -> keep (fvu=0.13607123959809542, observed_fvu=0.132068, k=128, health=normal, termination=completed)",
     "round 10: `two_stage_residual` remains the best K=128 full architecture, but both the K=64 drop and the EF=32 regression suggest the current 50/50 split of the total K across coarse and residual stages is likely misallocated rather than the family being exhausted. A family-specific stabilization pass that shifts more of the fixed K=128 budget into the first stage should test whether the architecture needs a stronger coarse pass before residual refinement to preserve its K=128 advantage. -> keep (fvu=0.13607123959809542, observed_fvu=0.132068, k=128, health=normal, termination=completed)",
@@ -20,7 +19,8 @@
     "round 58: The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 60: A low-rank trunk plus group-local winner-take-all residual routing can improve support diversity and regularity at low K, making `K=32` more competitive at the mandated small-capacity setting `EF=8` than the existing low-rank gated residual path. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 63: The small-EF low-K failures may reflect an input-space mismatch more than a routing deficiency, so a new preprocessing-oriented family that normalizes and lightly rotates activations before TopK selection could make `K=32`, `EF=8` more viable than the current direct-support variants. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
-    "round 65: `preconditioned_topk` is blocked by missing architecture registration in the config/runtime path, so the correct repair is to add the family name to the allowed architecture set and dispatch table, then rerun the exact same `K=32`, `EF=8` proxy target unchanged. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)"
+    "round 65: `preconditioned_topk` is blocked by missing architecture registration in the config/runtime path, so the correct repair is to add the family name to the allowed architecture set and dispatch table, then rerun the exact same `K=32`, `EF=8` proxy target unchanged. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)",
+    "round 80: Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -132,6 +132,13 @@
       "last_round": 75,
       "run_health": "crash",
       "termination_reason": "invalid_env_overrides"
+    },
+    {
+      "pattern": "Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target.",
+      "count": 1,
+      "last_round": 80,
+      "run_health": "crash",
+      "termination_reason": "repair_no_effect"
     }
   ],
   "baseline_runtime": {
@@ -278,7 +285,7 @@
   "architecture_families": {
     "jumprelu": {
       "family_name": "jumprelu",
-      "status": "incubating",
+      "status": "archived",
       "goal": "new_family",
       "best_proxy_fvu": null,
       "best_full_fvu": 0.17238502204418182,
@@ -1281,27 +1288,33 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 65
+    },
+    "residual_vq_topk": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target.",
+      "tested_configs": [
+        {
+          "round": 80,
+          "stage": "prototype",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If the registration repair works and the run completes, evaluate `residual_vq_topk` on its original low-K proxy merits before any follow-up.",
+        "If a new concrete implementation or DDP compatibility error appears after registration, do one additional narrow repair pass with the same experiment target.",
+        "If the repaired prototype runs and is clearly weak, archive the family on quality grounds rather than continuing repair-only work."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 80
     }
   },
   "recent_rounds": [
-    {
-      "round": 68,
-      "hypothesis": "Eighteen straight no-improve rounds mean the recent EF=8 recovery ladder is no longer the right mainline. The least-risk stagnation break is a same-band architecture comparison in the preferred EF=16 regime: run `lowrank_residual` at `K=48` with the shared `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe to test whether the simpler ungated low-rank residual encoder gives a better lower-K quality/cost tradeoff than the recent gated-recovery path.",
-      "change_type": "param_only",
-      "expected_win": "explore_unknown",
-      "family_name": "lowrank_residual",
-      "family_stage": "mainline",
-      "decision": "incubate",
-      "val_fvu": "0.16771421395242214",
-      "observed_fvu": "0.167044",
-      "k": "48",
-      "architecture": "lowrank_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "83008.309841",
-      "baseline_ratio": "0.999997"
-    },
     {
       "round": 69,
       "hypothesis": "After 19 no-improve rounds, continue the stagnation break with a genuinely different sparse mechanism while keeping the comparison target fixed. Run `batch_topk` at `K=48`, `EF=16` with the shared `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe to test whether batch-level support allocation preserves more quality than the recent low-rank residual variants at the same lower-K operating point.",
@@ -1499,16 +1512,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83008.402194",
       "baseline_ratio": "0.999997"
+    },
+    {
+      "round": 80,
+      "hypothesis": "Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target.",
+      "change_type": "edit_sae_code",
+      "expected_win": "smaller_k",
+      "family_name": "residual_vq_topk",
+      "family_stage": "prototype",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "residual_vq_topk",
+      "touched_files": [],
+      "run_health": "crash",
+      "termination_reason": "repair_no_effect",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "Round 71 abandons the weak `K=48` TopK-style comparison cluster and pivots to a routing-based mechanism at lower K.",
-    "`routed` is refreshed in the preferred mainline band with `EF=12` rather than returning to `EF=8`, which should separate architecture quality from the earlier capacity floor.",
-    "round 71: The recent fixed-point `K=48`, `EF=16` mechanism probes were both clearly weak, so the next informative move is to change the search framing and test a routing-based sparse mechanism at a smaller K in the preferred mainline band. Run `routed` at `K=32`, `EF=12` with the shared `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe to check whether explicit support routing recovers a viable low-K tradeoff better than magnitude-style TopK variants. -> incubate (fvu=0.3757335729897022, observed_fvu=0.376501, k=32, health=normal, termination=completed)",
-    "Round 72: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
-    "Round 72 keeps the refreshed low-K mainline target fixed at `K=32`, `EF=12` and changes only architecture after `routed` remained weak.",
-    "`two_stage_residual` is the next non-TopK comparison because it has prior real full-signal evidence and tests hierarchical residual allocation rather than support routing or TopK variants.",
-    "round 72: `routed` at the refreshed low-K mainline target (`K=32`, `EF=12`) remained weak, so the next informative move is to keep that target fixed and test a different non-TopK architecture family with real prior signal. Run `two_stage_residual` at `K=32`, `EF=12` with the shared `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe to see whether coarse-to-fine residual allocation recovers useful low-K quality where explicit routing did not. -> incubate (fvu=0.3559596575796604, observed_fvu=0.356072, k=32, health=normal, termination=completed)",
     "Round 73: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
     "Round 73 keeps the refreshed low-K mainline target fixed at `K=32`, `EF=12` and changes only architecture after `two_stage_residual` remained weak.",
     "`lowrank_grouped_residual` is refreshed in the preferred mainline band to test whether more structured grouped competition improves low-K behavior relative to routed and two-stage families.",
@@ -1541,12 +1565,19 @@
     "`whitened_topk` at `K=32, EF=12` was catastrophically weak, so low-K input-preconditioning-only approaches should not be the next local tuning target.",
     "The next stagnation-breaking move should change the sparse activation mechanism itself rather than adding more routing or preprocessing structure.",
     "Keep env overrides minimal and launcher-safe; avoid nonessential metadata keys.",
-    "round 79: After low-K routing, branch-specialized gating, adaptive-budget, and input-preconditioning pivots all stayed clearly weak, the next informative move is to change the sparsity mechanism itself and refresh a previously promising non-TopK baseline in the preferred mainline band: run `jumprelu` at `K=32`, `EF=12` with the stable `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe to test whether thresholded sparse activation recovers a viable low-K tradeoff where recent low-K family pivots failed. -> incubate (fvu=0.37272263318300247, observed_fvu=0.372875, k=32, health=normal, termination=completed)"
+    "round 79: After low-K routing, branch-specialized gating, adaptive-budget, and input-preconditioning pivots all stayed clearly weak, the next informative move is to change the sparsity mechanism itself and refresh a previously promising non-TopK baseline in the preferred mainline band: run `jumprelu` at `K=32`, `EF=12` with the stable `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe to test whether thresholded sparse activation recovers a viable low-K tradeoff where recent low-K family pivots failed. -> incubate (fvu=0.37272263318300247, observed_fvu=0.372875, k=32, health=normal, termination=completed)",
+    "Round 80: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "Round 80: aborting repair loop because repair attempt 1 produced no code changes",
+    "Repair attempt 1 addresses a concrete registration blocker: `residual_vq_topk` was missing from config validation and SAE class dispatch.",
+    "Keep the experiment target fixed during repair; do not change family, tier, or env overrides until the prototype can launch.",
+    "If this registration repair succeeds but a new runtime error appears, handle that as the next narrow implementation blocker rather than redesigning the experiment.",
+    "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
+    "round 80: Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)"
   ],
   "next_hypotheses": [
-    "If `jumprelu` at `K=32, EF=12` is competitive, keep the family fixed and map `K=40` before touching EF.",
-    "If `jumprelu` at `K=32, EF=12` is still weak, pivot to another fundamentally different family such as a discrete/codebook-style residual direction rather than returning to residual/routing micro-tuning.",
-    "If runtime is healthy and quality is materially better than recent weak low-K families but still short of frontier, keep the same family and test `K=40` as the next single-variable move."
+    "If the registration repair works and the run completes, evaluate `residual_vq_topk` on its original low-K proxy merits before any follow-up.",
+    "If a new concrete implementation or DDP compatibility error appears after registration, do one additional narrow repair pass with the same experiment target.",
+    "If the repaired prototype runs and is clearly weak, archive the family on quality grounds rather than continuing repair-only work."
   ],
   "recent_sanity_failures": [
     {
@@ -1559,14 +1590,6 @@
     }
   ],
   "recent_training_failures": [
-    {
-      "round": 62,
-      "family_name": "residual_topk",
-      "change_type": "edit_sae_code",
-      "termination_reason": "completed",
-      "error_type": "ValueError",
-      "error_summary": "ValueError: Unknown architecture: 'residual_topk'. Must be one of ('topk', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk')"
-    },
     {
       "round": 67,
       "family_name": "lowrank_residual",
@@ -1709,6 +1732,20 @@
       "primary_variable": "architecture",
       "hypothesis": "`lowrank_residual` at the refreshed low-K target (`K=32`, `EF=12`) was effectively tied with the archived `lowrank_grouped_residual` result and still far from competitive, so the next informative move is to keep the same `K=32`, `EF=12` mainline target fixed and switch to a fundamentally different sparse mechanism. Run `adaptive_budget_topk` at `K=32`, `EF=12` with the shared `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe to test whether flexible per-sample support allocation recovers useful low-K quality where the recent residual/routing families did not.",
       "termination_reason": "invalid_env_overrides",
+      "error_type": "",
+      "error_summary": "",
+      "traceback_excerpt": "",
+      "log_excerpt": "",
+      "log_path": ""
+    },
+    {
+      "round": 80,
+      "tier": "proxy",
+      "family_name": "residual_vq_topk",
+      "change_type": "edit_sae_code",
+      "primary_variable": "code_fix",
+      "hypothesis": "Patch the existing `residual_vq_topk` prototype registration so the original low-K proxy experiment can instantiate and run under the unchanged `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target.",
+      "termination_reason": "repair_no_effect",
       "error_type": "",
       "error_summary": "",
       "traceback_excerpt": "",
