@@ -65,13 +65,18 @@ def run(config: LoopConfig) -> int:
     )
 
     # Preflight
+    print("Preflight: checking backend...")
     agent.check_backend_reachable()
+    print("Preflight: backend OK")
     if config.auto_commit:
+        print("Preflight: checking clean worktree...")
         ensure_clean_worktree_for_auto_commit()
+        print("Preflight: worktree clean")
     if config.reset_failure_counters:
         state.reset_crash_counters()
 
     state.append_timeline_event("loop_started", rounds=config.rounds, budget_hours=config.budget_hours)
+    print(f"Loop started: rounds={config.rounds}, budget_hours={config.budget_hours}")
     start_time = time.time()
 
     for _ in range(config.rounds):
@@ -125,11 +130,13 @@ def _run_round(
     guidance = build_policy_guidance(round_id, state, stagnation)
 
     # 2. Snapshot code before agent edits
+    print(f"Round {round_id}: snapshotting files...")
     before = snapshot_paths()
     if before:
         capture_before_files(list(before.keys()), round_id)
 
     # 3. Agent proposal
+    print(f"Round {round_id}: invoking agent...")
     try:
         action, stdout_path = agent.propose(state, round_id, guidance)
     except RuntimeError as exc:

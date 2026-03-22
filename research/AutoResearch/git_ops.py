@@ -17,7 +17,7 @@ HISTORY_DIR = RESEARCH_DIR / "history"
 
 ALLOWED_EDIT_PREFIXES = ("sparsify/",)
 
-SNAPSHOT_ROOTS = ("sparsify", "research", "scripts")
+SNAPSHOT_ROOTS = ("sparsify",)
 SNAPSHOT_EXCLUDES = (
     "research/history/",
     "research/history_old/",
@@ -134,6 +134,7 @@ def snapshot_paths() -> dict[str, str]:
         base = REPO_ROOT / root
         if not base.exists():
             continue
+        count = 0
         for path in base.rglob("*"):
             if not path.is_file():
                 continue
@@ -144,6 +145,9 @@ def snapshot_paths() -> dict[str, str]:
                 continue
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             snapshots[rel] = digest
+            count += 1
+        print(f"  snapshot: {root}/ -> {count} files")
+    print(f"  snapshot total: {len(snapshots)} files")
     return snapshots
 
 
