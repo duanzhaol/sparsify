@@ -192,6 +192,7 @@ class TrainConfig(Serializable):
         # Architecture validation
         valid_archs = (
             "topk",
+            "adaptive_budget_topk",
             "jumprelu",
             "gated",
             "routed",

@@ -291,6 +291,8 @@ def _get_sae_class(architecture: str) -> type:
     """Return the SparseCoder subclass for the given architecture string."""
     if architecture == "topk":
         return SparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
     if architecture == "whitened_topk":
         return WhitenedTopKSparseCoder
     if architecture == "jumprelu":
@@ -362,6 +364,53 @@ class WhitenedTopKSparseCoder(SparseCoder):
         return fused_encoder(
             whitened, self.encoder.weight, self.encoder.bias, self.cfg.k
         )
+
+
+class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+    """Allocate a fixed batch-level feature budget across samples dynamically."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+        batch_size = acts.shape[0]
+        if batch_size == 1:
+            top_acts, top_indices = torch.topk(
+                acts, self.cfg.k, dim=-1, sorted=False
+            )
+            return EncoderOutput(top_acts, top_indices, acts)
+
+        difficulty = acts.detach().pow(2).mean(dim=-1)
+        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
+        total_budget = batch_size * self.cfg.k
+
+        raw_quota = difficulty / difficulty_sum * total_budget
+        quotas = torch.floor(raw_quota).to(dtype=torch.long)
+        quotas = quotas.clamp(min=1, max=self.cfg.k)
+
+        remaining = total_budget - int(quotas.sum().item())
+        if remaining > 0:
+            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype), descending=True)
+            for idx in order.tolist():
+                if remaining == 0:
+                    break
+                if quotas[idx] < self.cfg.k:
+                    quotas[idx] += 1
+                    remaining -= 1
+        elif remaining < 0:
+            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
+            for idx in order.tolist():
+                if remaining == 0:
+                    break
+                if quotas[idx] > 1:
+                    quotas[idx] -= 1
+                    remaining += 1
+
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        rank = torch.arange(self.cfg.k, device=acts.device)
+        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
+        top_acts = top_acts * active_mask.to(top_acts.dtype)
+        return EncoderOutput(top_acts, top_indices, acts)
 
 
 class JumpReLUSparseCoder(SparseCoder):
