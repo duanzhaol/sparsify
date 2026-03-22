@@ -319,7 +319,7 @@ Sae = SparseCoder
 
 
 class WhitenedTopKSparseCoder(SparseCoder):
-    """Top-k SAE with a learned input preconditioner before sparse selection."""
+    """Top-k SAE with normalized low-rank input preconditioning."""
 
     def __init__(
         self,
@@ -331,24 +331,32 @@ class WhitenedTopKSparseCoder(SparseCoder):
         decoder: bool = True,
     ):
         super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
-        self.preconditioner = nn.Linear(
-            d_in, d_in, bias=False, device=device, dtype=dtype
+        hidden_dim = min(d_in, max(cfg.k * 2, d_in // 4))
+        self.preconditioner_down = nn.Linear(
+            d_in, hidden_dim, bias=False, device=device, dtype=dtype
+        )
+        self.preconditioner_up = nn.Linear(
+            hidden_dim, d_in, bias=False, device=device, dtype=dtype
         )
 
-        # Start near identity but with a small fixed mixing term so the
-        # architecture is observably distinct from plain top-k at step 0.
-        self.preconditioner.weight.data.zero_()
-        self.preconditioner.weight.data += torch.eye(
-            d_in, device=device, dtype=dtype
+        # Keep the family close to a stable normalized identity map while
+        # still making step-0 behavior observably different from plain top-k.
+        self.preconditioner_down.weight.data.zero_()
+        self.preconditioner_up.weight.data.zero_()
+        diagonal = min(d_in, hidden_dim)
+        self.preconditioner_down.weight.data[:diagonal, :diagonal] = torch.eye(
+            diagonal, device=device, dtype=dtype
         )
-        if d_in > 1:
-            self.preconditioner.weight.data += 0.01 * torch.roll(
-                torch.eye(d_in, device=device, dtype=dtype), shifts=1, dims=1
-            )
+        self.preconditioner_up.weight.data[:diagonal, :diagonal] = 0.05 * torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
-        whitened = self.preconditioner(x)
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
+        normalized = x * rms
+        correction = self.preconditioner_up(self.preconditioner_down(normalized))
+        whitened = normalized + correction
         return fused_encoder(
             whitened, self.encoder.weight, self.encoder.bias, self.cfg.k
         )

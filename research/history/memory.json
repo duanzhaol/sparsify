@@ -15,7 +15,8 @@
     "round 10: `two_stage_residual` remains the best K=128 full architecture, but both the K=64 drop and the EF=32 regression suggest the current 50/50 split of the total K across coarse and residual stages is likely misallocated rather than the family being exhausted. A family-specific stabilization pass that shifts more of the fixed K=128 budget into the first stage should test whether the architecture needs a stronger coarse pass before residual refinement to preserve its K=128 advantage. -> keep (fvu=0.13607123959809542, observed_fvu=0.132068, k=128, health=normal, termination=completed)",
     "round 11: `two_stage_residual` remains a real K=128 win, but the front-loaded split change only matched the existing best point instead of extending the frontier, and its lower-K/width behavior still looks brittle. The next informative move is to pivot to a different non-gated family with a different inductive bias: a `multi_branch_gated` SAE that uses several gated encoder branches competing to explain different activation substructures before the final TopK selection, which could preserve the K=128 quality gains while avoiding the narrow tuning sensitivity of the staged-residual prototype. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)",
     "round 13: `multi_branch_gated` showed a competitive prototype signal at K=128, but the strong regression at EF=32 suggests the family is not generically width-limited and instead needs a family-specific routing adjustment. Reducing the number of active branches from the current default to a simpler two-branch mixture should test whether the prototype is over-fragmenting capacity across too many competing branches and can recover better K=128 quality under the same training recipe. -> incubate (fvu=0.15793968923389912, observed_fvu=0.153486, k=128, health=normal, termination=completed)",
-    "round 22: The current `lowrank_residual` family has finished a clean EF=32 stabilization sweep across K={32,64,128}, and the search has gone many rounds without a new family. A narrow next bet is to keep the winning low-rank trunk intact and change only the sparse residual selector: add a gated residual branch so support selection can focus sparse capacity on the hardest residual directions at the K=128 quality anchor. If low-rank decomposition is already the right backbone, this should be a higher-signal architecture probe than another local sweep on the existing family. -> keep (fvu=0.06634617038071156, observed_fvu=0.065179, k=128, health=normal, termination=completed)"
+    "round 22: The current `lowrank_residual` family has finished a clean EF=32 stabilization sweep across K={32,64,128}, and the search has gone many rounds without a new family. A narrow next bet is to keep the winning low-rank trunk intact and change only the sparse residual selector: add a gated residual branch so support selection can focus sparse capacity on the hardest residual directions at the K=128 quality anchor. If low-rank decomposition is already the right backbone, this should be a higher-signal architecture probe than another local sweep on the existing family. -> keep (fvu=0.06634617038071156, observed_fvu=0.065179, k=128, health=normal, termination=completed)",
+    "round 30: Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -62,6 +63,13 @@
       "pattern": "`lowrank_residual` produced the strongest non-gated proxy among recent architecture pivots, so the next informative move is a narrow family-specific stabilization pass rather than abandoning it after one prototype result. The current trunk rank formula likely underpowers the dense trunk under the strong EF=16 recipe by collapsing to a near-minimal rank, so increasing the default trunk capacity should remove more shared dense structure before sparse residual coding and improve FVU at fixed K=128.",
       "count": 1,
       "last_round": 5,
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline"
+    },
+    {
+      "pattern": "Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe.",
+      "count": 1,
+      "last_round": 30,
       "run_health": "crash",
       "termination_reason": "identical_to_baseline"
     }
@@ -467,7 +475,7 @@
     "whitened_topk": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "After eight straight no-improve rounds and with gated already mapped at K=32/64/128, the least-bad informative move is a fundamentally different architecture that changes the input geometry rather than doing another local sweep. A `whitened_topk` proxy run at K=128 under the current strongest gated recipe can test whether a learned input preconditioner makes the activation space easier to sparsify and opens a new quality frontier without coupling in optimizer or K changes.",
+      "design_hypothesis": "Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe.",
       "tested_configs": [
         {
           "round": 6,
@@ -476,17 +484,25 @@
           "decision": "incubate",
           "val_fvu": "0.2673991918563843",
           "run_health": "normal"
+        },
+        {
+          "round": 30,
+          "stage": "stabilize",
+          "k": null,
+          "decision": "crash",
+          "val_fvu": null,
+          "run_health": "crash"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `whitened_topk` is materially better than recent non-gated alternatives, keep incubating it with a family-specific stabilization pass before any full request.",
-        "If `whitened_topk` is clearly uncompetitive, pivot to another genuinely different architecture mechanism rather than returning to minor gated parameter sweeps.",
-        "If quality looks promising but runtime is abnormally slow, follow with an `edit_perf_code` round instead of discarding the family on architecture grounds."
+        "If the stabilized `whitened_topk` proxy becomes competitive, promote to full before any further family-local tuning.",
+        "If proxy quality improves but throughput regresses, follow with a narrow `edit_perf_code` pass on the new preconditioner path rather than discarding the family.",
+        "If the stronger preconditioner still leaves `whitened_topk` far behind, archive input-preconditioning-only approaches and pivot back to a different architecture mechanism rather than more local retuning."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 6
+      "last_round": 30
     },
     "two_stage_residual": {
       "status": "promoted",
@@ -674,24 +690,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 18,
-      "hypothesis": "`lowrank_residual` at K=64 established a strong new Pareto point, so the next clean step is to continue the same axis and test whether the family remains non-dominated at K=32. Changing only K from 64 to 32 will determine whether the low-rank trunk continues to preserve enough reconstruction quality to replace the current gated K=32 frontier point.",
-      "change_type": "param_only",
-      "expected_win": "pareto_improvement",
-      "family_name": "lowrank_residual",
-      "family_stage": "stabilize",
-      "decision": "keep",
-      "val_fvu": "0.10000576265156269",
-      "observed_fvu": "0.097756",
-      "k": "32",
-      "architecture": "lowrank_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "166345.367787",
-      "baseline_ratio": "0.999380"
-    },
     {
       "round": 19,
       "hypothesis": "`lowrank_residual` now owns the full frontier at K=32, 64, and 128 under the shared EF=16 recipe, so the next clean stabilization move is to test whether a larger sparse residual budget improves quality within this winning family. Increasing only `EXPANSION_FACTOR` from 16 to 32 at K=64 may strengthen the middle Pareto point by giving the residual branch more capacity while keeping the low-rank trunk and optimization recipe fixed.",
@@ -892,14 +890,29 @@
       "termination_reason": "completed",
       "tokens_per_sec": "66622.450570",
       "baseline_ratio": "0.999998"
+    },
+    {
+      "round": 30,
+      "hypothesis": "Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "whitened_topk",
+      "family_stage": "stabilize",
+      "decision": "crash",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "whitened_topk",
+      "touched_files": [
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "crash",
+      "termination_reason": "identical_to_baseline",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "Because `lowrank_residual` already drove full K=128 FVU below half of the prior baseline, lower-K exploration is now justified as a frontier-building step rather than a distraction.",
-    "round 17: `lowrank_residual` has now materially beaten the previous K=128 quality anchor, so the next clean move is to test whether that gain transfers into a better Pareto point at lower sparsity budget. Reducing only `K` from 128 to 64 on the new best architecture can show whether the dense-trunk plus sparse-residual factorization preserves enough quality to improve the low-K frontier rather than only the anchor point. -> keep (fvu=0.08546286541968584, observed_fvu=0.083894, k=64, health=normal, termination=completed)",
-    "Round 18 continues the `lowrank_residual` frontier mapping by changing only K from 64 to 32.",
-    "Because the family already produced full wins at K=128 and K=64, K=32 is now the highest-value missing frontier point before returning to family-specific stabilization.",
-    "round 18: `lowrank_residual` at K=64 established a strong new Pareto point, so the next clean step is to continue the same axis and test whether the family remains non-dominated at K=32. Changing only K from 64 to 32 will determine whether the low-rank trunk continues to preserve enough reconstruction quality to replace the current gated K=32 frontier point. -> keep (fvu=0.10000576265156269, observed_fvu=0.097756, k=32, health=normal, termination=completed)",
     "Round 19 begins family-specific stabilization for `lowrank_residual` after it established full frontier wins at K=32, K=64, and K=128.",
     "The chosen axis is `EXPANSION_FACTOR`, tested at K=64 first because that midpoint best represents whether extra residual capacity improves the practical Pareto frontier rather than only the quality anchor.",
     "round 19: `lowrank_residual` now owns the full frontier at K=32, 64, and 128 under the shared EF=16 recipe, so the next clean stabilization move is to test whether a larger sparse residual budget improves quality within this winning family. Increasing only `EXPANSION_FACTOR` from 16 to 32 at K=64 may strengthen the middle Pareto point by giving the residual branch more capacity while keeping the low-rank trunk and optimization recipe fixed. -> keep (fvu=0.08263881411403418, observed_fvu=0.080950, k=64, health=normal, termination=completed)",
@@ -934,12 +947,17 @@
     "round 28: `lowrank_gated_residual` remains the best full-signal family, and the recent exploitation probes show that adding aux pressure, lowering LR, or increasing EF all hurt the K=128 proxy anchor. The next clean single-variable sweep point is the untested high-LR side: raising `LR` from `1.6e-3` to `3.2e-3` at K=128 while keeping `AUXK_ALPHA=0` and `EXPANSION_FACTOR=32` fixed tests whether the current mainline family benefits from a more aggressive signum step rather than the smaller-step regime already shown to regress. -> discard (fvu=0.0762509610503912, observed_fvu=0.080919, k=128, health=normal, termination=completed)",
     "Round 29 continues exploitation-mode stabilization on `lowrank_gated_residual` by testing the remaining untried aux setting `AUXK_ALPHA=0.0625` at the K=128 anchor.",
     "Recent exploitation probes showed regressions for `AUXK_ALPHA=0.01`, `LR=1.2e-3`, `LR=3.2e-3`, and `EXPANSION_FACTOR=48`, so this round isolates whether only stronger auxiliary pressure can help the current mainline family.",
-    "round 29: `lowrank_gated_residual` remains the best full-signal family, and the exploitation sweep has now shown that moving LR to `1.2e-3` or `3.2e-3`, adding small aux pressure, or increasing EF to 48 all regress the K=128 anchor. The next clean single-variable sweep point is the remaining untested family-specific routing regularization axis from the runtime guidance: increase `AUXK_ALPHA` from `0` to `0.0625` at K=128 while keeping the winning `LR=1.6e-3`, `EXPANSION_FACTOR=32`, and signum recipe fixed, to test whether only a stronger utilization pressure helps where the weak aux setting failed. -> discard (fvu=0.07915490865707397, observed_fvu=0.083672, k=128, health=normal, termination=completed)"
+    "round 29: `lowrank_gated_residual` remains the best full-signal family, and the exploitation sweep has now shown that moving LR to `1.2e-3` or `3.2e-3`, adding small aux pressure, or increasing EF to 48 all regress the K=128 anchor. The next clean single-variable sweep point is the remaining untested family-specific routing regularization axis from the runtime guidance: increase `AUXK_ALPHA` from `0` to `0.0625` at K=128 while keeping the winning `LR=1.6e-3`, `EXPANSION_FACTOR=32`, and signum recipe fixed, to test whether only a stronger utilization pressure helps where the weak aux setting failed. -> discard (fvu=0.07915490865707397, observed_fvu=0.083672, k=128, health=normal, termination=completed)",
+    "Round 30: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, lr",
+    "Advanced the existing incubating `whitened_topk` family instead of opening a new family, to avoid incubation-limit risk during severe stagnation.",
+    "Reworked `WhitenedTopKSparseCoder` to encode from RMS-normalized activations passed through a low-rank residual preconditioner initialized near identity, replacing the earlier shallow dense raw preconditioner.",
+    "Local CPU forward/backward smoke test passed for the edited `whitened_topk` implementation.",
+    "round 30: Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
   ],
   "next_hypotheses": [
-    "If `AUXK_ALPHA=0.0625` improves proxy FVU at K=128, promote it to full and then test the same aux setting at K=64 before moving to other parameters.",
-    "If `AUXK_ALPHA=0.0625` is flat or worse, keep `AUXK_ALPHA=0` as the family default and continue the exploitation sweep with an untested `EXPANSION_FACTOR` point such as `16` or `4`.",
-    "If quality improves but runtime is flagged as regressed, follow with a narrow `code_fix` performance pass instead of discarding the higher-aux recipe."
+    "If the stabilized `whitened_topk` proxy becomes competitive, promote to full before any further family-local tuning.",
+    "If proxy quality improves but throughput regresses, follow with a narrow `edit_perf_code` pass on the new preconditioner path rather than discarding the family.",
+    "If the stronger preconditioner still leaves `whitened_topk` far behind, archive input-preconditioning-only approaches and pivot back to a different architecture mechanism rather than more local retuning."
   ],
   "recent_sanity_failures": [
     {
@@ -1007,6 +1025,20 @@
       "change_type": "edit_sae_code",
       "primary_variable": "code_fix",
       "hypothesis": "`lowrank_residual` produced the strongest non-gated proxy among recent architecture pivots, so the next informative move is a narrow family-specific stabilization pass rather than abandoning it after one prototype result. The current trunk rank formula likely underpowers the dense trunk under the strong EF=16 recipe by collapsing to a near-minimal rank, so increasing the default trunk capacity should remove more shared dense structure before sparse residual coding and improve FVU at fixed K=128.",
+      "termination_reason": "identical_to_baseline",
+      "error_type": "",
+      "error_summary": "",
+      "traceback_excerpt": "",
+      "log_excerpt": "",
+      "log_path": ""
+    },
+    {
+      "round": 30,
+      "tier": "proxy",
+      "family_name": "whitened_topk",
+      "change_type": "edit_sae_code",
+      "primary_variable": "architecture",
+      "hypothesis": "Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe.",
       "termination_reason": "identical_to_baseline",
       "error_type": "",
       "error_summary": "",
