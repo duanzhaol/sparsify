@@ -299,6 +299,8 @@ def _get_sae_class(architecture: str) -> type:
         return BucketedTopKSparseCoder
     if architecture == "codebook_topk":
         return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
     if architecture == "whitened_topk":
         return WhitenedTopKSparseCoder
     if architecture == "jumprelu":
@@ -556,6 +558,107 @@ class CodebookTopKSparseCoder(SparseCoder):
         )
         # Keep the routed code hard in the forward pass while preserving a gradient
         # path through the router so DDP does not see unused parameters.
+        routing = hard_assign + probs - probs.detach()
+        coarse = routing @ self.codebook
+        return coarse, logits
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        coarse, _ = self._select_code(x)
+        residual = x - coarse
+        return fused_encoder(
+            residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        coarse, _ = self._select_code(x_centered)
+        residual = x_centered - coarse
+        top_acts, top_indices, pre_acts = fused_encoder(
+            residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        sparse_residual = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        sae_out = coarse + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            aux_sparse = decoder_impl(auxk_indices, auxk_acts.to(self.dtype), self.W_dec.mT)
+            e_hat = coarse + aux_sparse + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class ResidualVQSparseCoder(SparseCoder):
+    """Hard codebook reconstruction with sparse residual correction."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        self.num_codes = min(512, max(64, cfg.k * 4))
+
+        self.codebook = nn.Parameter(
+            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+        )
+        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
+        self.code_router.bias.data.zero_()
+
+        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+        self.encoder.bias.data.zero_()
+
+        if decoder:
+            self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        logits = self.code_router(x)
+        code_indices = logits.argmax(dim=-1)
+        probs = logits.softmax(dim=-1)
+        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
+            dtype=probs.dtype
+        )
         routing = hard_assign + probs - probs.detach()
         coarse = routing @ self.codebook
         return coarse, logits
