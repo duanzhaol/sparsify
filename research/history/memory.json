@@ -215,12 +215,12 @@
       "updated_at": 1774149253
     },
     "proxy|batch_topk|layers.[3].self_attn.o_proj": {
-      "tokens_per_sec": 66610.5627596382,
-      "round": 36,
+      "tokens_per_sec": 83008.08984558696,
+      "round": 53,
       "tier": "proxy",
       "architecture": "batch_topk",
-      "k": 128,
-      "updated_at": 1774150167
+      "k": 40,
+      "updated_at": 1774162905
     },
     "proxy|bucketed_topk|layers.[3].self_attn.o_proj": {
       "tokens_per_sec": 60522.66487510176,
@@ -883,7 +883,7 @@
     "batch_topk": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "Eleven no-improve rounds indicate the fixed-per-sample sparse allocation direction is fundamentally flawed, and recent alternatives like `jumprelu`, `two_stage_residual`, and `adaptive_budget_topk` still stayed far behind the frontier. The next coherent architecture move is to test a cleaner batch-level sparsity mechanism: add `batch_topk`, which enforces the same total activation budget across the batch but selects features globally rather than distributing them per sample or via a heuristic quota. If the main failure mode is rigid per-sample support allocation, true batch-level competition could improve reconstruction quality at fixed average sparsity.",
+      "design_hypothesis": "The current `lowrank_gated_residual` small-EF track looks exhausted at the lower-K anchor, so the next informative move is a fundamentally different sparsity mechanism rather than another local tweak. `batch_topk` is the strongest existing non-residual challenger and may preserve more quality at `K=40` by allocating support globally across the batch instead of enforcing rigid per-sample selection.",
       "tested_configs": [
         {
           "round": 36,
@@ -892,17 +892,24 @@
           "decision": "incubate",
           "val_fvu": "0.1644012425094843",
           "run_health": "normal"
+        },
+        {
+          "round": 53,
+          "stage": "mainline_comparison",
+          "k": "40",
+          "decision": "incubate",
+          "val_fvu": "0.405234944075346",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `batch_topk` is competitive at K=128 proxy, keep the family alive and promote to full before local tuning.",
-        "If `batch_topk` shows promising quality with poor throughput, follow with a narrow performance-oriented `code_fix` on the batch-global selection path rather than discarding the family immediately.",
-        "If `batch_topk` remains clearly behind, archive batch-level global allocation and pivot to another fundamentally different mechanism rather than returning to lowrank_gated_residual micro-tuning."
+        "If `batch_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
+        "If `batch_topk` at `K=40`, `EF=8` is clearly weak, pivot to another fundamentally different mechanism at the same target, such as `adaptive_budget_topk`, rather than resuming local sweeps on `lowrank_gated_residual`."
       ],
       "best_proxy_fvu": null,
       "best_full_fvu": null,
-      "last_round": 36
+      "last_round": 53
     },
     "bucketed_topk": {
       "status": "incubating",
@@ -997,24 +1004,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 41,
-      "hypothesis": "`product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch.",
-      "change_type": "code_fix",
-      "expected_win": "Best case: the family runs cleanly and yields a real proxy FVU, potentially showing whether additive product-codebooks can beat recent alternatives like `batch_topk` and `bucketed_topk`. Failure case: the repaired run is clearly uncompetitive, letting us archive the family with confidence instead of losing another round to registration issues.",
-      "family_name": "product_codebook_topk",
-      "family_stage": "prototype",
-      "decision": "crash",
-      "val_fvu": "None",
-      "observed_fvu": "",
-      "k": "None",
-      "architecture": "product_codebook_topk",
-      "touched_files": [],
-      "run_health": "crash",
-      "termination_reason": "completed",
-      "tokens_per_sec": "",
-      "baseline_ratio": ""
-    },
     {
       "round": 42,
       "hypothesis": "Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count.",
@@ -1212,13 +1201,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83008.427921",
       "baseline_ratio": "0.999998"
+    },
+    {
+      "round": 53,
+      "hypothesis": "The current `lowrank_gated_residual` small-EF track looks exhausted at the lower-K anchor, so the next informative move is a fundamentally different sparsity mechanism rather than another local tweak. `batch_topk` is the strongest existing non-residual challenger and may preserve more quality at `K=40` by allocating support globally across the batch instead of enforcing rigid per-sample selection.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "batch_topk",
+      "family_stage": "mainline_comparison",
+      "decision": "incubate",
+      "val_fvu": "0.405234944075346",
+      "observed_fvu": "0.404905",
+      "k": "40",
+      "architecture": "batch_topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "83008.089846",
+      "baseline_ratio": "1.246170"
     }
   ],
   "recent_insights": [
-    "Round 41 is a repair-only follow-up for `product_codebook_topk` after round 40 crashed with an unknown-architecture ValueError.",
-    "The blocker is registration/compatibility, not quality, so this round should be treated as infra repair rather than an architecture verdict.",
-    "Do not judge the discrete additive-codebook direction until a repaired proxy run completes successfully.",
-    "round 41: `product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
     "Crash-recovery policy required a param-only round on the best working configuration; this round uses `lowrank_gated_residual` with only `K` changed substantively.",
     "`K=96` is an explicit mid-frontier probe between the established `K=64` and `K=128` points, aimed at expanding Pareto coverage rather than only improving the anchor.",
     "round 42: Crash-recovery policy forces a param-only round on the best proven working family. Rather than retrying already-regressed LR/aux/EF sweeps at the K=128 anchor, the cleanest stable move is to hold the winning `lowrank_gated_residual` recipe fixed and lower only `K` to 96 in proxy. This maps a missing mid-Pareto point between 64 and 128 and could yield a non-dominated tradeoff if quality stays close to the K=128 anchor while reducing active feature count. -> keep (fvu=0.07289826218038797, observed_fvu=0.071441, k=96, health=normal, termination=completed)",
@@ -1254,11 +1257,15 @@
     "round 51: At the current lower-K anchor (`K=40`) and fair small-capacity setting (`EF=8`), `lowrank_gated_residual` may be undertrained rather than fundamentally weak; dropping the learning rate from `1.6e-3` to `4e-4` while keeping the rest of the recipe fixed is the narrowest exploitation-mode check for whether this family can recover a competitive small-EF proxy point without reopening architecture or EF. -> discard (fvu=0.3102319724857807, observed_fvu=0.308813, k=40, health=normal, termination=completed)",
     "Round 52 follow-up: `lowrank_gated_residual` at `K=40`, `EF=8`, `LR=4e-4` regressed badly in proxy (`val_fvu=0.3102319724857807`), so lower LR does not rescue this small-EF setting.",
     "Next informative move is a one-variable capacity-efficiency probe at the same lower-K target: keep architecture, optimizer, LR, and aux fixed and test whether `EF=12` recovers quality while staying in the preferred small-EF regime.",
-    "round 52: At the current lower-K anchor (`K=40`), `lowrank_gated_residual` may need slightly more capacity to recover a useful Pareto point even though `EF=8` underperformed; increasing only `EXPANSION_FACTOR` from 8 to 12 while holding the stabilized small-EF recipe fixed is the narrowest next check for whether this family can regain competitive quality without reverting to oversized settings. -> discard (fvu=0.17474958300590515, observed_fvu=0.174050, k=40, health=normal, termination=completed)"
+    "round 52: At the current lower-K anchor (`K=40`), `lowrank_gated_residual` may need slightly more capacity to recover a useful Pareto point even though `EF=8` underperformed; increasing only `EXPANSION_FACTOR` from 8 to 12 while holding the stabilized small-EF recipe fixed is the narrowest next check for whether this family can regain competitive quality without reverting to oversized settings. -> discard (fvu=0.17474958300590515, observed_fvu=0.174050, k=40, health=normal, termination=completed)",
+    "Round 53: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
+    "Severe-stagnation pivot: stop minor `lowrank_gated_residual` parameter tweaks and switch to a fundamentally different sparse-allocation mechanism at the same lower-K, same-EF target.",
+    "Use `batch_topk` as the next fair lower-K architecture comparison point because it previously showed the strongest proxy signal among the existing non-residual alternative mechanisms and directly tests whether global batch-level support allocation helps at `K=40`, `EF=8`.",
+    "round 53: The current `lowrank_gated_residual` small-EF track looks exhausted at the lower-K anchor, so the next informative move is a fundamentally different sparsity mechanism rather than another local tweak. `batch_topk` is the strongest existing non-residual challenger and may preserve more quality at `K=40` by allocating support globally across the batch instead of enforcing rigid per-sample selection. -> incubate (fvu=0.405234944075346, observed_fvu=0.404905, k=40, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If `EF=12` materially improves `K=40` proxy quality, decide whether it is strong enough for promotion or whether the remaining `EF=4` point is still worth mapping for the cost-quality frontier.",
-    "If `EF=12` is still clearly weak, finish the prescribed small-capacity sweep with `EF=4` at the same `K=40` setting before concluding this family is exhausted in the current lower-K fair-comparison band."
+    "If `batch_topk` at `K=40`, `EF=8` is competitive in proxy, promote it to full before any family-local tuning.",
+    "If `batch_topk` at `K=40`, `EF=8` is clearly weak, pivot to another fundamentally different mechanism at the same target, such as `adaptive_budget_topk`, rather than resuming local sweeps on `lowrank_gated_residual`."
   ],
   "recent_sanity_failures": [
     {
