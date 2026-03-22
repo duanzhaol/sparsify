@@ -20,6 +20,8 @@ ALLOWED_EDIT_PREFIXES = ("sparsify/",)
 SNAPSHOT_ROOTS = ("sparsify", "research", "scripts")
 SNAPSHOT_EXCLUDES = (
     "research/history/",
+    "research/history_old/",
+    "research/AutoResearch/",
     "sparsify/__pycache__/",
     "research/__pycache__/",
     "scripts/__pycache__/",
