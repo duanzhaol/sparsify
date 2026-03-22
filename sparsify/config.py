@@ -203,6 +203,7 @@ class TrainConfig(Serializable):
             "factorized_topk",
             "lowrank_residual",
             "lowrank_gated_residual",
+            "lowrank_grouped_residual",
             "whitened_topk",
             "two_stage_residual",
             "multi_branch_gated",

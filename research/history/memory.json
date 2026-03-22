@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 52: family=factorized_topk stage=prototype change=edit_sae_code decision=crash fvu\n[truncated for compact history] lesson=Plain gated/local parameter sweeps have revalidated the low-K frontier but are not closi\n[truncated for compact history]",
     "round 57: family=residual_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=completed lesson=Five rounds of factorized-topk stabilization failed to approach the gated frontier, so t\n[truncated for compact history]",
     "round 67: family=lowrank_residual stage=prototype change=edit_sae_code decision=crash fvu=None termination=completed lesson=The best existing promoted alternatives have now been refreshed and still sit well behin\n[truncated for compact history]",
     "round 4: Severe stagnation and the policy guidance both point away from more gated-local tuning. The current workspace already contains a `lowrank_residual` implementation that now passes a local forward/backward smoke test, so the least-bad informative move is a clean proxy retry of that fundamentally different family at K=128 under the strongest shared gated recipe. If separating a learned low-rank trunk before TopK makes the residual easier to sparsify, it can lower FVU at fixed K without changing the execution layer. -> incubate (fvu=0.22577644512057304, observed_fvu=0.225367, k=128, health=normal, termination=completed)",
@@ -20,7 +19,8 @@
     "round 39: Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 40: The search has already covered multiple K values on the best mainline and recent continuous-support pivots have all underperformed, so the next informative step is to actually benchmark the newly added discrete additive family rather than return to more tuning. `product_codebook_topk` tests whether representing coarse structure with multiple retrieved codewords before a sparse residual correction can break the current fixed-TopK quality ceiling. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
     "round 41: `product_codebook_topk` did not fail on quality; it failed because the runtime still does not recognize the new architecture name. The next highest-value move is a narrow compatibility repair in the architecture validation/factory path so the discrete additive-codebook family can produce a real proxy signal before we decide whether to keep or archive this branch. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
-    "round 58: The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)"
+    "round 58: The `K=40`, `EF=8` regime now appears broadly exhausted on quality and `codebook_topk` additionally exposed a concrete distributed-training compatibility failure, so the least-bad next move is a narrow code-fix round rather than another blind architecture swap. Repairing `codebook_topk` so all trainable paths participate in loss is the smallest informative step to determine whether the discrete-retrieval direction is actually bad or was obscured by a DDP-unused-parameter bug. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
+    "round 60: A low-rank trunk plus group-local winner-take-all residual routing can improve support diversity and regularity at low K, making `K=32` more competitive at the mandated small-capacity setting `EF=8` than the existing low-rank gated residual path. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -1063,27 +1063,32 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 41
+    },
+    "lowrank_grouped_residual": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "A low-rank trunk plus group-local winner-take-all residual routing can improve support diversity and regularity at low K, making `K=32` more competitive at the mandated small-capacity setting `EF=8` than the existing low-rank gated residual path.",
+      "tested_configs": [
+        {
+          "round": 60,
+          "stage": "prototype",
+          "k": null,
+          "decision": "policy_reject",
+          "val_fvu": null,
+          "run_health": "policy_reject"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `lowrank_grouped_residual` at `K=32`, `EF=8` shows promising proxy quality or runtime regularity, keep the family fixed and sweep `K` upward slightly (for example `K=40`) before touching EF.",
+        "If this grouped residual prototype is clearly weak at `K=32`, `EF=8`, try another fundamentally different low-K mechanism rather than returning to minor tuning on the current gated mainline."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 60
     }
   },
   "recent_rounds": [
-    {
-      "round": 48,
-      "hypothesis": "The `lowrank_gated_residual` K sweep at `EF=32` has now mapped a clear lower-K frontier down to `K=40`, and the new operator hint explicitly rules out further `EF=32` runs. The next most informative move is a same-EF architecture comparison at lower K: run `lowrank_residual` at `K=40`, `EF=8` under the shared stable optimizer/LR recipe to test whether a simpler low-rank residual family preserves more quality at small K when capacity is reduced to the newly preferred regime.",
-      "change_type": "param_only",
-      "expected_win": "smaller_k",
-      "family_name": "lowrank_residual",
-      "family_stage": "mainline_comparison",
-      "decision": "incubate",
-      "val_fvu": "0.1793901640921831",
-      "observed_fvu": "0.178429",
-      "k": "40",
-      "architecture": "lowrank_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "83007.990568",
-      "baseline_ratio": "0.999994"
-    },
     {
       "round": 49,
       "hypothesis": "`lowrank_residual` at `K=40`, `EF=8` was clearly weak in proxy, so the next fair small-capacity comparison should keep the same `K=40`, `EF=8`, optimizer, and LR while switching only architecture. Testing `lowrank_gated_residual` at `K=40`, `EF=8` is the strongest same-EF follow-up because it is the current best overall family and will show whether the low-K frontier remains viable once the operator-mandated capacity cap is enforced.",
@@ -1283,15 +1288,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83008.229363",
       "baseline_ratio": "0.999996"
+    },
+    {
+      "round": 60,
+      "hypothesis": "A low-rank trunk plus group-local winner-take-all residual routing can improve support diversity and regularity at low K, making `K=32` more competitive at the mandated small-capacity setting `EF=8` than the existing low-rank gated residual path.",
+      "change_type": "edit_sae_code",
+      "expected_win": "smaller_k",
+      "family_name": "lowrank_grouped_residual",
+      "family_stage": "prototype",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "lowrank_grouped_residual",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "policy_reject",
+      "termination_reason": "incubation_limit_exceeded",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "Round 49 showed `lowrank_gated_residual` at `K=40`, `EF=8` is also weak in proxy (`val_fvu=0.17895471677184105`), so the small-EF rebuild of the frontier should not stay family-local.",
-    "Both `lowrank_residual` and `lowrank_gated_residual` now look uncompetitive at `K=40`, `EF=8`, which strengthens the case for a same-K, same-EF comparison against `two_stage_residual` rather than any EF increase.",
-    "Keep `K=40` as the current lower-K anchor while rebuilding fair `EF=8` architecture comparisons; do not resume `EF=32` runs.",
-    "round 50: `lowrank_gated_residual` at `K=40`, `EF=8` also regressed badly in proxy, so the current question is no longer whether the leading family survives small capacity but whether any other architecture does better at the same lower-K, same-EF target. The next cleanest move is to hold `K=40`, `EF=8`, optimizer, LR, and aux fixed and switch only the architecture to `two_stage_residual`, which has prior nontrivial full-signal evidence and is the strongest remaining fair challenger in this small-EF comparison band. -> incubate (fvu=0.3432897999882698, observed_fvu=0.343542, k=40, health=normal, termination=completed)",
-    "Exploitation-mode follow-up: keep `lowrank_gated_residual` fixed at the fair small-capacity comparison point (`K=40`, `EF=8`) and sweep LR downward before concluding the family is weak there.",
-    "This round changes only LR; architecture, K, EF, optimizer, and aux regularization stay fixed to isolate whether the weak `EF=8` result was a step-size issue.",
     "round 51: At the current lower-K anchor (`K=40`) and fair small-capacity setting (`EF=8`), `lowrank_gated_residual` may be undertrained rather than fundamentally weak; dropping the learning rate from `1.6e-3` to `4e-4` while keeping the rest of the recipe fixed is the narrowest exploitation-mode check for whether this family can recover a competitive small-EF proxy point without reopening architecture or EF. -> discard (fvu=0.3102319724857807, observed_fvu=0.308813, k=40, health=normal, termination=completed)",
     "Round 52 follow-up: `lowrank_gated_residual` at `K=40`, `EF=8`, `LR=4e-4` regressed badly in proxy (`val_fvu=0.3102319724857807`), so lower LR does not rescue this small-EF setting.",
     "Next informative move is a one-variable capacity-efficiency probe at the same lower-K target: keep architecture, optimizer, LR, and aux fixed and test whether `EF=12` recovers quality while staying in the preferred small-EF regime.",
@@ -1325,12 +1345,17 @@
     "Round 59 entered crash-recovery mode, so the round was constrained to `param_only` on a known working family rather than another architecture or code-path change.",
     "Selected `lowrank_gated_residual` as the stability anchor and kept the stable shared recipe fixed while changing only `K` from `40` to `64` at `EF=8` to recover a valid small-EF signal under the current runtime constraints.",
     "This round intentionally avoided `codebook_topk` follow-up tuning despite the repaired implementation because crash-recovery policy required a current best working configuration with minor parameter adjustment only.",
-    "round 59: Crash recovery mode overrides the broader architecture search for this round, so the least-risk move is to stay on the strongest working family and make one minor parameter change that improves stability while preserving lower-K pressure. Running `lowrank_gated_residual` with the same stable `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe at `EF=8` and increasing only `K` from the previously weak `40` to `64` should recover a clean proxy signal in the small-EF regime without reopening code or architecture risk. -> discard (fvu=0.16453043185174465, observed_fvu=0.163573, k=64, health=normal, termination=completed)"
+    "round 59: Crash recovery mode overrides the broader architecture search for this round, so the least-risk move is to stay on the strongest working family and make one minor parameter change that improves stability while preserving lower-K pressure. Running `lowrank_gated_residual` with the same stable `signum`/`LR=1.6e-3`/`AUXK_ALPHA=0` recipe at `EF=8` and increasing only `K` from the previously weak `40` to `64` should recover a clean proxy signal in the small-EF regime without reopening code or architecture risk. -> discard (fvu=0.16453043185174465, observed_fvu=0.163573, k=64, health=normal, termination=completed)",
+    "Round 60: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "round 60: BLOCKED by incubation limit: Cannot create new incubating family 'lowrank_grouped_residual': already 5 incubating families (limit: 5). Stale families that could be archived: []",
+    "Round 59+ showed severe stagnation and multiple Ks already explored, so this round pivots to a fundamentally different architecture instead of another local sweep.",
+    "Added `lowrank_grouped_residual`: low-rank trunk plus grouped residual competition, intended to improve feature diversity and routing regularity specifically for low-K runs.",
+    "Local forward/backward sanity passed for `lowrank_grouped_residual` at `EF=8`, `K=32`; if training fails, treat it as an implementation issue rather than an architectural verdict.",
+    "round 60: A low-rank trunk plus group-local winner-take-all residual routing can improve support diversity and regularity at low K, making `K=32` more competitive at the mandated small-capacity setting `EF=8` than the existing low-rank gated residual path. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "next_hypotheses": [
-    "If `lowrank_gated_residual` at `K=64`, `EF=8` is still clearly weak, treat the small-EF lowrank track as a stable negative result and pivot out of crash recovery only after the system shows another clean run.",
-    "If `lowrank_gated_residual` at `K=64`, `EF=8` is materially better than the prior `K=40`, `EF=8` result, continue the same one-variable K sweep within the allowed small-EF band before changing architecture again.",
-    "If this run crashes or shows runtime instability despite using a known working family, treat the issue as broader training-path instability rather than an architecture verdict and continue with stability-oriented param-only recovery."
+    "If `lowrank_grouped_residual` at `K=32`, `EF=8` shows promising proxy quality or runtime regularity, keep the family fixed and sweep `K` upward slightly (for example `K=40`) before touching EF.",
+    "If this grouped residual prototype is clearly weak at `K=32`, `EF=8`, try another fundamentally different low-K mechanism rather than returning to minor tuning on the current gated mainline."
   ],
   "recent_sanity_failures": [
     {

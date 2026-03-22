@@ -315,6 +315,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankResidualSparseCoder
     if architecture == "lowrank_gated_residual":
         return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_grouped_residual":
+        return LowRankGroupedResidualSparseCoder
     if architecture == "two_stage_residual":
         return TwoStageResidualSparseCoder
     if architecture == "multi_branch_gated":
@@ -940,6 +942,87 @@ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
         gate = torch.sigmoid(gate_logits)
         acts = positive * gate
         top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankGroupedResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with group-local winner selection on the sparse residual."""
+
+    def _group_topk(
+        self, acts: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        group_size = self.cfg.group_topk_size
+        if self.num_latents % group_size != 0:
+            raise ValueError(
+                "lowrank_grouped_residual requires num_latents divisible by "
+                f"group_topk_size, got num_latents={self.num_latents} and "
+                f"group_topk_size={group_size}"
+            )
+
+        num_groups = self.num_latents // group_size
+        if self.cfg.k > num_groups:
+            raise ValueError(
+                "lowrank_grouped_residual requires k <= number of groups, "
+                f"got k={self.cfg.k} and num_groups={num_groups}"
+            )
+
+        grouped = acts.view(*acts.shape[:-1], num_groups, group_size)
+        winner_acts, winner_offsets = grouped.max(dim=-1)
+        top_group_acts, top_group_indices = torch.topk(
+            winner_acts, self.cfg.k, dim=-1, sorted=False
+        )
+        top_offsets = winner_offsets.gather(-1, top_group_indices)
+        top_indices = top_group_indices * group_size + top_offsets
+        return top_group_acts, top_indices
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+        top_acts, top_indices = self._group_topk(acts)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+        top_acts, top_indices = self._group_topk(acts)
 
         sparse_residual = self.decode_residual(top_acts, top_indices)
         sae_out = trunk + sparse_residual + self.b_dec
