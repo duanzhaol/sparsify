@@ -305,6 +305,8 @@ def _get_sae_class(architecture: str) -> type:
         return FactorizedTopKSparseCoder
     if architecture == "lowrank_residual":
         return LowRankResidualSparseCoder
+    if architecture == "lowrank_gated_residual":
+        return LowRankGatedResidualSparseCoder
     if architecture == "two_stage_residual":
         return TwoStageResidualSparseCoder
     if architecture == "multi_branch_gated":
@@ -615,6 +617,88 @@ class LowRankResidualSparseCoder(SparseCoder):
             scale = min(num_dead / k_aux, 1.0)
             k_aux = min(k_aux, num_dead)
             auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with a gated sparse residual selector."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        # Start near the winning low-rank residual recipe, then let the gate
+        # branch learn which residual features deserve support at low K.
+        self.gate_encoder.weight.data.zero_()
+        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(residual) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+
+        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(residual) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
             e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
