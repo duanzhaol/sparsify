@@ -16,6 +16,86 @@ from research.state_io import BASE_ENV_DEFAULTS
 
 MAX_INCUBATING_FAMILIES = 5
 MAX_INCUBATING_PROXY_ROUNDS = 3
+LANE_HIGH_K_THRESHOLD = 64
+
+
+def _parse_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_lane(k_value: int | None) -> str:
+    if k_value is not None and k_value < LANE_HIGH_K_THRESHOLD:
+        return "low_k_tradeoff"
+    return "quality_anchor"
+
+
+def _normalize_results_rows(results: list[dict[str, str]] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for row in results or []:
+        k_value = _parse_int(row.get("k"))
+        normalized.append({
+            "experiment_id": row.get("experiment_id", ""),
+            "architecture": str(row.get("architecture", "")).lower(),
+            "k": k_value,
+            "expansion_factor": _parse_int(row.get("expansion_factor")),
+            "lane": _row_lane(k_value),
+            "decision": row.get("decision", ""),
+        })
+    return normalized
+
+
+def infer_active_search_context(results: list[dict[str, str]] | None, memory: dict[str, Any] | None = None) -> dict[str, Any]:
+    normalized = _normalize_results_rows(results)
+    recent = [row for row in normalized[-3:] if row.get("k") is not None]
+    if not recent:
+        current_focus = str((memory or {}).get("current_focus") or "").lower()
+        if "k=32" in current_focus or "k=40" in current_focus or "k=48" in current_focus:
+            return {"lane": "low_k_tradeoff", "target_k": 40, "target_ef": None}
+        return {"lane": "quality_anchor", "target_k": 128, "target_ef": None}
+
+    latest = recent[-1]
+    ef_counts: dict[int, int] = {}
+    for row in recent:
+        ef_value = row.get("expansion_factor")
+        if ef_value is not None:
+            ef_counts[ef_value] = ef_counts.get(ef_value, 0) + 1
+    target_ef = latest.get("expansion_factor")
+    if ef_counts:
+        target_ef = max(ef_counts.items(), key=lambda item: (item[1], item[0]))[0]
+    return {
+        "lane": latest.get("lane"),
+        "target_k": latest.get("k"),
+        "target_ef": target_ef,
+    }
+
+
+def filter_results_for_context(
+    results: list[dict[str, str]] | None,
+    lane: str,
+    target_k: int | None = None,
+    target_ef: int | None = None,
+    family_name: str | None = None,
+) -> list[dict[str, Any]]:
+    normalized = _normalize_results_rows(results)
+    scoped = [row for row in normalized if row.get("lane") == lane]
+    if family_name:
+        family_scoped = [row for row in scoped if row.get("architecture") == family_name]
+        if family_scoped:
+            scoped = family_scoped
+    if target_k is not None:
+        same_k = [row for row in scoped if row.get("k") == target_k]
+        if same_k:
+            scoped = same_k
+    if target_ef is not None:
+        same_ef = [row for row in scoped if row.get("expansion_factor") == target_ef]
+        if same_ef:
+            scoped = same_ef
+    return scoped
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +354,8 @@ def generate_stagnation_guidance(level: str, memory: dict[str, Any], state: dict
 
 def generate_k_exploration_guidance(frontier: dict[str, Any], memory: dict[str, Any] | None = None, results: list[dict[str, str]] | None = None) -> str:
     """Check all available data sources for K value coverage and generate guidance if needed."""
+    active_context = infer_active_search_context(results, memory)
+    active_lane = active_context.get("lane", "quality_anchor")
     tested_ks: set[int] = set()
 
     # 1. Check frontier
@@ -281,9 +363,13 @@ def generate_k_exploration_guidance(frontier: dict[str, Any], memory: dict[str, 
         for key, entry in frontier.items():
             if isinstance(entry, dict):
                 k_val = entry.get("k")
+                if k_val is None and str(key).isdigit():
+                    k_val = int(key)
                 if k_val is not None:
                     try:
-                        tested_ks.add(int(k_val))
+                        parsed_k = int(k_val)
+                        if _row_lane(parsed_k) == active_lane:
+                            tested_ks.add(parsed_k)
                     except (TypeError, ValueError):
                         pass
 
@@ -293,7 +379,9 @@ def generate_k_exploration_guidance(frontier: dict[str, Any], memory: dict[str, 
             k_val = entry.get("k")
             if k_val is not None:
                 try:
-                    tested_ks.add(int(k_val))
+                    parsed_k = int(k_val)
+                    if _row_lane(parsed_k) == active_lane:
+                        tested_ks.add(parsed_k)
                 except (TypeError, ValueError):
                     pass
 
@@ -303,27 +391,44 @@ def generate_k_exploration_guidance(frontier: dict[str, Any], memory: dict[str, 
             k_val = row.get("k")
             if k_val is not None and k_val != "":
                 try:
-                    tested_ks.add(int(k_val))
+                    parsed_k = int(k_val)
+                    if _row_lane(parsed_k) == active_lane:
+                        tested_ks.add(parsed_k)
                 except (TypeError, ValueError):
                     pass
 
-    if not tested_ks:
-        tested_ks.add(128)  # Assume default
+    if not tested_ks and active_lane == "quality_anchor":
+        tested_ks.add(128)
 
-    if tested_ks == {128}:
+    if active_lane == "quality_anchor" and tested_ks == {128}:
         return (
-            "K EXPLORATION REQUIRED:\n"
-            "Currently only K=128 has been tested. The project's core objective is to find\n"
-            "configurations that work well with smaller K values.\n"
-            "Please test the current best architecture with K=64, then K=32.\n"
+            "K EXPLORATION REQUIRED (quality_anchor lane):\n"
+            "Within the current higher-K lane, only K=128 has credible coverage.\n"
+            "Please test the current best architecture with K=64 before opening new architecture branches.\n"
             "This is the highest priority — use param_only with env_overrides to change K.\n"
-            "Do NOT introduce new architectures until K exploration is done."
+            "Do not treat low-K results as coverage for this lane."
         )
 
-    if 64 not in tested_ks and 32 not in tested_ks:
+    if active_lane == "quality_anchor" and 64 not in tested_ks:
         return (
-            f"K values tested so far: {sorted(tested_ks)}.\n"
-            "Consider testing K=64 and K=32 to explore the K reduction frontier."
+            f"Quality-anchor lane K coverage so far: {sorted(tested_ks)}.\n"
+            "Consider testing K=64 before drawing conclusions from high-K-only evidence."
+        )
+
+    if active_lane == "low_k_tradeoff":
+        low_k_candidates = [32, 40, 48]
+        missing = [k for k in low_k_candidates if k not in tested_ks]
+        if missing:
+            return (
+                f"Low-K tradeoff lane coverage so far: {sorted(tested_ks)}.\n"
+                f"Stay within the low-K lane and fill the next missing K value from {missing}.\n"
+                "Do not let K=128 anchor results count as low-K coverage."
+            )
+
+    if tested_ks:
+        return (
+            f"Current lane ({active_lane}) K coverage: {sorted(tested_ks)}.\n"
+            "Judge K coverage within the active lane only; do not mix high-K and low-K evidence."
         )
 
     return ""
@@ -445,6 +550,10 @@ def generate_sweep_guidance(
     tested_lrs: set[str] = set()
     tested_auxk: set[str] = set()
     tested_efs: set[int] = set()
+    active_context = infer_active_search_context(results, memory)
+    active_lane = str(active_context.get("lane") or "quality_anchor")
+    target_k = _parse_int(active_context.get("target_k"))
+    target_ef = _parse_int(active_context.get("target_ef"))
 
     # Determine the current best family to filter by.
     # Two-pass: first try families with full FVU (most trustworthy),
@@ -483,9 +592,24 @@ def generate_sweep_guidance(
 
     relevant_experiment_ids = {
         row.get("experiment_id", "")
-        for row in (results or [])
-        if not best_family or str(row.get("architecture", "")).lower() == best_family
+        for row in filter_results_for_context(
+            results,
+            lane=active_lane,
+            target_k=target_k,
+            target_ef=target_ef,
+            family_name=best_family,
+        )
     }
+    if not relevant_experiment_ids:
+        relevant_experiment_ids = {
+            row.get("experiment_id", "")
+            for row in filter_results_for_context(
+                results,
+                lane=active_lane,
+                target_k=target_k,
+                family_name=best_family,
+            )
+        }
 
     # Structured source: round summaries with action.env_overrides, filtered by family.
     for summary_path in sorted(ROUND_SUMMARIES_DIR.glob("round_*.json")):
@@ -495,6 +619,18 @@ def generate_sweep_guidance(
             action = summary.get("action", {})
             summary_family = str(action.get("family_name", "")).lower()
             if best_family and summary_family != best_family:
+                continue
+            summary_k = _parse_int(action.get("k"))
+            if summary_k is None:
+                overrides = action.get("env_overrides", [])
+                if isinstance(overrides, dict):
+                    summary_k = _parse_int(overrides.get("K"))
+                else:
+                    for item in overrides:
+                        if item.get("key") == "K":
+                            summary_k = _parse_int(item.get("value"))
+                            break
+            if summary_k is not None and _row_lane(summary_k) != active_lane:
                 continue
             proxy_result = summary.get("proxy_result") or {}
             full_result = summary.get("full_result") or {}
@@ -553,19 +689,23 @@ def generate_sweep_guidance(
         suggestions.append("All candidate expansion_factor values have been tested")
 
     family_label = best_family or "default (topk)"
-    tested_info = f"(family: {family_label}, tested LRs: {sorted(tested_lrs)}, tested auxk: {sorted(tested_auxk)}, tested EFs: {sorted(tested_efs)})"
+    tested_info = (
+        f"(family: {family_label}, lane: {active_lane}, target_k: {target_k}, target_ef: {target_ef}, "
+        f"tested LRs: {sorted(tested_lrs)}, tested auxk: {sorted(tested_auxk)}, tested EFs: {sorted(tested_efs)})"
+    )
 
     if not untested_lrs and not untested_auxk and not untested_efs:
         return (
             f"EXPLOITATION MODE: All standard hyperparameter candidates have been tested for {family_label} {tested_info}.\n"
-            "Consider exploring K values before reopening EF, or try a new architecture approach."
+            "Consider exploring nearby K values within the same lane before reopening EF, or try a new architecture approach in the same lane."
         )
 
     return (
         "EXPLOITATION MODE — Systematic Hyperparameter Sweep:\n"
         f"Target family: {family_label}. Already tested {tested_info}\n"
-        "Priority order: K first, then capacity-efficiency work on EF.\n"
-        "Use EF only as a capacity axis: compare architectures at the same EF when possible.\n"
+        "Priority order: K first within the active lane, then capacity-efficiency work on EF.\n"
+        "Use EF only as a capacity axis: compare architectures at the same lane and same `(K, EF)` neighborhood when possible.\n"
+        "Do not use high-K anchor results to declare a low-K branch exhausted, or vice versa.\n"
         "Current evidence says EF=8 is usually a lower-bound check, not the main default. Spend most EF search on 12/16, and only use EF=8 sparingly to confirm capacity limits.\n"
         "Focus on this architecture and sweep these parameters one at a time:\n"
         + "\n".join(f"- {s}" for s in suggestions)
