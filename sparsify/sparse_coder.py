@@ -353,10 +353,12 @@ class WhitenedTopKSparseCoder(SparseCoder):
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
-        rms = x.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
-        normalized = x * rms
+        centered = x - x.mean(dim=-1, keepdim=True)
+        rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
+        normalized = centered * rms
         correction = self.preconditioner_up(self.preconditioner_down(normalized))
-        whitened = normalized + correction
+        mixed = normalized + 0.25 * torch.roll(normalized, shifts=1, dims=-1)
+        whitened = mixed + correction
         return fused_encoder(
             whitened, self.encoder.weight, self.encoder.bias, self.cfg.k
         )
