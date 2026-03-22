@@ -1,0 +1,1745 @@
+{"command":"run","hypothesis":"A low-rank trunk plus hard residual codebook may recover a better mid-K tradeoff than either mechanism alone: `lowrank_residual_vq` lets the trunk absorb shared dense structure, the codebook capture coarse residual modes, and the sparse decoder spend K only on the remaining fine correction.","summary":"Added a new prototype family, `lowrank_residual_vq`, in `sparsify/` and registered it in config/factory dispatch. The architecture applies the existing low-rank residual trunk first, then performs hard residual VQ on the trunk residual before sparse top-k correction. Exact smoke test passed for `architecture=lowrank_residual_vq, K=24, EF=12`, and a quick encode comparison confirmed behavior differs from `lowrank_residual`. This is a genuinely different mechanism family for severe-stagnation recovery, not a scalar sweep.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_residual_vq","family_stage":"prototype","self_review":"This satisfies the policy requirement to try a fundamentally different architecture after repeated no-improve rounds. The design is intentionally architecture-only at the pinned `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe so the result is attributable. Main risk: standalone discrete/codebook families have been weak before, so the win depends on the low-rank trunk making the codebook operate on an easier residual distribution rather than replaying the earlier failures.","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_residual_vq"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Added new prototype architecture `lowrank_residual_vq` that combines the existing low-rank residual trunk with a hard residual codebook stage before sparse correction.","Integration chain completed for `lowrank_residual_vq`: config whitelist + `_get_sae_class()` dispatch + class implementation.","Exact smoke test passed for `lowrank_residual_vq` at `K=24, EF=12` with forward/backward.","Quick behavioral diff check showed `lowrank_residual_vq` encode output is observably different from `lowrank_residual` on the same random input."],"next_hypotheses":["If `lowrank_residual_vq` is competitive but slightly worse at `K=24`, test `K=16` to see whether coarse residual coding helps more under tighter sparsity.","If `lowrank_residual_vq` wins at `K=24`, follow with `K=32` to see whether the gain persists across the mid-K band.","If it clearly loses at `K=24`, retire the low-rank-plus-discrete branch and move to a different mechanism family rather than tuning codebook size or router details."],"primary_variable":"architecture"}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d17e8-09af-7ab3-8981-5a034238157c
+--------
+user
+Continue the SAE research session. Round 59.
+Return one JSON object matching the action schema. No markdown fences.
+
+Policy guidance:
+SEVERE STAGNATION: 23 rounds without improvement.
+1. If only K=128 tested, MUST try K=64 or K=32
+2. Otherwise try fundamentally different architecture
+3. Stop minor tweaks — they haven't worked
+
+K coverage: [1, 2, 4, 8, 16, 24, 32].
+
+Structured update:
+{
+  "round": 59,
+  "frontier": [
+    "k=32 ef=12 fvu=0.08931536227464676 arch=lowrank_two_stage_residual lr=3.2e-3 opt=signum @a6b9904",
+    "k=24 ef=12 fvu=0.09700598567724228 arch=lowrank_two_stage_residual lr=3.2e-3 opt=signum @c9ce6fc",
+    "k=16 ef=12 fvu=0.10837031900882721 arch=lowrank_two_stage_residual lr=3.2e-3 opt=signum @b071b4c",
+    "k=8 ef=12 fvu=0.1280982345342636 arch=lowrank_two_stage_residual lr=3.2e-3 opt=signum @b840cf0",
+    "k=4 ef=12 fvu=0.1484663188457489 arch=lowrank_residual lr=1.6e-3 opt=signum @7752961",
+    "k=2 ef=12 fvu=0.16997215151786804 arch=lowrank_residual lr=1.6e-3 opt=signum @6c46e80",
+    "k=1 ef=12 fvu=0.17282412946224213 arch=lowrank_two_stage_residual lr=1.6e-3 opt=signum @2d897d7"
+  ],
+  "latest_results": [
+    "r56_1774222277 topk k24 discard fvu=0.27355659008026123 | Run a pure architecture comparison at `K=24, EF=12` with `to",
+    "r57_1774222575 whitened_topk k24 discard fvu=165315.8125 | Run a pure architecture comparison at `K=24, EF=12` with `wh",
+    "r58_1774223115 lowrank_jumprelu_residual k24 discard fvu=0.1026327833533287 | Added a new prototype family, `lowrank_jumprelu_residual`, b"
+  ],
+  "latest_round_summary": [
+    "r58 lowrank_jumprelu_residual edit_sae_code -> discard fvu=0.1026327833533287 540s | At mid-K, the winning low-rank residual trunk may benefit from smoother JumpR..."
+  ],
+  "agent_state": {
+    "consecutive_crashes": 0,
+    "consecutive_no_improve": 23,
+    "rounds_since_new_family": 59
+  },
+  "pending_hints": [],
+  "next_hypotheses": [
+    "If `lowrank_jumprelu_residual` is competitive but slightly worse at `K=24`, test `K=16` to see whether smoother residual support helps more under tighter sparsity.",
+    "If `lowrank_jumprelu_residual` wins at `K=24`, promote it to the mid-K lane and map whether the gain extends to `K=32`.",
+    "If it clearly loses at `K=24`, retire the JumpReLU-on-residual branch and move to a different mechanism family rather than another threshold/bandwidth sweep."
+  ]
+}
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+Severe stagnation still applies, and the last new family lost at the same mid-K slot. I’m checking which genuinely different mechanism can be added under `sparsify/` without slipping into another minor variant.
+exec
+/bin/bash -lc "sed -n '526,830p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+
+class CodebookTopKSparseCoder(SparseCoder):
+    """Reconstruct a coarse codebook vector, then sparsify the residual."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        self.num_codes = min(256, max(32, cfg.k * 2))
+
+exec
+/bin/bash -lc "sed -n '1395,1515p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+
+class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with norm-routed residual dictionaries."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
+exec
+/bin/bash -lc 'rg -n "lowrank_jumprelu_residual|lowrank_gated_residual|bucketed_lowrank_residual|residual_vq|codebook_topk" sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend succeeded in 0ms:
+sparsify/sparse_coder.py:300:    if architecture == "codebook_topk":
+sparsify/sparse_coder.py:302:    if architecture == "residual_vq":
+sparsify/sparse_coder.py:304:    if architecture == "two_code_residual_vq":
+sparsify/sparse_coder.py:324:    if architecture == "bucketed_lowrank_residual":
+sparsify/sparse_coder.py:328:    if architecture == "lowrank_gated_residual":
+sparsify/sparse_coder.py:330:    if architecture == "lowrank_jumprelu_residual":
+sparsify/sparse_coder.py:332:    if architecture == "whitened_lowrank_gated_residual":
+sparsify/config.py:198:            "codebook_topk",
+sparsify/config.py:199:            "residual_vq",
+sparsify/config.py:200:            "two_code_residual_vq",
+sparsify/config.py:209:            "bucketed_lowrank_residual",
+sparsify/config.py:211:            "lowrank_gated_residual",
+sparsify/config.py:212:            "lowrank_jumprelu_residual",
+sparsify/config.py:213:            "whitened_lowrank_gated_residual",
+codex
+The next round should not be another threshold or K sweep. I’m adding a low-rank-plus-discrete-residual family so the coarse structure stays in the trunk and the codebook only has to model the residual regime, which is a materially different mechanism from the recent losing branches.
+file update
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -305,2 +305,4 @@
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+@@ -830,2 +832,94 @@
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class JumpReLUSparseCoder(SparseCoder):
+M /root/sparsify-ascend/sparsify/config.py
+@@ -200,2 +200,3 @@
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+apply_patch(auto_approved=true) exited 0 in 7ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/config.py
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..c06e3b98532cbc9bc2260267aeacaa50d1cc0681
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -828,6 +830,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class JumpReLUSparseCoder(SparseCoder):
+     def __init__(
+         self,
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..c06e3b98532cbc9bc2260267aeacaa50d1cc0681
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -828,6 +830,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class JumpReLUSparseCoder(SparseCoder):
+     def __init__(
+         self,
+
+codex
+The new family is in place. I’m running the exact integration loop on the planned launch string next so the round stays architecture-only instead of turning into a registration/debug round.
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+arch = 'lowrank_residual_vq'
+k = 24
+ef = 12
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(128, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 128, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device, float(out.fvu.detach()))
+PY" in /root/sparsify-ascendexec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+x = torch.randn(2, 128, device=device)
+base = SparseCoder(128, SparseCoderConfig(architecture='lowrank_residual', k=24, expansion_factor=12), device=device, dtype=torch.float32)
+new = SparseCoder(128, SparseCoderConfig(architecture='lowrank_residual_vq', k=24, expansion_factor=12), device=device, dtype=torch.float32)
+with torch.no_grad():
+    b = base.encode(x)
+    n = new.encode(x)
+    same_idx = torch.equal(b.top_indices, n.top_indices)
+    same_act = torch.allclose(b.top_acts, n.top_acts)
+print('behavior_diff', same_idx, same_act)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..c06e3b98532cbc9bc2260267aeacaa50d1cc0681
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -828,6 +830,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class JumpReLUSparseCoder(SparseCoder):
+     def __init__(
+         self,
+
+ exited 1 in 3.55s:
+Using fused decoder on CUDA.
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+  File "/root/sparsify-ascend/sparsify/__init__.py", line 4, in <module>
+    from .sparse_coder import Sae, SparseCoder
+  File "/root/sparsify-ascend/sparsify/sparse_coder.py", line 833, in <module>
+    class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'LowRankResidualSparseCoder' is not defined. Did you mean: 'TwoCodeResidualVQSparseCoder'?
+ exited 1 in 3.64s:
+Using fused decoder on CUDA.
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+  File "/root/sparsify-ascend/sparsify/__init__.py", line 4, in <module>
+    from .sparse_coder import Sae, SparseCoder
+  File "/root/sparsify-ascend/sparsify/sparse_coder.py", line 833, in <module>
+    class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'LowRankResidualSparseCoder' is not defined. Did you mean: 'TwoCodeResidualVQSparseCoder'?
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..c06e3b98532cbc9bc2260267aeacaa50d1cc0681
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -828,6 +830,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class JumpReLUSparseCoder(SparseCoder):
+     def __init__(
+         self,
+
+codex
+The first smoke hit an ordering bug, not a design issue: I inserted the new class before its low-rank base class definition. I’m relocating it so the new family can actually instantiate under the exact launch string.
+file update
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -832,94 +832,2 @@
+ 
+-class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+-    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
+-
+-    def __init__(
+-        self,
+-        d_in: int,
+-        cfg: SparseCoderConfig,
+-        device: str | torch.device = "cpu",
+-        dtype: torch.dtype | None = None,
+-        *,
+-        decoder: bool = True,
+-    ):
+-        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+-        self.num_codes = min(512, max(64, cfg.k * 4))
+-        self.codebook = nn.Parameter(
+-            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+-        )
+-        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
+-        self.code_router.bias.data.zero_()
+-
+-    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
+-        logits = self.code_router(residual)
+-        code_indices = logits.argmax(dim=-1)
+-        probs = logits.softmax(dim=-1)
+-        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
+-            dtype=probs.dtype
+-        )
+-        routing = hard_assign + probs - probs.detach()
+-        coarse = routing @ self.codebook
+-        return coarse, logits
+-
+-    def encode(self, x: Tensor) -> EncoderOutput:
+-        x = x - self.b_dec
+-        trunk = self.trunk_decoder(self.trunk_encoder(x))
+-        residual = x - trunk
+-        coarse, _ = self._select_code(residual)
+-        vq_residual = residual - coarse
+-        return fused_encoder(
+-            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+-        )
+-
+-    @device_autocast
+-    def forward(
+-        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+-    ) -> ForwardOutput:
+-        x_centered = x - self.b_dec
+-        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+-        residual = x_centered - trunk
+-        coarse, _ = self._select_code(residual)
+-        vq_residual = residual - coarse
+-        top_acts, top_indices, pre_acts = fused_encoder(
+-            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+-        )
+-
+-        sparse_residual = self.decode_residual(top_acts, top_indices)
+-        sae_out = trunk + coarse + sparse_residual + self.b_dec
+-
+-        if y is None:
+-            y = x
+-
+-        e = y - sae_out
+-        total_variance = (y - y.mean(0)).pow(2).sum()
+-
+-        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+-            k_aux = y.shape[-1] // 2
+-            scale = min(num_dead / k_aux, 1.0)
+-            k_aux = min(k_aux, num_dead)
+-            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+-            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+-            e_hat = (
+-                trunk
+-                + coarse
+-                + self.decode_residual(auxk_acts, auxk_indices)
+-                + self.b_dec
+-            )
+-            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+-            auxk_loss = scale * auxk_loss / total_variance
+-        else:
+-            auxk_loss = sae_out.new_tensor(0.0)
+-
+-        l2_loss = e.pow(2).sum()
+-        fvu = l2_loss / total_variance
+-
+-        return ForwardOutput(
+-            sae_out,
+-            top_acts,
+-            top_indices,
+-            fvu,
+-            auxk_loss,
+-        )
+-
+-
+ class JumpReLUSparseCoder(SparseCoder):
+apply_patch(auto_approved=true) exited 0 in 6ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..cf16633d2ebcd1295a8f6463b74477e207b598cd
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..cf16633d2ebcd1295a8f6463b74477e207b598cd
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+
+file update
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -1515,2 +1515,94 @@
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+apply_patch(auto_approved=true) exited 0 in 7ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..4fb8f5b930961c3aa74487a26bfa21dae0f4bc5b
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -1511,6 +1513,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with a gated sparse residual selector."""
+ 
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..4fb8f5b930961c3aa74487a26bfa21dae0f4bc5b
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -1511,6 +1513,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with a gated sparse residual selector."""
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+arch = 'lowrank_residual_vq'
+k = 24
+ef = 12
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(128, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 128, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device, float(out.fvu.detach()))
+PY" in /root/sparsify-ascendexec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+x = torch.randn(2, 128, device=device)
+base = SparseCoder(128, SparseCoderConfig(architecture='lowrank_residual', k=24, expansion_factor=12), device=device, dtype=torch.float32)
+new = SparseCoder(128, SparseCoderConfig(architecture='lowrank_residual_vq', k=24, expansion_factor=12), device=device, dtype=torch.float32)
+with torch.no_grad():
+    b = base.encode(x)
+    n = new.encode(x)
+    same_idx = torch.equal(b.top_indices, n.top_indices)
+    same_act = torch.allclose(b.top_acts, n.top_acts)
+print('behavior_diff', same_idx, same_act)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..4fb8f5b930961c3aa74487a26bfa21dae0f4bc5b
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -1511,6 +1513,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with a gated sparse residual selector."""
+ 
+
+ succeeded in 4.52s:
+Using fused decoder on CUDA.
+behavior_diff False False
+ succeeded in 4.74s:
+Using fused decoder on CUDA.
+integration_smoke: OK lowrank_residual_vq 24 12 cuda 0.6421969532966614
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..4fb8f5b930961c3aa74487a26bfa21dae0f4bc5b
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -1511,6 +1513,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with a gated sparse residual selector."""
+ 
+
+codex
+{"command":"run","hypothesis":"A low-rank trunk plus hard residual codebook may recover a better mid-K tradeoff than either mechanism alone: `lowrank_residual_vq` lets the trunk absorb shared dense structure, the codebook capture coarse residual modes, and the sparse decoder spend K only on the remaining fine correction.","summary":"Added a new prototype family, `lowrank_residual_vq`, in `sparsify/` and registered it in config/factory dispatch. The architecture applies the existing low-rank residual trunk first, then performs hard residual VQ on the trunk residual before sparse top-k correction. Exact smoke test passed for `architecture=lowrank_residual_vq, K=24, EF=12`, and a quick encode comparison confirmed behavior differs from `lowrank_residual`. This is a genuinely different mechanism family for severe-stagnation recovery, not a scalar sweep.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_residual_vq","family_stage":"prototype","self_review":"This satisfies the policy requirement to try a fundamentally different architecture after repeated no-improve rounds. The design is intentionally architecture-only at the pinned `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe so the result is attributable. Main risk: standalone discrete/codebook families have been weak before, so the win depends on the low-rank trunk making the codebook operate on an easier residual distribution rather than replaying the earlier failures.","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_residual_vq"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Added new prototype architecture `lowrank_residual_vq` that combines the existing low-rank residual trunk with a hard residual codebook stage before sparse correction.","Integration chain completed for `lowrank_residual_vq`: config whitelist + `_get_sae_class()` dispatch + class implementation.","Exact smoke test passed for `lowrank_residual_vq` at `K=24, EF=12` with forward/backward.","Quick behavioral diff check showed `lowrank_residual_vq` encode output is observably different from `lowrank_residual` on the same random input."],"next_hypotheses":["If `lowrank_residual_vq` is competitive but slightly worse at `K=24`, test `K=16` to see whether coarse residual coding helps more under tighter sparsity.","If `lowrank_residual_vq` wins at `K=24`, follow with `K=32` to see whether the gain persists across the mid-K band.","If it clearly loses at `K=24`, retire the low-rank-plus-discrete branch and move to a different mechanism family rather than tuning codebook size or router details."],"primary_variable":"architecture"}
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 63131c194abd82d7d57d44dfa08a62d073147824..e8f7f48cd98279d2ff38cd6887ac2aa046206a60
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -198,6 +198,7 @@
+             "codebook_topk",
+             "residual_vq",
+             "two_code_residual_vq",
++            "lowrank_residual_vq",
+             "jumprelu",
+             "gated",
+             "routed",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index f0425097b8a7f1cb6eae29526ea6b9444ab7d2ad..4fb8f5b930961c3aa74487a26bfa21dae0f4bc5b
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -303,6 +303,8 @@
+         return ResidualVQSparseCoder
+     if architecture == "two_code_residual_vq":
+         return TwoCodeResidualVQSparseCoder
++    if architecture == "lowrank_residual_vq":
++        return LowRankResidualVQSparseCoder
+     if architecture == "whitened_topk":
+         return WhitenedTopKSparseCoder
+     if architecture == "jumprelu":
+@@ -1511,6 +1513,98 @@
+         )
+ 
+ 
++class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with hard codebook residual modeling before sparse correction."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.num_codes = min(512, max(64, cfg.k * 4))
++        self.codebook = nn.Parameter(
++            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
++        )
++        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
++        self.code_router.bias.data.zero_()
++
++    def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        logits = self.code_router(residual)
++        code_indices = logits.argmax(dim=-1)
++        probs = logits.softmax(dim=-1)
++        hard_assign = F.one_hot(code_indices, num_classes=self.num_codes).to(
++            dtype=probs.dtype
++        )
++        routing = hard_assign + probs - probs.detach()
++        coarse = routing @ self.codebook
++        return coarse, logits
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        return fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._select_code(residual)
++        vq_residual = residual - coarse
++        top_acts, top_indices, pre_acts = fused_encoder(
++            vq_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
++        )
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + coarse + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = (
++                trunk
++                + coarse
++                + self.decode_residual(auxk_acts, auxk_indices)
++                + self.b_dec
++            )
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with a gated sparse residual selector."""
+ 
+
+tokens used
+131,013
