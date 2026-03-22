@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from research.state_io import (
@@ -16,6 +17,7 @@ from research.state_io import (
 )
 
 LANE_HIGH_K_THRESHOLD = 64
+ARCHITECTURE_INTEGRATION_SKILL_PATH = Path("/root/.codex/skills/sae-architecture-integration/SKILL.md")
 
 
 def _parse_int(value: Any) -> int | None:
@@ -192,6 +194,55 @@ def trim_text(value: Any, limit: int = 220) -> Any:
     if not isinstance(value, str) or len(value) <= limit:
         return value
     return value[: limit - 32].rstrip() + "\n[truncated]"
+
+
+def load_architecture_integration_checklist() -> str:
+    if not ARCHITECTURE_INTEGRATION_SKILL_PATH.exists():
+        return ""
+    text = ARCHITECTURE_INTEGRATION_SKILL_PATH.read_text().strip()
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2].strip()
+    return text
+
+
+def _error_mentions_architecture_integration(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    summary = str(entry.get("error_summary") or "").lower()
+    return any(
+        token in summary
+        for token in (
+            "unknown architecture",
+            "factory dispatch",
+            "dispatch",
+            "registration blocker",
+            "constructible",
+        )
+    )
+
+
+def should_include_architecture_integration_checklist(
+    memory: dict[str, Any],
+    recent_summaries: list[dict[str, Any]],
+) -> bool:
+    for summary in recent_summaries[-2:]:
+        if not isinstance(summary, dict):
+            continue
+        if str(summary.get("change_type") or "") == "edit_sae_code":
+            return True
+        if (
+            str(summary.get("family_stage") or "") == "prototype"
+            and str(summary.get("decision") or "") in {"crash", "policy_reject"}
+        ):
+            return True
+
+    recent_failures = list(memory.get("recent_training_failures", []))[-4:] + list(memory.get("recent_sanity_failures", []))[-2:]
+    if any(_error_mentions_architecture_integration(entry) for entry in recent_failures):
+        return True
+
+    return False
 
 
 def baseline_runtime_digest(baseline_runtime: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
@@ -409,6 +460,12 @@ def build_prompt(
     memory_digest = memory_prompt_digest(memory)
     active_context = infer_active_kef_context(results)
     lane_context = lane_grouped_results_digest(results, per_lane_limit=4)
+    recent_summaries = recent_round_summaries_trimmed(limit=2)
+    architecture_integration_checklist = (
+        load_architecture_integration_checklist()
+        if should_include_architecture_integration_checklist(memory, recent_summaries)
+        else ""
+    )
     local_context = same_k_ef_local_digest(
         results,
         target_k=active_context.get("target_k"),
@@ -430,8 +487,9 @@ def build_prompt(
         "memory_digest": memory_digest,
         "operator_hints": operator_hints[:8],
         "operator_guide_excerpt": operator_guide_excerpt,
+        "architecture_integration_checklist": architecture_integration_checklist,
         "recent_results": recent_results_digest(results, limit=4),
-        "recent_round_summaries": recent_round_summaries_trimmed(limit=2),
+        "recent_round_summaries": recent_summaries,
     }
     policy_section = ""
     if policy_context:
@@ -456,6 +514,7 @@ Important rules:
 - Read research/program.md before deciding.
 - Read and respect any operator_hints in the structured context.
 - Read and respect operator_guide_excerpt in the structured context when present.
+- Read and follow architecture_integration_checklist when present. It is mandatory for new-family wiring and Unknown architecture repairs.
 - You may edit ONLY files under sparsify/.
 - Do not edit research/history/*, research/*.py, or scripts/autoresearch_test.sh.
 - For parameter-only experiments, use env_overrides instead of editing launch code.
@@ -505,6 +564,12 @@ def build_resume_prompt(
     memory_digest = memory_prompt_digest(memory)
     active_context = infer_active_kef_context(results)
     lane_context = lane_grouped_results_digest(results, per_lane_limit=4)
+    recent_summaries = brief.get("recent_round_summaries", recent_round_summaries_trimmed())
+    architecture_integration_checklist = (
+        load_architecture_integration_checklist()
+        if should_include_architecture_integration_checklist(memory, recent_summaries)
+        else ""
+    )
     local_context = same_k_ef_local_digest(
         results,
         target_k=active_context.get("target_k"),
@@ -534,7 +599,7 @@ def build_resume_prompt(
         "quality_anchor_lane": lane_context.get("quality_anchor", {}),
         "low_k_tradeoff_lane": lane_context.get("low_k_tradeoff", {}),
         "same_k_ef_local_context": local_context,
-        "recent_round_summaries": brief.get("recent_round_summaries", recent_round_summaries_trimmed()),
+        "recent_round_summaries": recent_summaries,
         "incubating_families": brief.get("incubating_families", {}),
         "memory_digest": memory_digest,
         "recent_performance_findings": brief.get(
@@ -551,6 +616,7 @@ def build_resume_prompt(
         ),
         "pending_hints": merged_pending_hints,
         "operator_guide_excerpt": operator_guide_excerpt,
+        "architecture_integration_checklist": architecture_integration_checklist,
         "next_move_guidance": brief.get("next_move_guidance", memory.get("next_hypotheses", [])[:8]),
         "rounds_since_new_family": state.get("agent", {}).get("rounds_since_new_family", 0),
     }
@@ -572,6 +638,7 @@ Runtime priorities that override weak local heuristics:
 - Treat expansion_factor as a capacity axis. Do not claim an architecture win from cross-EF comparisons alone.
 - Prefer same-EF architecture comparisons.
 - Use the active lane plus the exact `(K, EF)` neighborhood as the main basis for judgment; do not let `K=128` evidence override a low-K tradeoff decision, or vice versa.
+- Follow architecture_integration_checklist when it is present in the structured update. It is mandatory for new-family wiring and Unknown architecture repairs.
 - Default EF for a new family or refreshed comparison is 12 unless strong prior evidence says 16 is the better mainline band for that family.
 - Treat EF=8 as a lower-bound check rather than the primary comparison target.
 - Under the current evidence, prefer EF {12, 16} for most meaningful comparisons and use EF=8 sparingly to validate capacity limits.

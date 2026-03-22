@@ -90,6 +90,7 @@ from research.training import (
 from research.prompts import (
     build_prompt,
     build_resume_prompt,
+    load_architecture_integration_checklist,
 )
 from research.policy import (
     behavioral_diff_test,
@@ -302,6 +303,7 @@ def _build_repair_prompt(
     repair_attempt: int,
     max_attempts: int,
 ) -> str:
+    architecture_integration_checklist = load_architecture_integration_checklist()
     payload = {
         "round": round_id,
         "repair_attempt": repair_attempt,
@@ -327,6 +329,9 @@ Your only goal is to patch the existing implementation so the original experimen
 Stay within sparsify/ only.
 Assume this is repair attempt {repair_attempt} of at most {max_attempts}.
 Return one final JSON object only, matching the established action schema exactly.
+
+Architecture integration checklist:
+{architecture_integration_checklist}
 
 Structured repair context:
 {json.dumps(payload, indent=2)}
