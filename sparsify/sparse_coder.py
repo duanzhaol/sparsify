@@ -317,6 +317,8 @@ def _get_sae_class(architecture: str) -> type:
         return FactorizedTopKSparseCoder
     if architecture == "lowrank_residual":
         return LowRankResidualSparseCoder
+    if architecture == "bucketed_lowrank_residual":
+        return BucketedLowRankResidualSparseCoder
     if architecture == "whitened_lowrank_residual":
         return WhitenedLowRankResidualSparseCoder
     if architecture == "lowrank_gated_residual":
@@ -1083,6 +1085,123 @@ class LowRankResidualSparseCoder(SparseCoder):
             scale = min(num_dead / k_aux, 1.0)
             k_aux = min(k_aux, num_dead)
             auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with norm-routed residual dictionaries."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
+        self.trunk_encoder = nn.Linear(
+            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+        )
+        self.trunk_decoder = nn.Linear(
+            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+        self.low_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.high_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.low_encoder.bias.data.zero_()
+        self.high_encoder.bias.data.zero_()
+        self.high_encoder.weight.data.mul_(1.05)
+
+        self.bucket_scale = nn.Parameter(
+            torch.tensor(2.0, device=device, dtype=dtype)
+        )
+        self.bucket_bias = nn.Parameter(
+            torch.tensor(0.0, device=device, dtype=dtype)
+        )
+
+        if decoder:
+            decoder_init = 0.5 * (
+                self.low_encoder.weight.data + self.high_encoder.weight.data
+            )
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _compute_bucketed_acts(self, residual: Tensor) -> tuple[Tensor, Tensor]:
+        low_acts = F.relu(
+            F.linear(residual, self.low_encoder.weight, self.low_encoder.bias)
+        )
+        high_acts = F.relu(
+            F.linear(residual, self.high_encoder.weight, self.high_encoder.bias)
+        )
+        norms = residual.norm(dim=-1, keepdim=True)
+        centered_norms = norms - norms.mean()
+        gate = torch.sigmoid(self.bucket_scale * centered_norms + self.bucket_bias)
+        acts = (1.0 - gate) * low_acts + gate * high_acts
+        return acts, gate
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        acts, _ = self._compute_bucketed_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        acts, _ = self._compute_bucketed_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
             e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()

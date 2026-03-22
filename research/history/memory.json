@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 36: Eleven no-improve rounds indicate the fixed-per-sample sparse allocation direction is fundamentally flawed, and recent alternatives like `jumprelu`, `two_stage_residual`, and `adaptive_budget_topk` still stayed far behind the frontier. The next coherent architecture move is to test a cleaner batch-level sparsity mechanism: add `batch_topk`, which enforces the same total activation budget across the batch but selects features globally rather than distributing them per sample or via a heuristic quota. If the main failure mode is rigid per-sample support allocation, true batch-level competition could improve reconstruction quality at fixed average sparsity. -> incubate (fvu=0.1644012425094843, observed_fvu=0.160082, k=128, health=normal, termination=completed)",
     "round 37: Twelve no-improve rounds indicate that the current search direction is fundamentally flawed, and the latest alternative sparse-allocation families still sit far behind the frontier. The next coherent architecture move is to test conditionalized dictionaries rather than another global-allocation variant: add `bucketed_topk`, which routes samples between separate low-norm and high-norm dictionaries before TopK selection. If the activation distribution is multi-regime rather than unimodal, specializing dictionaries by sample norm could improve reconstruction quality without changing the fixed execution layer. -> incubate (fvu=0.1606419887393713, observed_fvu=0.155455, k=128, health=normal, termination=completed)",
     "round 38: Thirteen no-improve rounds indicate the current search direction around continuous sparse-support variants is fundamentally flawed, and the latest routing-based families still remained far behind the frontier. The next coherent architecture move is to test a discrete-codebook path: add `codebook_topk`, which reconstructs a coarse learned prototype first and then uses TopK only on the residual. If much of the activation mass is better modeled as codebook retrieval plus sparse correction than as pure sparse linear combination, this could lower FVU without changing the execution layer. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 39: Thirteen no-improve rounds and the recent failures of adaptive-budget, batch-global, and bucketed sparse-allocation variants suggest the current continuous-support search direction is exhausted. The next clean architecture pivot is a discrete additive representation: `product_codebook_topk`, which reconstructs activations with multiple retrieved codewords before applying TopK only to the residual. If the main bottleneck is that continuous sparse atoms are wasting capacity on shared coarse structure, additive product-style codebooks should model that structure more efficiently and leave the sparse residual path to handle only fine corrections. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
@@ -20,7 +19,8 @@
     "round 89: Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
     "round 93: The round 93 crash was a pure implementation gap: `two_code_residual_vq` was missing from architecture validation and SAE factory dispatch. Registering the architecture and adding a minimal runnable two-code residual-VQ sparse coder under `sparsify/` should unblock the original `K=40, EF=12` proxy experiment without changing its intended design. -> incubate (fvu=0.24070418253540993, observed_fvu=0.233525, k=40, health=normal, termination=completed)",
     "round 96: The exact active point `(K=40, EF=12)` has now rejected several alternative sparsity mechanisms, while the strongest same-`(K,EF)` signal remains `lowrank_residual`. A space-first follow-up is more justified than more threshold/routing tweaks: adding residual whitening/preconditioning to the proven low-rank trunk may make the residual easier to sparsify at low K and lower proxy FVU without relying on EF>16. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
-    "round 99: The low-K lane has now rejected several support-selection tweaks and discrete residual variants, which suggests the failure mode may be a single global dictionary trying to cover heterogeneous samples rather than the exact sparse mechanism alone. A new `bucketed_lowrank_residual` family that keeps the proven low-rank trunk but routes samples between two residual dictionaries by activation norm can test a stronger problem reformulation at the active target `K=32, EF=12` without increasing K or EF. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
+    "round 99: The low-K lane has now rejected several support-selection tweaks and discrete residual variants, which suggests the failure mode may be a single global dictionary trying to cover heterogeneous samples rather than the exact sparse mechanism alone. A new `bucketed_lowrank_residual` family that keeps the proven low-rank trunk but routes samples between two residual dictionaries by activation norm can test a stronger problem reformulation at the active target `K=32, EF=12` without increasing K or EF. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)",
+    "round 101: `bucketed_lowrank_residual` did not fail on quality; it failed on a narrow implementation blocker because the architecture string and runnable class were missing from the `sparsify/` registration path. The correct repair is to register `bucketed_lowrank_residual` in config validation and factory dispatch, provide the minimal runnable sparse coder implementation, and rerun the exact same `K=32, EF=12` proxy target unchanged. -> discard (fvu=0.10123475920408964, observed_fvu=0.098534, k=32, health=normal, termination=completed)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -340,6 +340,22 @@
       "architecture": "whitened_lowrank_residual",
       "k": 40,
       "updated_at": 1774176278
+    },
+    "proxy|bucketed_lowrank_residual|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 148039.37635751817,
+      "round": 101,
+      "tier": "proxy",
+      "architecture": "bucketed_lowrank_residual",
+      "k": 32,
+      "updated_at": 1774177722
+    },
+    "full|bucketed_lowrank_residual|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 121095.56560511244,
+      "round": 101,
+      "tier": "full",
+      "architecture": "bucketed_lowrank_residual",
+      "k": 32,
+      "updated_at": 1774178053
     }
   },
   "architecture_families": {
@@ -1566,7 +1582,7 @@
     "bucketed_lowrank_residual": {
       "status": "incubating",
       "goal": "new_family",
-      "design_hypothesis": "The low-K lane has repeatedly rejected support-selection tweaks, whitening variants, and discrete residual families, so the strongest pending informative move is to execute the newly added `bucketed_lowrank_residual` reformulation at the exact active target. Conditioning the residual dictionary on coarse sample regime may recover useful low-K capacity where single-dictionary residual models and other mechanism swaps have stalled, without changing K or EF.",
+      "design_hypothesis": "`bucketed_lowrank_residual` did not fail on quality; it failed on a narrow implementation blocker because the architecture string and runnable class were missing from the `sparsify/` registration path. The correct repair is to register `bucketed_lowrank_residual` in config validation and factory dispatch, provide the minimal runnable sparse coder implementation, and rerun the exact same `K=32, EF=12` proxy target unchanged.",
       "tested_configs": [
         {
           "round": 99,
@@ -1583,39 +1599,29 @@
           "decision": "crash",
           "val_fvu": "None",
           "run_health": "crash"
+        },
+        {
+          "round": 101,
+          "stage": "prototype",
+          "k": "32",
+          "decision": "discard",
+          "val_fvu": "0.10123475920408964",
+          "run_health": "normal"
         }
       ],
       "known_issues": [
         "round 100: training crash for bucketed_lowrank_residual | ValueError: Unknown architecture: 'bucketed_lowrank_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')"
       ],
       "next_steps": [
-        "If `bucketed_lowrank_residual` is competitive at `K=32, EF=12`, keep the family fixed and map it to `K=40, EF=12` before any EF work.",
-        "If `bucketed_lowrank_residual` is clearly weak under normal runtime, archive stale weak incubating families and pivot the next move toward a stronger objective-level reformulation rather than another architecture-local tweak."
+        "If the repaired `bucketed_lowrank_residual` run completes and is competitive at `K=32, EF=12`, keep the family fixed and map it to `K=40, EF=12` before any EF work.",
+        "If the repaired run completes but is clearly weak, archive stale weak incubating families and pivot the next move toward a stronger objective-level reformulation rather than another architecture-local tweak."
       ],
-      "best_proxy_fvu": null,
+      "best_proxy_fvu": 0.10123475920408964,
       "best_full_fvu": null,
-      "last_round": 100
+      "last_round": 101
     }
   },
   "recent_rounds": [
-    {
-      "round": 89,
-      "hypothesis": "Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF.",
-      "change_type": "edit_sae_code",
-      "expected_win": "lower_fvu",
-      "family_name": "two_code_residual_vq",
-      "family_stage": "prototype",
-      "decision": "policy_reject",
-      "val_fvu": null,
-      "observed_fvu": null,
-      "k": null,
-      "architecture": "two_code_residual_vq",
-      "touched_files": [],
-      "run_health": "policy_reject",
-      "termination_reason": "incubation_limit_exceeded",
-      "tokens_per_sec": null,
-      "baseline_ratio": null
-    },
     {
       "round": 90,
       "hypothesis": "With incubation slots saturated and recent fresh-family probes weak or blocked, the least-bad informative move is to return to the strongest existing alternative architecture at the active low-K target. `lowrank_residual` is the closest non-gated same-`(K=32, EF=12)` competitor seen so far, so rerunning that exact architecture point is the best available architecture-level comparison against the weak discrete branch and the slightly better gated local baseline.",
@@ -1819,17 +1825,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "",
       "baseline_ratio": ""
+    },
+    {
+      "round": 101,
+      "hypothesis": "`bucketed_lowrank_residual` did not fail on quality; it failed on a narrow implementation blocker because the architecture string and runnable class were missing from the `sparsify/` registration path. The correct repair is to register `bucketed_lowrank_residual` in config validation and factory dispatch, provide the minimal runnable sparse coder implementation, and rerun the exact same `K=32, EF=12` proxy target unchanged.",
+      "change_type": "edit_sae_code",
+      "expected_win": "run_stability",
+      "family_name": "bucketed_lowrank_residual",
+      "family_stage": "prototype",
+      "decision": "discard",
+      "val_fvu": "0.10123475920408964",
+      "observed_fvu": "0.098534",
+      "k": "32",
+      "architecture": "bucketed_lowrank_residual",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "121095.565605",
+      "baseline_ratio": ""
     }
   ],
   "recent_insights": [
-    "Local smoke test passed: config validation, factory dispatch, forward, and backward all succeeded for `architecture=two_code_residual_vq`, `k=40`, `expansion_factor=12`.",
-    "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
-    "round 93: The round 93 crash was a pure implementation gap: `two_code_residual_vq` was missing from architecture validation and SAE factory dispatch. Registering the architecture and adding a minimal runnable two-code residual-VQ sparse coder under `sparsify/` should unblock the original `K=40, EF=12` proxy experiment without changing its intended design. -> incubate (fvu=0.24070418253540993, observed_fvu=0.233525, k=40, health=normal, termination=completed)",
-    "Round 94: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
-    "Round 93 repaired and ran `two_code_residual_vq` at `K=40, EF=12`; it completed cleanly but was weak at `0.24070418253540993`, worse than the local `lowrank_residual` best `0.17533555254340172`.",
-    "At the active low-K point `(K=40, EF=12)`, routed and discrete two-code VQ variants are now both clearly behind the local non-gated residual baseline.",
-    "After repeated failures from residual-magnitude and discrete-trunk alternatives, the next informative move is to change the sparsity mechanism itself rather than continue same-family tuning or EF changes.",
-    "round 94: The current low-K stall suggests the main failure mode may be fixed per-sample top-k allocation rather than trunk capacity alone. Running `batch_topk` at the exact active comparison point `K=40, EF=12` with the unchanged `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe is the cleanest fundamentally different architecture test because it changes the sparsity mechanism itself while keeping the same low-K lane and same EF band. -> incubate (fvu=0.40311281383037567, observed_fvu=0.402737, k=40, health=normal, termination=completed)",
     "Round 95: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
     "Round 94: `batch_topk` at `K=40, EF=12` was very weak at `0.40311281383037567`, substantially behind the local `lowrank_residual` best `0.17533555254340172`, so the batch-budget hypothesis did not help in the exact low-K neighborhood.",
     "Given the growing incubating set, prefer reopening archived fundamentally different mechanisms with prior signal over starting another brand-new family.",
@@ -1861,11 +1880,19 @@
     "Round 100 executes the first proxy run for `bucketed_lowrank_residual` at the active low-K target `K=32, EF=12` after the round-99 architecture addition.",
     "This remains a same-EF low-K comparison and tests conditional residual specialization rather than another support-selection or VQ-style mechanism swap.",
     "If the family is weak here, that further supports moving the next architecture step toward a deeper objective or problem reformulation instead of continuing to add more incubating low-K families.",
-    "round 100: The low-K lane has repeatedly rejected support-selection tweaks, whitening variants, and discrete residual families, so the strongest pending informative move is to execute the newly added `bucketed_lowrank_residual` reformulation at the exact active target. Conditioning the residual dictionary on coarse sample regime may recover useful low-K capacity where single-dictionary residual models and other mechanism swaps have stalled, without changing K or EF. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)"
+    "round 100: The low-K lane has repeatedly rejected support-selection tweaks, whitening variants, and discrete residual families, so the strongest pending informative move is to execute the newly added `bucketed_lowrank_residual` reformulation at the exact active target. Conditioning the residual dictionary on coarse sample regime may recover useful low-K capacity where single-dictionary residual models and other mechanism swaps have stalled, without changing K or EF. -> crash (fvu=None, observed_fvu=, k=None, health=crash, termination=completed)",
+    "Round 101: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "Round 101: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "Round 101: behavioral diff matched baseline (arch=bucketed_lowrank_residual, k=32, ef=12, max_diff=0.0); runtime allowed prototype training to continue",
+    "Repair attempt 1 for `bucketed_lowrank_residual` fixed the concrete `Unknown architecture` blocker by adding the family to config validation and SAE class dispatch.",
+    "The repair also added the missing minimal `BucketedLowRankResidualSparseCoder` implementation so the rerun will not immediately fail on a second missing-class issue.",
+    "Local validation and dispatch instantiation passed for `architecture='bucketed_lowrank_residual'` before returning control to the runtime.",
+    "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
+    "round 101: `bucketed_lowrank_residual` did not fail on quality; it failed on a narrow implementation blocker because the architecture string and runnable class were missing from the `sparsify/` registration path. The correct repair is to register `bucketed_lowrank_residual` in config validation and factory dispatch, provide the minimal runnable sparse coder implementation, and rerun the exact same `K=32, EF=12` proxy target unchanged. -> discard (fvu=0.10123475920408964, observed_fvu=0.098534, k=32, health=normal, termination=completed)"
   ],
   "next_hypotheses": [
-    "If `bucketed_lowrank_residual` is competitive at `K=32, EF=12`, keep the family fixed and map it to `K=40, EF=12` before any EF work.",
-    "If `bucketed_lowrank_residual` is clearly weak under normal runtime, archive stale weak incubating families and pivot the next move toward a stronger objective-level reformulation rather than another architecture-local tweak."
+    "If the repaired `bucketed_lowrank_residual` run completes and is competitive at `K=32, EF=12`, keep the family fixed and map it to `K=40, EF=12` before any EF work.",
+    "If the repaired run completes but is clearly weak, archive stale weak incubating families and pivot the next move toward a stronger objective-level reformulation rather than another architecture-local tweak."
   ],
   "recent_sanity_failures": [
     {

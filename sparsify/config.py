@@ -204,6 +204,7 @@ class TrainConfig(Serializable):
             "group_topk",
             "factorized_topk",
             "lowrank_residual",
+            "bucketed_lowrank_residual",
             "whitened_lowrank_residual",
             "lowrank_gated_residual",
             "whitened_lowrank_gated_residual",
