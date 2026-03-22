@@ -327,6 +327,8 @@ def _get_sae_class(architecture: str) -> type:
         return WhitenedLowRankResidualSparseCoder
     if architecture == "lowrank_gated_residual":
         return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_jumprelu_residual":
+        return LowRankJumpReLUResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
         return WhitenedLowRankGatedResidualSparseCoder
     if architecture == "lowrank_grouped_residual":
@@ -1261,21 +1263,25 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
         bias: Tensor,
         router: nn.Linear,
         k: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         pre_acts = F.linear(inputs, weight, bias)
         acts = F.relu(pre_acts)
         router_logits = router(inputs) / self.cfg.gated_temperature
-        scores = acts + 0.1 * torch.tanh(router_logits)
+        router_gate = torch.sigmoid(router_logits)
+        # Keep routing on the reconstruction path so DDP does not treat the
+        # router weights as unused when only the selected support is decoded.
+        routed_acts = acts * router_gate
+        scores = routed_acts + 0.1 * torch.tanh(router_logits)
         _, top_indices = torch.topk(scores, k, dim=-1, sorted=False)
-        top_acts = acts.gather(-1, top_indices)
-        return top_acts, top_indices, scores
+        top_acts = routed_acts.gather(-1, top_indices)
+        return top_acts, top_indices, scores, routed_acts
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         trunk = self.trunk_decoder(self.trunk_encoder(x))
         residual = x - trunk
 
-        stage1_acts, stage1_indices, stage1_scores = self._route_stage(
+        stage1_acts, stage1_indices, stage1_scores, _ = self._route_stage(
             residual,
             self.encoder.weight,
             self.encoder.bias,
@@ -1285,7 +1291,7 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
 
         stage2_input = residual - stage1_out
-        stage2_acts, stage2_indices, stage2_scores = self._route_stage(
+        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
             stage2_input,
             self.residual_encoder.weight,
             self.residual_encoder.bias,
@@ -1306,7 +1312,7 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
         trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
         residual = x_centered - trunk
 
-        stage1_acts, stage1_indices, stage1_scores = self._route_stage(
+        stage1_acts, stage1_indices, stage1_scores, stage1_routed = self._route_stage(
             residual,
             self.encoder.weight,
             self.encoder.bias,
@@ -1316,7 +1322,7 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
 
         stage2_input = residual - stage1_out
-        stage2_acts, stage2_indices, stage2_scores = self._route_stage(
+        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
             stage2_input,
             self.residual_encoder.weight,
             self.residual_encoder.bias,
@@ -1344,9 +1350,7 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
             aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
 
             _, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
-            aux1_acts = F.relu(
-                F.linear(residual, self.encoder.weight, self.encoder.bias)
-            ).gather(-1, aux1_indices)
+            aux1_acts = stage1_routed.gather(-1, aux1_indices)
             aux1_out = self.decode_residual(aux1_acts, aux1_indices)
 
             aux2_input = residual - aux1_out
@@ -1359,13 +1363,14 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
             aux2_router_logits = (
                 self.stage2_router(aux2_input) / self.cfg.gated_temperature
             )
+            aux2_routed = aux2_full * torch.sigmoid(aux2_router_logits)
             aux_stage2 = torch.where(
                 dead_mask[None],
-                aux2_full + 0.1 * torch.tanh(aux2_router_logits),
+                aux2_routed + 0.1 * torch.tanh(aux2_router_logits),
                 -torch.inf,
             )
             _, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
-            aux2_acts = aux2_full.gather(-1, aux2_indices)
+            aux2_acts = aux2_routed.gather(-1, aux2_indices)
             aux2_out = self.decode_residual(aux2_acts, aux2_indices)
 
             e_hat = trunk + aux1_out + aux2_out + self.b_dec
@@ -1569,6 +1574,93 @@ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
             scale = min(num_dead / k_aux, 1.0)
             k_aux = min(k_aux, num_dead)
             auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankJumpReLUResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with JumpReLU-smoothed sparse residual selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+
+        threshold = torch.full(
+            (self.num_latents,),
+            cfg.jumprelu_init_threshold,
+            device=self.device,
+            dtype=self.dtype,
+        ).clamp_min(torch.finfo(self.dtype).tiny)
+        init = torch.full(
+            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+        )
+        init.copy_(torch.log(torch.expm1(threshold)))
+        self.log_threshold = nn.Parameter(init)
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def _jump_acts(self, residual: Tensor) -> tuple[Tensor, Tensor]:
+        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid((positive - self.threshold) / self.cfg.jumprelu_bandwidth)
+        return positive * gate, pre_acts
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        acts, pre_acts = self._jump_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, pre_acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        acts, pre_acts = self._jump_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
             e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()

@@ -1,0 +1,116 @@
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
+             "lowrank_gated_residual",
++            "lowrank_jumprelu_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+             "whitened_topk",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return WhitenedLowRankResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
++    if architecture == "lowrank_jumprelu_residual":
++        return LowRankJumpReLUResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+         return WhitenedLowRankGatedResidualSparseCoder
+     if architecture == "lowrank_grouped_residual":
+@@ -1591,6 +1593,93 @@
+         )
+ 
+ 
++class LowRankJumpReLUResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with JumpReLU-smoothed sparse residual selection."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++
++        threshold = torch.full(
++            (self.num_latents,),
++            cfg.jumprelu_init_threshold,
++            device=self.device,
++            dtype=self.dtype,
++        ).clamp_min(torch.finfo(self.dtype).tiny)
++        init = torch.full(
++            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
++        )
++        init.copy_(torch.log(torch.expm1(threshold)))
++        self.log_threshold = nn.Parameter(init)
++
++    @property
++    def threshold(self) -> Tensor:
++        return F.softplus(self.log_threshold)
++
++    def _jump_acts(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid((positive - self.threshold) / self.cfg.jumprelu_bandwidth)
++        return positive * gate, pre_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        acts, pre_acts = self._jump_acts(residual)
++        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++        return EncoderOutput(top_acts, top_indices, pre_acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        acts, pre_acts = self._jump_acts(residual)
++        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class WhitenedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk with normalized residual preconditioning before top-k coding."""
+ 
