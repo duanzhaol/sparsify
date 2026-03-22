@@ -146,6 +146,11 @@ def run_training(
         parsed["expansion_factor"] = config_json.get("expansion_factor")
     if parsed.get("checkpoint") is None and checkpoint_dir is not None:
         parsed["checkpoint"] = str(checkpoint_dir)
+    # If log didn't contain val_fvu summary line, use observed_fvu from metrics
+    if parsed.get("val_fvu") is None and observed_fvu is not None:
+        parsed["val_fvu"] = observed_fvu
+        if parsed.get("status") in (None, "crash"):
+            parsed["status"] = "ok"
 
     decision = decide(state.frontier, parsed)
 
