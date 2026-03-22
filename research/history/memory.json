@@ -1,7 +1,6 @@
 {
   "current_focus": "Treat K=128 only as the initial search anchor, not as a success criterion. The research objective is to find configurations whose FVU is dramatically better than the current K=128 baseline, with a target on the order of halving that baseline FVU before rewarding smaller K or lower cost.",
   "architecture_findings": [
-    "round 22: The current `lowrank_residual` family has finished a clean EF=32 stabilization sweep across K={32,64,128}, and the search has gone many rounds without a new family. A narrow next bet is to keep the winning low-rank trunk intact and change only the sparse residual selector: add a gated residual branch so support selection can focus sparse capacity on the hardest residual directions at the K=128 quality anchor. If low-rank decomposition is already the right backbone, this should be a higher-signal architecture probe than another local sweep on the existing family. -> keep (fvu=0.06634617038071156, observed_fvu=0.065179, k=128, health=normal, termination=completed)",
     "round 30: Recent lowrank_gated_residual sweeps exhausted local LR/aux/EF tuning without improving the K=128 anchor, and policy blocks opening a third incubating family. The least-bad informative move is to advance the existing incubating `whitened_topk` family by strengthening its preconditioner: normalize activations first, then apply a low-rank residual mixer around identity before TopK selection. If the earlier `whitened_topk` result failed because its shallow raw linear map was too weak and poorly conditioned, this stabilized geometry change could reopen quality gains under the current strong recipe. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 31: Round 30 showed that the revised `whitened_topk` path still trips the runtime's behavioral-diff gate as identical to baseline, so this round should repair that blocker instead of opening another architecture or returning to exhausted lowrank-gated sweeps. By making `whitened_topk` explicitly mean-center each sample and inject a fixed cross-channel roll mix before the learned low-rank preconditioner, the family should become observably distinct from plain top-k at step 0 while preserving the same input-geometry hypothesis. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=identical_to_baseline)",
     "round 35: Ten no-improve rounds indicate the current fixed-per-sample-K search direction is fundamentally flawed, and recent pivots like `jumprelu` and `two_stage_residual` still stayed far behind the frontier. The next coherent architecture move is to change the sparsity mechanism itself: add `adaptive_budget_topk`, which keeps the same overall batch budget but allocates support dynamically across samples based on encoding difficulty instead of enforcing a rigid per-sample K. If hard examples need more active features and easy examples need fewer, this dynamic-budget routing could improve the quality frontier without changing the execution layer. -> incubate (fvu=0.22683675587177277, observed_fvu=0.220857, k=128, health=normal, termination=completed)",
@@ -20,7 +19,8 @@
     "round 84: The crash is a pure registration blocker: `residual_vq_topk` is missing from the architecture whitelist in `sparsify/config.py` and likely not wired into the factory path in `sparsify/sparse_coder.py`. Patch only that registration path so the unchanged `K=32, EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` proxy can instantiate. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)",
     "round 85: The crash is a pure registration blocker: `residual_vq` is missing from the architecture whitelist in `sparsify/config.py` and likely not wired into the constructor dispatch in `sparsify/sparse_coder.py`. Patch only that registration path so the unchanged `K=32, EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` proxy can instantiate. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)",
     "round 87: At low K, the residual after the low-rank trunk is likely still poorly conditioned at `EF=12`, so support selection is wasting budget on scale/correlation artifacts. A new `whitened_lowrank_gated_residual` family that RMS-centers and lightly mixes the residual before gated top-k selection may improve same-`(K=40, EF=12)` FVU over the discarded `lowrank_gated_residual` local baseline without increasing K or EF. -> incubate (fvu=0.5214065499603748, observed_fvu=0.799524, k=40, health=normal, termination=completed)",
-    "round 88: The original `residual_vq` proxy target is still the right experiment; the failure was a pure engineering blocker because `residual_vq` was not registered in config validation or factory dispatch. Patch the registration path and add the minimal runnable `residual_vq` class so the same `K=32, EF=12` proxy can instantiate and run. -> incubate (fvu=0.26075503416359425, observed_fvu=0.252176, k=32, health=normal, termination=completed)"
+    "round 88: The original `residual_vq` proxy target is still the right experiment; the failure was a pure engineering blocker because `residual_vq` was not registered in config validation or factory dispatch. Patch the registration path and add the minimal runnable `residual_vq` class so the same `K=32, EF=12` proxy can instantiate and run. -> incubate (fvu=0.26075503416359425, observed_fvu=0.252176, k=32, health=normal, termination=completed)",
+    "round 89: Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "performance_findings": [
     "round 32: family=group_topk stage=prototype change=edit_sae_code decision=crash fvu=None termination=invalid_env_overrides",
@@ -1429,27 +1429,32 @@
       "best_proxy_fvu": null,
       "best_full_fvu": null,
       "last_round": 87
+    },
+    "two_code_residual_vq": {
+      "status": "incubating",
+      "goal": "new_family",
+      "design_hypothesis": "Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF.",
+      "tested_configs": [
+        {
+          "round": 89,
+          "stage": "prototype",
+          "k": null,
+          "decision": "policy_reject",
+          "val_fvu": null,
+          "run_health": "policy_reject"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `two_code_residual_vq` at `K=32, EF=12` is competitive, keep the family fixed and map `K=40, EF=12` before touching EF.",
+        "If it runs cleanly but remains weak, archive the discrete residual-VQ line for now and pivot to a different low-K family such as mixture routing rather than deeper retuning of this branch."
+      ],
+      "best_proxy_fvu": null,
+      "best_full_fvu": null,
+      "last_round": 89
     }
   },
   "recent_rounds": [
-    {
-      "round": 77,
-      "hypothesis": "After 27 no-improve rounds and 13 rounds without a new family, the least-bad informative move is a real low-K architecture pivot: run `multi_branch_gated` at `K=32`, `EF=16` with the stable `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe to test whether branch-specialized gated routing preserves more quality than the current low-K residual families under the required `EF<=16` regime.",
-      "change_type": "param_only",
-      "expected_win": "smaller_k",
-      "family_name": "multi_branch_gated",
-      "family_stage": "stabilize",
-      "decision": "incubate",
-      "val_fvu": "0.36755063384771347",
-      "observed_fvu": "0.367184",
-      "k": "32",
-      "architecture": "multi_branch_gated",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "41472.546367",
-      "baseline_ratio": "0.622982"
-    },
     {
       "round": 78,
       "hypothesis": "After `adaptive_budget_topk` and `multi_branch_gated` both stayed clearly weak at the low-K target, the next informative move is a different problem framing rather than another routing tweak: run `whitened_topk` at `K=32`, `EF=12` with the stable `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe to test whether input-space preconditioning makes the activation geometry easier to sparsify in the preferred low-K mainline band.",
@@ -1653,14 +1658,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "190244.304803",
       "baseline_ratio": ""
+    },
+    {
+      "round": 89,
+      "hypothesis": "Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "two_code_residual_vq",
+      "family_stage": "prototype",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "two_code_residual_vq",
+      "touched_files": [],
+      "run_health": "policy_reject",
+      "termination_reason": "incubation_limit_exceeded",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "round 81: Patch the existing `residual_vq_topk` prototype registration so the unchanged low-K proxy experiment can instantiate under the original `K=32`, `EF=12`, `signum`, `lr=1.6e-3`, `auxk_alpha=0` target. -> crash (fvu=None, observed_fvu=None, k=None, health=crash, termination=repair_no_effect)",
-    "Crash recovery mode forced a param-only round on the best working family rather than another architecture pivot.",
-    "Use `lowrank_gated_residual` as the stability anchor during consecutive-crash recovery; keep the optimizer and LR recipe fixed unless stability evidence fails.",
-    "This round restores a legal EF<=16 comparison while still honoring the low-K priority.",
-    "round 82: Crash recovery mode rules out further code changes, so the next stability-first move is to return to the strongest working family and make one conservative parameter-only adjustment that still respects the low-K priority: run `lowrank_gated_residual` at `K=32`, `EF=12` with the stable `signum`/`lr=1.6e-3`/`auxk_alpha=0` recipe to get a clean low-K signal in the preferred EF band. -> discard (fvu=0.18123700469732285, observed_fvu=0.180633, k=32, health=normal, termination=completed)",
     "Round 83: variable isolation warning: Multiple primary variables changed simultaneously: architecture, k, lr",
     "Round 82 restored stability but did not recover competitive low-K quality on `lowrank_gated_residual` at `K=32, EF=12`.",
     "The next stagnation-breaking step should be an architecture change in the same EF band, not another local parameter tweak on the current best family.",
@@ -1695,11 +1713,16 @@
     "Repair attempt 1 for round 88 fixed the concrete `Unknown architecture: residual_vq` crash by adding config validation support, class dispatch, and a minimal runnable `ResidualVQSparseCoder`.",
     "A local forward/backward smoke test for `architecture=residual_vq`, `K=32`, `EF=12` completed successfully after the patch.",
     "repair attempt 1: runtime preserved the original experiment target and constrained this step to blocker repair only",
-    "round 88: The original `residual_vq` proxy target is still the right experiment; the failure was a pure engineering blocker because `residual_vq` was not registered in config validation or factory dispatch. Patch the registration path and add the minimal runnable `residual_vq` class so the same `K=32, EF=12` proxy can instantiate and run. -> incubate (fvu=0.26075503416359425, observed_fvu=0.252176, k=32, health=normal, termination=completed)"
+    "round 88: The original `residual_vq` proxy target is still the right experiment; the failure was a pure engineering blocker because `residual_vq` was not registered in config validation or factory dispatch. Patch the registration path and add the minimal runnable `residual_vq` class so the same `K=32, EF=12` proxy can instantiate and run. -> incubate (fvu=0.26075503416359425, observed_fvu=0.252176, k=32, health=normal, termination=completed)",
+    "Round 89: variable isolation warning: Multiple primary variables changed simultaneously: code_edit, architecture, k, lr",
+    "round 89: BLOCKED by incubation limit: Cannot create new incubating family 'two_code_residual_vq': already 5 incubating families (limit: 5). Stale families that could be archived: []",
+    "Round 89 promotes the discrete branch from single-code `residual_vq` to a more expressive `two_code_residual_vq` prototype at the same low-K target.",
+    "The comparison remains fixed at `K=32, EF=12` so any gain is attributable to architecture rather than capacity.",
+    "round 89: Single-code `residual_vq` is likely too coarse at `K=32, EF=12`, leaving too much residual burden for the sparse correction. A new `two_code_residual_vq` family that composes two hard codebook selections before the same sparse residual stage may recover a better low-K tradeoff by moving more structure into the discrete trunk without raising K or EF. -> policy_reject (fvu=None, observed_fvu=None, k=None, health=policy_reject, termination=incubation_limit_exceeded)"
   ],
   "next_hypotheses": [
-    "If the retried `residual_vq` run now crashes deeper in training, do a second narrow repair on the concrete new traceback without changing the experiment target.",
-    "If the run completes, judge the family on low-K quality before any further architectural edits."
+    "If `two_code_residual_vq` at `K=32, EF=12` is competitive, keep the family fixed and map `K=40, EF=12` before touching EF.",
+    "If it runs cleanly but remains weak, archive the discrete residual-VQ line for now and pivot to a different low-K family such as mixture routing rather than deeper retuning of this branch."
   ],
   "recent_sanity_failures": [
     {
