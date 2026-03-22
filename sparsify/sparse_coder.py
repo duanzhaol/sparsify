@@ -315,6 +315,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankResidualSparseCoder
     if architecture == "lowrank_gated_residual":
         return LowRankGatedResidualSparseCoder
+    if architecture == "whitened_lowrank_gated_residual":
+        return WhitenedLowRankGatedResidualSparseCoder
     if architecture == "lowrank_grouped_residual":
         return LowRankGroupedResidualSparseCoder
     if architecture == "two_stage_residual":
@@ -941,6 +943,114 @@ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
         gate_logits = self.gate_encoder(residual) / self.cfg.gated_temperature
         gate = torch.sigmoid(gate_logits)
         acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class WhitenedLowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with whitened residual support selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        mix_rank = min(d_in, max(cfg.k * 2, d_in // 8))
+        self.preconditioner_down = nn.Linear(
+            d_in, mix_rank, bias=False, device=device, dtype=dtype
+        )
+        self.preconditioner_up = nn.Linear(
+            mix_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+
+        # Keep the initial behavior close to a stable normalized identity while
+        # ensuring the architecture is observably distinct from plain residual gating.
+        self.gate_encoder.weight.data.zero_()
+        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+        self.preconditioner_down.weight.data.zero_()
+        self.preconditioner_up.weight.data.zero_()
+        diagonal = min(d_in, mix_rank)
+        self.preconditioner_down.weight.data[:diagonal, :diagonal] = torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+        self.preconditioner_up.weight.data[:diagonal, :diagonal] = 0.05 * torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+
+    def _precondition_residual(self, residual: Tensor) -> Tensor:
+        centered = residual - residual.mean(dim=-1, keepdim=True)
+        rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
+        normalized = centered * rms
+        mixed = normalized + 0.25 * torch.roll(normalized, shifts=1, dims=-1)
+        correction = self.preconditioner_up(self.preconditioner_down(normalized))
+        return mixed + correction
+
+    def _compute_acts(self, residual: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        conditioned = self._precondition_residual(residual)
+        pre_acts = F.linear(conditioned, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(conditioned) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+        acts = positive * gate
+        return acts, conditioned, pre_acts
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        acts, _, _ = self._compute_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+
+        acts, _, _ = self._compute_acts(residual)
         top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
 
         sparse_residual = self.decode_residual(top_acts, top_indices)
