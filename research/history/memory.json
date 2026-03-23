@@ -744,7 +744,7 @@
     },
     "batch_topk": {
       "status": "discarded",
-      "design_hypothesis": "After repeated failures from residual/gating variants, relaxing the per-sample hard support constraint may recover a better mid-K tradeoff: `batch_topk` at `K=24, EF=12` could improve reconstruction efficiency over fixed-sample top-k and challenge the current `K=24` frontier point without increasing K or EF.",
+      "design_hypothesis": "`batch_topk` is a fundamentally different sparsity mechanism from the exhausted low-rank residual/codebook families, and at `K=32` it may create a better Pareto tradeoff by reallocating a fixed average budget across easy and hard samples instead of forcing the same per-token support everywhere.",
       "tested_configs": [
         {
           "round": 45,
@@ -753,16 +753,24 @@
           "decision": "discard",
           "val_fvu": "0.2933202087879181",
           "run_health": "normal"
+        },
+        {
+          "round": 166,
+          "stage": "proto",
+          "k": "32",
+          "decision": "discard",
+          "val_fvu": "0.26365309953689575",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If `batch_topk` is competitive but slightly worse at K=24, test K=16 to see whether flexible budget allocation helps more at tighter sparsity.",
-        "If `batch_topk` clearly loses at K=24, reject this support-allocation branch and move to another fundamentally different family such as `residual_vq` rather than any scalar sweep.",
-        "If `batch_topk` wins at K=24, follow with K=16 or K=32 to map whether the gain generalizes across the mid-K band."
+        "If `batch_topk` is competitive at `K=32`, follow with `K=64` on the same family to map whether flexible budget allocation improves the small-to-mid-K frontier.",
+        "If `batch_topk` shows partial promise but misses on final FVU, keep the sparsity-mechanism direction active and test another fundamentally different selector such as `jumprelu` at `K=32` rather than returning to low-rank recipe tweaks.",
+        "If `batch_topk` clearly loses, deprioritize average-budget allocation in the current regime and move to the next fundamentally different existing family instead of more minor recipe changes on the current backbone."
       ],
       "best_fvu": null,
-      "last_round": 45
+      "last_round": 166
     },
     "residual_vq": {
       "status": "discarded",
@@ -1995,24 +2003,6 @@
   },
   "recent_rounds": [
     {
-      "round": 154,
-      "hypothesis": "After both plain and grouped soft-codebook variants failed at `K=24`, the next severe-stagnation step should be a fundamentally different existing architecture rather than more tuning on the same representation family. `lowrank_residual_vq` is the strongest remaining candidate for this slot because it replaces soft-codebook mixing with discrete residual quantization, which could yield a different small-K Pareto tradeoff under the fixed `EF=16` recipe even though its `K=32` result was not frontier-winning.",
-      "change_type": "param_only",
-      "expected_win": "pareto_tradeoff",
-      "family_name": "lowrank_residual_vq",
-      "family_stage": "mainline",
-      "decision": "discard",
-      "val_fvu": "0.10021845251321793",
-      "observed_fvu": "0.100218",
-      "k": "24",
-      "architecture": "lowrank_residual_vq",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "185046.355813",
-      "baseline_ratio": "0.888899"
-    },
-    {
       "round": 155,
       "hypothesis": "After plain soft-codebook, grouped soft-codebook, and residual-VQ all failed at `K=24`, the next severe-stagnation move should remain a fundamentally different existing architecture rather than any minor recipe tweak. `lowrank_jumprelu_residual` is the strongest remaining candidate for this slot because it changes the sparsity mechanism itself from top-k/codebook-style selection to thresholded JumpReLU gating, which may preserve a better low-K tradeoff under the fixed `EF=16` signum recipe.",
       "change_type": "param_only",
@@ -2209,12 +2199,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "111027.878909",
       "baseline_ratio": "0.800002"
+    },
+    {
+      "round": 166,
+      "hypothesis": "`batch_topk` is a fundamentally different sparsity mechanism from the exhausted low-rank residual/codebook families, and at `K=32` it may create a better Pareto tradeoff by reallocating a fixed average budget across easy and hard samples instead of forcing the same per-token support everywhere.",
+      "change_type": "param_only",
+      "expected_win": "new_pareto_point",
+      "family_name": "batch_topk",
+      "family_stage": "proto",
+      "decision": "discard",
+      "val_fvu": "0.26365309953689575",
+      "observed_fvu": "0.263653",
+      "k": "32",
+      "architecture": "batch_topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "151400.688757",
+      "baseline_ratio": "0.818186"
     }
   ],
   "recent_insights": [
-    "NOTE: Round 154 continues severe-stagnation recovery by testing `lowrank_residual_vq` at `K=24, EF=16` after multiple soft-codebook-family architecture probes at the same slot failed.",
-    "NOTE: This round isolates architecture only: discrete residual quantization versus soft-codebook composition under the same signum `LR=3.2e-3` recipe.",
-    "NOTE: If `lowrank_residual_vq` also loses clearly at `K=24`, treat residual-VQ as noncompetitive in the current small-K EF=16 lane and continue to the next fundamentally different existing family rather than returning to minor tweaks.",
     "r154 lowrank_residual_vq param_only k24 -> discard fvu=0.10021845251321793",
     "NOTE: Round 155 continues severe-stagnation recovery with another fundamentally different existing architecture at `K=24, EF=16`: `lowrank_jumprelu_residual`.",
     "NOTE: This round isolates the sparsity mechanism change only, keeping the recipe pinned to signum + `LR=3.2e-3` + no Hadamard so attribution stays on architecture.",
@@ -2251,13 +2256,16 @@
     "r164 lowrank_soft_codebook_residual param_only k24 -> discard fvu=0.09616655856370926",
     "NOTE: Round 165 continues severe-stagnation architecture search after plain single-stage soft-codebook residual also failed to improve the `K=24, EF=16` lane.",
     "NOTE: Hypothesis: `lowrank_asymmetric_two_stage_soft_codebook_residual` is the next most informative remaining architecture because asymmetric stage allocation may scale better at `K=24` than the recently exhausted symmetric two-stage, routed, bucketed, residual-only, and single-stage codebook variants under the fixed signum recipe.",
-    "r165 lowrank_asymmetric_two_stage_soft_codebook_residual param_only k24 -> discard fvu=0.09228739142417908"
+    "r165 lowrank_asymmetric_two_stage_soft_codebook_residual param_only k24 -> discard fvu=0.09228739142417908",
+    "NOTE: Round 166 hypothesis: under severe stagnation, switch from repeated low-rank family probes to a fundamentally different sparsity mechanism by testing `batch_topk` at `K=32, EF=16` under the fixed modern signum recipe.",
+    "NOTE: Rationale for `K=32`: this is a high-value small-K frontier target where budget reallocation across samples could matter more than at high K, so even a modest improvement would be strategically useful.",
+    "r166 batch_topk param_only k32 -> discard fvu=0.26365309953689575"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [],
   "next_hypotheses": [
-    "If `lowrank_asymmetric_two_stage_soft_codebook_residual` is competitive at `K=24`, follow with `K=16` on the same family to test whether the asymmetric stage split helps further down the frontier.",
-    "If it is close but still behind the bucketed soft-codebook backbone, test another fundamentally different existing family at `K=24` rather than returning to scalar recipe tweaks.",
-    "If it clearly loses at `K=24`, deprioritize asymmetric two-stage soft-codebook composition in the current EF=16 regime and continue severe-stagnation search with the next distinct architecture."
+    "If `batch_topk` is competitive at `K=32`, follow with `K=64` on the same family to map whether flexible budget allocation improves the small-to-mid-K frontier.",
+    "If `batch_topk` shows partial promise but misses on final FVU, keep the sparsity-mechanism direction active and test another fundamentally different selector such as `jumprelu` at `K=32` rather than returning to low-rank recipe tweaks.",
+    "If `batch_topk` clearly loses, deprioritize average-budget allocation in the current regime and move to the next fundamentally different existing family instead of more minor recipe changes on the current backbone."
   ]
 }
