@@ -1433,7 +1433,7 @@
     },
     "routed_lowrank_two_stage_soft_codebook_residual": {
       "status": "active",
-      "design_hypothesis": "Enabling block-Hadamard preprocessing on the current strongest K=16 family may improve the small-K tradeoff by decorrelating activations before routing/codebook selection, without opening another architecture branch.",
+      "design_hypothesis": "Switching the current strongest K=16 backbone from signum to Adam may improve low-K optimization under the fixed EF=16 regime, because routed soft-codebook residual paths likely need smoother magnitude-aware updates than sign-based steps.",
       "tested_configs": [
         {
           "round": 91,
@@ -1522,16 +1522,24 @@
           "decision": "discard",
           "val_fvu": "0.1580851823091507",
           "run_health": "normal"
+        },
+        {
+          "round": 123,
+          "stage": "mainline",
+          "k": "16",
+          "decision": "discard",
+          "val_fvu": "0.45534661412239075",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If Hadamard improves the K=16 point, propagate it to K=32 on the same family to test whether the gain is localized to the small-K lane or general.",
-        "If Hadamard is neutral or worse here, keep preprocessing skepticism high and try the next under-explored training dimension: `OPTIMIZER=adam` on an existing competitive K=16 or K32 family.",
-        "If the EF=16 regime itself looks unstable relative to prior EF=12 behavior, run one plain non-Hadamard EF=16 control on the same family before drawing strong conclusions about preprocessing."
+        "If Adam improves K=16, propagate Adam to K=32 on the strongest matching backbone to test whether the benefit generalizes beyond the smallest frontier-relevant slot.",
+        "If Adam is neutral or worse on this routed family, try Adam on `lowrank_two_stage_soft_codebook_residual` at K=32 rather than continuing on routing-heavy variants.",
+        "If optimizer changes continue to fail under EF=16, run one EF=16 signum control on a second strong existing family to determine whether the fixed-EF regime itself is the dominant regression source."
       ],
       "best_fvu": 0.056539177894592285,
-      "last_round": 122
+      "last_round": 123
     },
     "adaptive_budget_topk": {
       "status": "discarded",
@@ -1667,24 +1675,6 @@
     }
   },
   "recent_rounds": [
-    {
-      "round": 111,
-      "hypothesis": "After twelve non-improving rounds, another fundamentally different selector is warranted; `lowrank_jumprelu_residual` may recover a better K=24 tradeoff than recent gated, adaptive-budget, and discrete branches by smoothing support selection on top of the proven low-rank residual trunk.",
-      "change_type": "param_only",
-      "expected_win": "small_k_frontier",
-      "family_name": "lowrank_jumprelu_residual",
-      "family_stage": "prototype",
-      "decision": "discard",
-      "val_fvu": "0.1026327833533287",
-      "observed_fvu": "0.102633",
-      "k": "24",
-      "architecture": "lowrank_jumprelu_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "185045.267916",
-      "baseline_ratio": "1.000001"
-    },
     {
       "round": 112,
       "hypothesis": "After thirteen non-improving rounds, the next useful step is another fundamentally different architecture rather than any recipe tweak; `bucketed_lowrank_residual` may recover a better K=24 tradeoff by routing samples between specialized low-rank residual dictionaries instead of forcing one global selector.",
@@ -1894,13 +1884,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "83270.859502",
       "baseline_ratio": "0.799999"
+    },
+    {
+      "round": 123,
+      "hypothesis": "Switching the current strongest K=16 backbone from signum to Adam may improve low-K optimization under the fixed EF=16 regime, because routed soft-codebook residual paths likely need smoother magnitude-aware updates than sign-based steps.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "routed_lowrank_two_stage_soft_codebook_residual",
+      "family_stage": "mainline",
+      "decision": "discard",
+      "val_fvu": "0.45534661412239075",
+      "observed_fvu": "0.455347",
+      "k": "16",
+      "architecture": "routed_lowrank_two_stage_soft_codebook_residual",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "69391.010814",
+      "baseline_ratio": "0.666652"
     }
   ],
   "recent_insights": [
-    "NOTE: Round 114 should satisfy severe-stagnation policy with a fundamentally different built-in family rather than another selector tweak.",
-    "NOTE: `whitened_lowrank_residual` is already registered in `sparsify/config.py` and `_get_sae_class()`; this round is parameter-only, but mark sanity required because the family has not been run in the current controlled loop.",
-    "NOTE: Keep the override set minimal and exact so the result is attributable to architecture alone at the frontier-relevant K=24 slot.",
-    "r114 whitened_lowrank_residual param_only k24 -> discard fvu=8473.23046875",
     "NOTE: Round 115 should satisfy severe-stagnation policy by introducing a genuinely new architecture instead of another param-only retry after the catastrophic `whitened_lowrank_residual` miss.",
     "NOTE: Implement `lowrank_asymmetric_two_stage_soft_codebook_residual` as a variant of the existing two-stage soft-codebook family with an intentionally uneven stage budget so more of K is spent in stage 1 and less in stage 2.",
     "NOTE: Complete the full registration chain before training: add the exact architecture string to `valid_archs`, dispatch it in `_get_sae_class()`, implement the concrete class in `sparsify/sparse_coder.py`, then run the exact instantiate/forward/backward smoke test at `(architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12)`.",
@@ -1936,7 +1940,11 @@
     "NOTE: Round 122 shifts from architecture search to preprocessing per operator guidance: first explicit `USE_HADAMARD=1` probe on an existing frontier family.",
     "NOTE: Target K=16 because smaller K remains the highest-value regime and routed two-stage soft-codebook is the strongest available backbone there.",
     "NOTE: Keep the override set minimal and exact so attribution stays on preprocessing rather than architecture or optimizer drift.",
-    "r122 routed_lowrank_two_stage_soft_codebook_residual param_only k16 -> discard fvu=0.1580851823091507"
+    "r122 routed_lowrank_two_stage_soft_codebook_residual param_only k16 -> discard fvu=0.1580851823091507",
+    "NOTE: Round 123 shifts from failed preprocessing to optimizer exploration because `USE_HADAMARD=1` strongly degraded K=16 performance.",
+    "NOTE: The current codebase exposes only `signum` and `adam` as optimizer choices; no alternative configurable loss is available without editing `sparsify/`.",
+    "NOTE: Target the incumbent K=16 routed two-stage soft-codebook family so the result isolates optimizer effects in the highest-value small-K lane under the new fixed EF=16 policy.",
+    "r123 routed_lowrank_two_stage_soft_codebook_residual param_only k16 -> discard fvu=0.45534661412239075"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [
@@ -1981,8 +1989,8 @@
     }
   ],
   "next_hypotheses": [
-    "If Hadamard improves the K=16 point, propagate it to K=32 on the same family to test whether the gain is localized to the small-K lane or general.",
-    "If Hadamard is neutral or worse here, keep preprocessing skepticism high and try the next under-explored training dimension: `OPTIMIZER=adam` on an existing competitive K=16 or K32 family.",
-    "If the EF=16 regime itself looks unstable relative to prior EF=12 behavior, run one plain non-Hadamard EF=16 control on the same family before drawing strong conclusions about preprocessing."
+    "If Adam improves K=16, propagate Adam to K=32 on the strongest matching backbone to test whether the benefit generalizes beyond the smallest frontier-relevant slot.",
+    "If Adam is neutral or worse on this routed family, try Adam on `lowrank_two_stage_soft_codebook_residual` at K=32 rather than continuing on routing-heavy variants.",
+    "If optimizer changes continue to fail under EF=16, run one EF=16 signum control on a second strong existing family to determine whether the fixed-EF regime itself is the dominant regression source."
   ]
 }
