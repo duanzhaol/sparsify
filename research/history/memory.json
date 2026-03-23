@@ -298,6 +298,13 @@
       "architecture": "whitened_lowrank_two_stage_soft_codebook_residual",
       "k": 16,
       "updated_at": 1774248951
+    },
+    "standard|routed_lowrank_two_stage_residual|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 83271.13769886146,
+      "round": 162,
+      "architecture": "routed_lowrank_two_stage_residual",
+      "k": 24,
+      "updated_at": 1774276515
     }
   },
   "architecture_families": {
@@ -478,8 +485,8 @@
       "last_round": 159
     },
     "routed_lowrank_two_stage_residual": {
-      "status": "incubating",
-      "design_hypothesis": "`routed_lowrank_two_stage_residual` was previously blocked by a training-graph issue: its routers only influenced top-k indices, so DDP could treat router parameters as unused. Routing the selected activation magnitudes themselves should stabilize training and give the architecture a fair mid-K test against the current `K=16` frontier point.",
+      "status": "discarded",
+      "design_hypothesis": "After plain low-rank, two-stage, and grouped residual variants all failed at `K=24, EF=16`, the next severe-stagnation move should still be a fundamentally different existing architecture rather than another minor recipe tweak. `routed_lowrank_two_stage_residual` is the strongest remaining candidate for this slot because routing changes capacity allocation more materially than the recently failed global residual families, and this family historically performed best in the mid-K band even though it has not been given a clean modern `K=24, EF=16` mainline comparison.",
       "tested_configs": [
         {
           "round": 31,
@@ -488,18 +495,26 @@
           "decision": "crash",
           "val_fvu": null,
           "run_health": "crash"
+        },
+        {
+          "round": 162,
+          "stage": "mainline",
+          "k": "24",
+          "decision": "discard",
+          "val_fvu": "0.09431985020637512",
+          "run_health": "normal"
         }
       ],
       "known_issues": [
         "round 31: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by"
       ],
       "next_steps": [
-        "If the repaired `routed_lowrank_two_stage_residual` runs cleanly and beats the current `K=16` point, run the same family at `K=24, EF=12` to test whether routing helps across the mid-K band.",
-        "If it runs cleanly but is clearly worse than the current `K=16` frontier point, retire this routed branch and return to a genuinely new architecture family next round.",
-        "If it still crashes under the fixed launcher, treat the remaining issue as trainer/runtime integration rather than architecture quality and inspect the distributed training path before further family search."
+        "If `routed_lowrank_two_stage_residual` is competitive at `K=24`, follow with `K=16` on the same family to test whether routing extends the frontier further downward.",
+        "If it is close but still behind the bucketed backbone, test another fundamentally different existing family at `K=24` rather than returning to scalar recipe tweaks.",
+        "If it clearly loses or exhibits routing-specific instability, deprioritize routed residual selection in the current EF=16 regime and continue severe-stagnation search with the next distinct architecture."
       ],
       "best_fvu": null,
-      "last_round": 50
+      "last_round": 162
     },
     "lowrank_residual": {
       "status": "active",
@@ -1956,24 +1971,6 @@
   },
   "recent_rounds": [
     {
-      "round": 150,
-      "hypothesis": "After nine non-improving rounds of architecture churn, the most informative remaining single-variable probe is preprocessing on the strongest current small-K backbone. `USE_HADAMARD=1` on `bucketed_lowrank_two_stage_soft_codebook_residual` at `K=32, EF=16` may improve the Pareto point by decorrelating activations before bucketed two-stage selection without the routing fragility that made the earlier routed K=16 Hadamard run fail badly.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "bucketed_lowrank_two_stage_soft_codebook_residual",
-      "family_stage": "mainline",
-      "decision": "discard",
-      "val_fvu": "0.08421140909194946",
-      "observed_fvu": "0.084211",
-      "k": "32",
-      "architecture": "bucketed_lowrank_two_stage_soft_codebook_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "59478.214523",
-      "baseline_ratio": "0.785695"
-    },
-    {
       "round": 151,
       "hypothesis": "The repeated failures from architecture churn and the fresh Hadamard miss suggest the remaining launcher-exposed opportunity is optimizer retuning, not more family swaps. Adam likely looked noncompetitive because it was tried at the signum-tuned `LR=3.2e-3`; on the strongest current low-K backbone, a materially lower Adam LR may recover a better `K=32, EF=16` tradeoff by avoiding the overshooting seen in earlier Adam probes.",
       "change_type": "param_only",
@@ -2170,12 +2167,27 @@
       "termination_reason": "completed",
       "tokens_per_sec": "185040.670266",
       "baseline_ratio": "0.888876"
+    },
+    {
+      "round": 162,
+      "hypothesis": "After plain low-rank, two-stage, and grouped residual variants all failed at `K=24, EF=16`, the next severe-stagnation move should still be a fundamentally different existing architecture rather than another minor recipe tweak. `routed_lowrank_two_stage_residual` is the strongest remaining candidate for this slot because routing changes capacity allocation more materially than the recently failed global residual families, and this family historically performed best in the mid-K band even though it has not been given a clean modern `K=24, EF=16` mainline comparison.",
+      "change_type": "param_only",
+      "expected_win": "pareto_tradeoff",
+      "family_name": "routed_lowrank_two_stage_residual",
+      "family_stage": "mainline",
+      "decision": "discard",
+      "val_fvu": "0.09431985020637512",
+      "observed_fvu": "0.094320",
+      "k": "24",
+      "architecture": "routed_lowrank_two_stage_residual",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "83271.137699",
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "NOTE: Round 151 shifts from failed architecture/preprocessing churn to the required optimizer-LR follow-up on the strongest current low-K backbone: `bucketed_lowrank_two_stage_soft_codebook_residual` at `K=32, EF=16`.",
-    "NOTE: Previous Adam failures at routed K16 and bucketed K64 both used `LR=3.2e-3`, so they should be interpreted primarily as evidence of LR mismatch or overshoot rather than a definitive optimizer verdict.",
-    "NOTE: This round tests Adam at `LR=8e-4` on the key `K=32` anchor with all other recipe fields pinned, to see whether optimizer retuning can open a non-dominated small-K tradeoff without more architecture changes.",
     "r151 bucketed_lowrank_two_stage_soft_codebook_residual param_only k32 -> discard fvu=0.08947867900133133",
     "NOTE: Round 152 follows severe-stagnation policy by returning to a fundamentally different existing architecture after preprocessing and optimizer retune both failed on the bucketed backbone.",
     "NOTE: `lowrank_two_stage_soft_codebook_residual` remains the most credible non-bucketed EF=16 family to probe, and `K=24` is a high-value smaller-K slot where a modest FVU increase could still produce a non-dominated tradeoff.",
@@ -2212,13 +2224,16 @@
     "r160 lowrank_residual param_only k24 -> discard fvu=0.10071488469839096",
     "NOTE: Round 161 continues severe-stagnation architecture search after plain low-rank residual coding also failed to improve the `K=24, EF=16` lane.",
     "NOTE: Hypothesis: `lowrank_grouped_residual` is the next materially different existing family because grouped local competition may allocate limited support better at small K than the recently exhausted global residual, two-stage, soft-codebook, VQ, and gating-style variants.",
-    "r161 lowrank_grouped_residual param_only k24 -> discard fvu=0.10066158324480057"
+    "r161 lowrank_grouped_residual param_only k24 -> discard fvu=0.10066158324480057",
+    "NOTE: Round 162 continues severe-stagnation architecture search after grouped low-rank residual coding also failed to improve the `K=24, EF=16` lane.",
+    "NOTE: Hypothesis: `routed_lowrank_two_stage_residual` is the next most informative fundamentally different existing family because routing may help the current mid-K slot more than the recently exhausted plain/grouped residual variants under the fixed modern signum recipe.",
+    "r162 routed_lowrank_two_stage_residual param_only k24 -> discard fvu=0.09431985020637512"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [],
   "next_hypotheses": [
-    "If `lowrank_grouped_residual` is competitive at `K=24`, follow with `K=16` on the same family to test whether grouping helps further down the frontier.",
+    "If `routed_lowrank_two_stage_residual` is competitive at `K=24`, follow with `K=16` on the same family to test whether routing extends the frontier further downward.",
     "If it is close but still behind the bucketed backbone, test another fundamentally different existing family at `K=24` rather than returning to scalar recipe tweaks.",
-    "If it clearly loses at `K=24`, deprioritize grouped low-rank residual coding in the current EF=16 regime and continue severe-stagnation search with the next distinct architecture."
+    "If it clearly loses or exhibits routing-specific instability, deprioritize routed residual selection in the current EF=16 regime and continue severe-stagnation search with the next distinct architecture."
   ]
 }
