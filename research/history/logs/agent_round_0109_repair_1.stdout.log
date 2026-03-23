@@ -1,0 +1,1238 @@
+{"command":"run","hypothesis":"The plain `adaptive_budget_topk` failure suggests dynamic support allocation needs a stronger representational backbone, not that the mechanism is useless; adding adaptive-budget selection on top of the proven low-rank residual trunk may produce a better K=24 tradeoff than either plain adaptive-budget or the recent soft-codebook branches.","summary":"Repaired the engineering blocker for `lowrank_adaptive_budget_residual` without changing the planned experiment. Added the architecture string to the whitelist in `sparsify/config.py`, added factory dispatch in `sparsify/sparse_coder.py`, and implemented `LowRankAdaptiveBudgetResidualSparseCoder` by combining the existing low-rank residual trunk with the existing adaptive-budget quota logic. Verified the exact target with an instantiate/forward/backward smoke test at `(architecture=lowrank_adaptive_budget_residual, K=24, EF=12)`, which passed on CUDA. The original round-109 experiment can now run unchanged.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"small_k_frontier","family_name":"lowrank_adaptive_budget_residual","family_stage":"prototype","self_review":"This repair stayed within `sparsify/` only and preserved the original family and override contract exactly. The prior failure was purely a registration-chain blocker; that chain is now closed and the exact smoke target passed, so the next run should measure the architecture rather than fail at parse/dispatch time.","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_adaptive_budget_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repaired `lowrank_adaptive_budget_residual` registration and implementation under `sparsify/`: whitelist entry, factory dispatch, and concrete class now exist.","Exact smoke test passed for `lowrank_adaptive_budget_residual` at `(K=24, EF=12)` with instantiate, forward, and backward on CUDA.","Round 109 repair attempt 1 resolved an `Unknown architecture` blocker, so the original experiment should now be rerun unchanged to evaluate the family scientifically."],"next_hypotheses":["If `lowrank_adaptive_budget_residual` is competitive at `K=24`, run the same fixed recipe at `K=16` or `K=32` to map whether the gain is localized or broad across the mid/low-K band.","If it runs cleanly but clearly loses at `K=24`, treat dynamic-budget routing as unpromising even with a strong low-rank backbone and move to a different mechanism entirely.","If the full run now fails with a new runtime or autograd issue, repair that new blocker before drawing any scientific conclusion about the architecture."],"primary_variable":"architecture"}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d1908-eb04-7cd0-b179-6f8af5c209b9
+--------
+user
+Continue round 109 in repair mode.
+
+The previous code-edit failed with an engineering blocker.
+Do NOT redesign the experiment. Do NOT change family_name or env_overrides.
+Patch the implementation so the original experiment can run.
+Stay within sparsify/ only.
+Attempt 1 of 5.
+Return one final JSON object matching the action schema.
+
+Architecture integration checklist:
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+Repair context:
+{
+  "round": 109,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "lowrank_adaptive_budget_residual",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "lowrank_adaptive_budget_residual"
+      },
+      {
+        "key": "K",
+        "value": "24"
+      },
+      {
+        "key": "EXPANSION_FACTOR",
+        "value": "12"
+      },
+      {
+        "key": "OPTIMIZER",
+        "value": "signum"
+      },
+      {
+        "key": "LR",
+        "value": "3.2e-3"
+      },
+      {
+        "key": "AUXK_ALPHA",
+        "value": "0.0"
+      }
+    ],
+    "summary": "Severe stagnation is active and recent fundamentally different probes have still lost, so the next step should be a new architecture rather than another recipe tweak. Add and test `lowrank_adaptive_budget_residual` under `sparsify/` only: reuse the winning low-rank residual trunk, replace fixed per-sample TopK selection with an adaptive-budget selector, and evaluate it first at the valuable `K=24` anchor with the stable EF=12/signum/LR=3.2e-3 recipe. This is one clean architectural hypothesis: dynamic budget allocation may only become competitive once paired with the stronger low-rank decomposition.",
+    "hypothesis": "The plain `adaptive_budget_topk` failure suggests dynamic support allocation needs a stronger representational backbone, not that the mechanism is useless; adding adaptive-budget selection on top of the proven low-rank residual trunk may produce a better K=24 tradeoff than either plain adaptive-budget or the recent soft-codebook branches."
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774243321",
+    "k": "24",
+    "architecture": "lowrank_adaptive_budget_residual",
+    "expansion_factor": "12",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "experiment_id": "r109_1774243321",
+    "head_commit": "f0b2257bfef265cd7a2ee24340b9c17674d05cd8",
+    "description": "Severe stagnation is active and recent fundamentally different probes have still lost, so the next step should be a new architecture rather than another recipe tweak. Add and test `lowrank_adaptive_budget_residual` under `sparsify/` only: reuse the winning low-rank residual trunk, replace fixed per-sample TopK selection with an adaptive-budget selector, and evaluate it first at the valuable `K=24` anchor with the stable EF=12/signum/LR=3.2e-3 recipe. This is one clean architectural hypothesis: dynamic budget allocation may only become competitive once paired with the stronger low-rank decomposition.",
+    "self_review": "This follows the severe-stagnation policy by making a fundamentally different architecture move instead of another scalar adjustment. It is higher risk than reusing an existing family, but the search has already shown that plain dynamic-budget selection and several recent soft-codebook variants are not enough on their own; combining the adaptive selector with the strongest low-rank backbone is the most defensible next unknown to test.",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0109_standard_1774243291.log",
+    "error_type": "ValueError",
+    "error_summary": "ValueError: Unknown architecture: 'lowrank_adaptive_budget_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')",
+    "traceback_excerpt": "[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 228, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'lowrank_adaptive_budget_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank1]: Traceback (most recent call last):\n[rank1]: ValueError: Unknown architecture: 'lowrank_adaptive_budget_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 228, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'lowrank_adaptive_budget_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank1]: Traceback (most recent call last):\n[rank1]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank1]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank1]:     run()\n[rank1]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank1]:     args = parse(RunConfig)\n[rank1]:            ^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank1]:     parsed_args = parser.parse_args(args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank1]:     args, argv = self.parse_known_args(args, namespace)\n[rank1]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank1]:     parsed_args = self._postprocessing(parsed_args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank1]:     parsed_args = self._instantiate_dataclasses(\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 228, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'lowrank_adaptive_budget_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]:[W323 13:21:36.845988338 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nE0323 13:21:38.031000 110806 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 0 (pid: 110846) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n[1]:\n  time      : 2026-03-23_13:21:38\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 110847)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-23_13:21:38\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 0 (local_rank: 0)\n  exitcode  : 1 (pid: 110846)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================"
+  }
+}
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+Using skill `sae-architecture-integration` to close the registration chain for `lowrank_adaptive_budget_residual`, then I’ll run the exact `K=24, EF=12` smoke test before returning the repaired action.
+exec
+/bin/bash -lc "sed -n '188,236p' sparsify/config.py" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '290,355p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+ succeeded in 0ms:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+exec
+/bin/bash -lc 'rg -n "class AdaptiveBudgetTopKSparseCoder|budget|temperature|topk_fraction|adaptive_budget" sparsify/sparse_coder.py sparsify/config.py' in /root/sparsify-ascend succeeded in 0ms:
+sparsify/config.py:33:    gated_temperature: float = 1.0
+sparsify/config.py:196:            "adaptive_budget_topk",
+sparsify/config.py:243:        if self.sae.gated_temperature <= 0:
+sparsify/config.py:245:                "gated_temperature must be positive, "
+sparsify/config.py:246:                f"got {self.sae.gated_temperature}"
+sparsify/sparse_coder.py:296:    if architecture == "adaptive_budget_topk":
+sparsify/sparse_coder.py:409:class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:410:    """Allocate a fixed batch-level feature budget across samples dynamically."""
+sparsify/sparse_coder.py:425:        total_budget = batch_size * self.cfg.k
+sparsify/sparse_coder.py:427:        raw_quota = difficulty / difficulty_sum * total_budget
+sparsify/sparse_coder.py:431:        remaining = total_budget - int(quotas.sum().item())
+sparsify/sparse_coder.py:457:    """Select top activations under a global batch-level budget."""
+sparsify/sparse_coder.py:471:        total_budget = batch_size * self.cfg.k
+sparsify/sparse_coder.py:472:        total_budget = min(total_budget, flat.numel())
+sparsify/sparse_coder.py:473:        _, flat_indices = torch.topk(flat, total_budget, sorted=False)
+sparsify/sparse_coder.py:908:        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+sparsify/sparse_coder.py:941:        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+sparsify/sparse_coder.py:1285:        router_logits = router(inputs) / self.cfg.gated_temperature
+sparsify/sparse_coder.py:1380:                self.stage2_router(aux2_input) / self.cfg.gated_temperature
+sparsify/sparse_coder.py:2040:        gate_logits = self.gate_encoder(code_residual) / self.cfg.gated_temperature
+exec
+/bin/bash -lc "sed -n '1032,1165p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+
+class LowRankResidualSparseCoder(SparseCoder):
+    """Model a dense low-rank trunk, then sparsely code the remaining residual."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        # Keep a meaningfully expressive dense trunk before sparse residual
+exec
+/bin/bash -lc "sed -n '407,540p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+
+class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+    """Allocate a fixed batch-level feature budget across samples dynamically."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+        batch_size = acts.shape[0]
+        if batch_size == 1:
+            top_acts, top_indices = torch.topk(
+                acts, self.cfg.k, dim=-1, sorted=False
+            )
+            return EncoderOutput(top_acts, top_indices, acts)
+
+        difficulty = acts.detach().pow(2).mean(dim=-1)
+        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
+        total_budget = batch_size * self.cfg.k
+
+codex
+The crash is exactly the expected registration-chain failure: whitelist and dispatch do not include `lowrank_adaptive_budget_residual`, and the class does not exist yet. I’m wiring the minimal family by reusing the existing low-rank residual trunk plus the adaptive-budget selector, then validating it with the exact `K=24, EF=12` smoke test.
+exec
+/bin/bash -lc "rg -n \"class ForwardOutput|class EncoderOutput|@device_autocast\\n    def forward\\(|def decode_residual\\(\" sparsify/sparse_coder.py" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '1,180p' sparsify/sparse_coder.py" in /root/sparsify-ascend exited 2 in 0ms:
+rg: the literal "\n" is not allowed in a regex
+
+Consider enabling multiline mode with the --multiline flag (or -U for short).
+When multiline mode is enabled, new line characters can be matched.
+ succeeded in 0ms:
+import json
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import NamedTuple
+
+import einops
+import torch
+import torch.nn.functional as F
+from huggingface_hub import snapshot_download
+from natsort import natsorted
+from safetensors import safe_open
+from safetensors.torch import load_model, save_model
+from torch import Tensor, nn
+
+from .config import SparseCoderConfig
+from .device import device_autocast
+from .fused_encoder import EncoderOutput, fused_encoder
+from .utils import decoder_impl
+
+
+exec
+/bin/bash -lc "rg -n \"def forward\\(|def decode\\(|def decode_residual\\(\" sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+204:    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+212:    def forward(
+602:    def forward(
+703:    def forward(
+802:    def forward(
+1081:    def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+1086:    def forward(
+1183:    def forward(
+1324:    def forward(
+1488:    def forward(
+1572:    def forward(
+1684:    def forward(
+1771:    def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+1791:    def forward(
+1869:    def forward(
+1960:    def forward(
+2047:    def forward(
+2157:    def forward(
+2311:    def forward(
+2441:    def forward(
+exec
+/bin/bash -lc "sed -n '180,235p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+                {
+                    **self.cfg.to_dict(),
+                    "d_in": self.d_in,
+                },
+                f,
+            )
+
+    @property
+    def device(self):
+        return self.b_dec.device
+
+    @property
+    def dtype(self):
+        return self.b_dec.dtype
+
+    def get_param_groups(self, base_lr: float) -> list[dict]:
+        """Return optimizer parameter groups. Subclasses can override for per-component LR."""
+        return [{"params": self.parameters(), "lr": base_lr}]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+exec
+/bin/bash -lc "sed -n '235,290p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+            # Reduce the scale of the loss if there are a small number of dead latents
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            # Don't include living latents in this loss
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+
+            # Top-k dead latents
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+
+            # Encourage the top ~50% of dead latents to predict the residual of the
+            # top k living latents
+            e_hat = self.decode(auxk_acts, auxk_indices)
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+codex
+I have the exact failure mode and the relevant implementations in hand. Next edit is minimal: add the new architecture string to config and dispatch, implement `LowRankAdaptiveBudgetResidualSparseCoder` by reusing the low-rank trunk plus the existing adaptive-budget quota logic, then smoke-test the exact launch string.
+file update
+M /root/sparsify-ascend/sparsify/config.py
+@@ -211,2 +211,3 @@
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -329,2 +329,4 @@
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+@@ -1128,2 +1130,98 @@
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+apply_patch(auto_approved=true) exited 0 in 8ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/config.py
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6ae09f6b59add3e63bcb030b7973f9e118b..043b60407e21234e7030f07a6857bfe4e9afc3e3
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff2cc33c200bd658bdd72cd6533c7b942cc..152e56a5123fdaa7b5ffff47f8ca779accd56b7d
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
+     if architecture == "lowrank_jumprelu_residual":
+@@ -1126,6 +1128,102 @@
+         )
+ 
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk followed by two residual sparse refinement passes."""
+ 
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6ae09f6b59add3e63bcb030b7973f9e118b..043b60407e21234e7030f07a6857bfe4e9afc3e3
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff2cc33c200bd658bdd72cd6533c7b942cc..152e56a5123fdaa7b5ffff47f8ca779accd56b7d
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
+     if architecture == "lowrank_jumprelu_residual":
+@@ -1126,6 +1128,102 @@
+         )
+ 
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk followed by two residual sparse refinement passes."""
+ 
+
+exec
+/bin/bash -lc 'git diff -- sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend succeeded in 0ms:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6a..043b604 100644
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@ class TrainConfig(Serializable):
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff..152e56a 100644
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@ def _get_sae_class(architecture: str) -> type:
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'lowrank_adaptive_budget_residual'
+k = 24
+ef = 12
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6ae09f6b59add3e63bcb030b7973f9e118b..043b60407e21234e7030f07a6857bfe4e9afc3e3
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff2cc33c200bd658bdd72cd6533c7b942cc..152e56a5123fdaa7b5ffff47f8ca779accd56b7d
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
+     if architecture == "lowrank_jumprelu_residual":
+@@ -1126,6 +1128,102 @@
+         )
+ 
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk followed by two residual sparse refinement passes."""
+ 
+
+ succeeded in 4.54s:
+Using fused decoder on CUDA.
+integration_smoke: OK lowrank_adaptive_budget_residual 24 12 cuda
+codex
+The registration patch is in place. I’m polling the exact smoke test now to confirm the new architecture string instantiates and backpropagates at the intended `K=24, EF=12` target before handing back the repaired action.
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6ae09f6b59add3e63bcb030b7973f9e118b..043b60407e21234e7030f07a6857bfe4e9afc3e3
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff2cc33c200bd658bdd72cd6533c7b942cc..152e56a5123fdaa7b5ffff47f8ca779accd56b7d
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
+     if architecture == "lowrank_jumprelu_residual":
+@@ -1126,6 +1128,102 @@
+         )
+ 
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk followed by two residual sparse refinement passes."""
+ 
+
+codex
+{"command":"run","hypothesis":"The plain `adaptive_budget_topk` failure suggests dynamic support allocation needs a stronger representational backbone, not that the mechanism is useless; adding adaptive-budget selection on top of the proven low-rank residual trunk may produce a better K=24 tradeoff than either plain adaptive-budget or the recent soft-codebook branches.","summary":"Repaired the engineering blocker for `lowrank_adaptive_budget_residual` without changing the planned experiment. Added the architecture string to the whitelist in `sparsify/config.py`, added factory dispatch in `sparsify/sparse_coder.py`, and implemented `LowRankAdaptiveBudgetResidualSparseCoder` by combining the existing low-rank residual trunk with the existing adaptive-budget quota logic. Verified the exact target with an instantiate/forward/backward smoke test at `(architecture=lowrank_adaptive_budget_residual, K=24, EF=12)`, which passed on CUDA. The original round-109 experiment can now run unchanged.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"small_k_frontier","family_name":"lowrank_adaptive_budget_residual","family_stage":"prototype","self_review":"This repair stayed within `sparsify/` only and preserved the original family and override contract exactly. The prior failure was purely a registration-chain blocker; that chain is now closed and the exact smoke target passed, so the next run should measure the architecture rather than fail at parse/dispatch time.","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_adaptive_budget_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repaired `lowrank_adaptive_budget_residual` registration and implementation under `sparsify/`: whitelist entry, factory dispatch, and concrete class now exist.","Exact smoke test passed for `lowrank_adaptive_budget_residual` at `(K=24, EF=12)` with instantiate, forward, and backward on CUDA.","Round 109 repair attempt 1 resolved an `Unknown architecture` blocker, so the original experiment should now be rerun unchanged to evaluate the family scientifically."],"next_hypotheses":["If `lowrank_adaptive_budget_residual` is competitive at `K=24`, run the same fixed recipe at `K=16` or `K=32` to map whether the gain is localized or broad across the mid/low-K band.","If it runs cleanly but clearly loses at `K=24`, treat dynamic-budget routing as unpromising even with a strong low-rank backbone and move to a different mechanism entirely.","If the full run now fails with a new runtime or autograd issue, repair that new blocker before drawing any scientific conclusion about the architecture."],"primary_variable":"architecture"}
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index e382d6ae09f6b59add3e63bcb030b7973f9e118b..043b60407e21234e7030f07a6857bfe4e9afc3e3
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -209,6 +209,7 @@
+             "routed_lowrank_two_stage_residual",
+             "bucketed_lowrank_residual",
+             "whitened_lowrank_residual",
++            "lowrank_adaptive_budget_residual",
+             "lowrank_gated_residual",
+             "lowrank_jumprelu_residual",
+             "lowrank_multi_branch_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 9f1aaff2cc33c200bd658bdd72cd6533c7b942cc..152e56a5123fdaa7b5ffff47f8ca779accd56b7d
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -327,6 +327,8 @@
+         return BucketedLowRankResidualSparseCoder
+     if architecture == "whitened_lowrank_residual":
+         return WhitenedLowRankResidualSparseCoder
++    if architecture == "lowrank_adaptive_budget_residual":
++        return LowRankAdaptiveBudgetResidualSparseCoder
+     if architecture == "lowrank_gated_residual":
+         return LowRankGatedResidualSparseCoder
+     if architecture == "lowrank_jumprelu_residual":
+@@ -1126,6 +1128,102 @@
+         )
+ 
+ 
++class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
++    """Low-rank trunk with adaptive per-sample residual feature budgets."""
++
++    @staticmethod
++    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
++        batch_size = acts.shape[0]
++        if batch_size == 1:
++            return torch.topk(acts, k, dim=-1, sorted=False)
++
++        difficulty = acts.detach().pow(2).mean(dim=-1)
++        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
++        total_budget = batch_size * k
++
++        raw_quota = difficulty / difficulty_sum * total_budget
++        quotas = torch.floor(raw_quota).to(dtype=torch.long)
++        quotas = quotas.clamp(min=1, max=k)
++
++        remaining = total_budget - int(quotas.sum().item())
++        if remaining > 0:
++            order = torch.argsort(
++                raw_quota - quotas.to(raw_quota.dtype), descending=True
++            )
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] < k:
++                    quotas[idx] += 1
++                    remaining -= 1
++        elif remaining < 0:
++            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
++            for idx in order.tolist():
++                if remaining == 0:
++                    break
++                if quotas[idx] > 1:
++                    quotas[idx] -= 1
++                    remaining += 1
++
++        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
++        rank = torch.arange(k, device=acts.device)
++        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
++        top_acts = top_acts * active_mask.to(top_acts.dtype)
++        return top_acts, top_indices
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++        return EncoderOutput(top_acts, top_indices, acts)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
++        acts = F.relu(pre_acts)
++        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+     """Low-rank trunk followed by two residual sparse refinement passes."""
+ 
+
+tokens used
+240,967

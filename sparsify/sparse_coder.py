@@ -327,6 +327,8 @@ def _get_sae_class(architecture: str) -> type:
         return BucketedLowRankResidualSparseCoder
     if architecture == "whitened_lowrank_residual":
         return WhitenedLowRankResidualSparseCoder
+    if architecture == "lowrank_adaptive_budget_residual":
+        return LowRankAdaptiveBudgetResidualSparseCoder
     if architecture == "lowrank_gated_residual":
         return LowRankGatedResidualSparseCoder
     if architecture == "lowrank_jumprelu_residual":
@@ -1107,6 +1109,102 @@ class LowRankResidualSparseCoder(SparseCoder):
             scale = min(num_dead / k_aux, 1.0)
             k_aux = min(k_aux, num_dead)
             auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with adaptive per-sample residual feature budgets."""
+
+    @staticmethod
+    def _apply_adaptive_budget(acts: Tensor, k: int) -> tuple[Tensor, Tensor]:
+        batch_size = acts.shape[0]
+        if batch_size == 1:
+            return torch.topk(acts, k, dim=-1, sorted=False)
+
+        difficulty = acts.detach().pow(2).mean(dim=-1)
+        difficulty_sum = difficulty.sum().clamp_min(torch.finfo(acts.dtype).tiny)
+        total_budget = batch_size * k
+
+        raw_quota = difficulty / difficulty_sum * total_budget
+        quotas = torch.floor(raw_quota).to(dtype=torch.long)
+        quotas = quotas.clamp(min=1, max=k)
+
+        remaining = total_budget - int(quotas.sum().item())
+        if remaining > 0:
+            order = torch.argsort(
+                raw_quota - quotas.to(raw_quota.dtype), descending=True
+            )
+            for idx in order.tolist():
+                if remaining == 0:
+                    break
+                if quotas[idx] < k:
+                    quotas[idx] += 1
+                    remaining -= 1
+        elif remaining < 0:
+            order = torch.argsort(raw_quota - quotas.to(raw_quota.dtype))
+            for idx in order.tolist():
+                if remaining == 0:
+                    break
+                if quotas[idx] > 1:
+                    quotas[idx] -= 1
+                    remaining += 1
+
+        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
+        rank = torch.arange(k, device=acts.device)
+        active_mask = rank.unsqueeze(0) < quotas.unsqueeze(1)
+        top_acts = top_acts * active_mask.to(top_acts.dtype)
+        return top_acts, top_indices
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
+        acts = F.relu(pre_acts)
+        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        pre_acts = F.linear(residual, self.encoder.weight, self.encoder.bias)
+        acts = F.relu(pre_acts)
+        top_acts, top_indices = self._apply_adaptive_budget(acts, self.cfg.k)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
             e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
