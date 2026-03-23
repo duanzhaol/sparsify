@@ -1,0 +1,531 @@
+{"command":"run","hypothesis":"A conditional mixture of residual dictionaries may recover the mid-K lane where fixed residual mechanisms have stalled: `lowrank_multi_branch_residual` keeps the strong low-rank trunk, then lets a learned sample-level router mix several residual scoring branches before final top-k selection, potentially matching heterogeneous residual regimes better than a single encoder.","summary":"Repaired `lowrank_multi_branch_residual` so the original round-60 experiment can run under DDP. The crash was caused by inherited `encoder.weight` and `encoder.bias` from `LowRankResidualSparseCoder` being unused in the new family, which triggered the prior-iteration reduction error. Patched `_mixed_acts()` so the inherited residual encoder is an always-on anchor branch alongside the routed branches, then re-ran the concrete factory-dispatch checks. Validation passed: all parameters now receive gradients, and the exact smoke target `architecture=lowrank_multi_branch_residual, K=24, EF=12` instantiates, runs forward, and backward successfully.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_multi_branch_residual","family_stage":"prototype","self_review":"This is a repair only; the architecture name, hypothesis, and env overrides are unchanged. The fix addresses the precise DDP-unused-parameter blocker without redesigning the experiment. I also corrected the validation path by smoke-testing the actual architecture class through `_get_sae_class()` at the exact failing `(architecture, K, EF)` instead of relying on the base `SparseCoder` constructor.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_multi_branch_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 60 attempt 1: `lowrank_multi_branch_residual` crashed under DDP because inherited `encoder.weight` and `encoder.bias` were unused in the forward pass.","Patched `lowrank_multi_branch_residual` so the inherited residual encoder participates as an always-on anchor branch in `_mixed_acts()`, eliminating the unused-parameter reduction bug.","Verified on the concrete architecture class via `_get_sae_class('lowrank_multi_branch_residual')` that all parameters now receive gradients.","Exact integration smoke passed for `lowrank_multi_branch_residual` at `K=24, EF=12` with forward/backward on the real architecture class."],"next_hypotheses":["Run the original `lowrank_multi_branch_residual` experiment again at the same pinned `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe now that the DDP blocker is fixed.","If the repaired run is competitive but slightly worse at `K=24`, test `K=16` to see whether conditional branch specialization helps more under tighter sparsity.","If the repaired run still fails, inspect the new failure mode directly rather than changing architecture or hyperparameters."],"primary_variable":"architecture"}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d17e8-09af-7ab3-8981-5a034238157c
+--------
+user
+Continue round 60 in repair mode.
+
+The previous code-edit failed with an engineering blocker.
+Do NOT redesign the experiment. Do NOT change family_name or env_overrides.
+Patch the implementation so the original experiment can run.
+Stay within sparsify/ only.
+Attempt 1 of 5.
+Return one final JSON object matching the action schema.
+
+Architecture integration checklist:
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+Repair context:
+{
+  "round": 60,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "lowrank_multi_branch_residual",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "lowrank_multi_branch_residual"
+      },
+      {
+        "key": "K",
+        "value": "24"
+      },
+      {
+        "key": "EXPANSION_FACTOR",
+        "value": "12"
+      },
+      {
+        "key": "OPTIMIZER",
+        "value": "signum"
+      },
+      {
+        "key": "LR",
+        "value": "3.2e-3"
+      },
+      {
+        "key": "AUXK_ALPHA",
+        "value": "0.0"
+      }
+    ],
+    "summary": "Added a new prototype family, `lowrank_multi_branch_residual`, in `sparsify/` and registered it in config/factory dispatch. The architecture applies the existing low-rank trunk first, then mixes three residual encoder branches with a learned sample-level routing head before sparse selection. Exact smoke test passed for `architecture=lowrank_multi_branch_residual, K=24, EF=12`, and a quick encode comparison confirmed behavior differs from `lowrank_residual`. This is a fundamentally different conditional-dictionary architecture for severe-stagnation recovery, not a scalar or K sweep.",
+    "hypothesis": "A conditional mixture of residual dictionaries may recover the mid-K lane where fixed residual mechanisms have stalled: `lowrank_multi_branch_residual` keeps the strong low-rank trunk, then lets a learned sample-level router mix several residual scoring branches before final top-k selection, potentially matching heterogeneous residual regimes better than a single encoder."
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774223596",
+    "k": "24",
+    "architecture": "lowrank_multi_branch_residual",
+    "expansion_factor": "12",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0060/round0060_standard_1774223566_dp2_bs1_ga8_ef12_k24_20260323_075252",
+    "experiment_id": "r60_1774223596",
+    "head_commit": "ac9dcb61283fd4caf4131039da98a7c121482ce5",
+    "description": "Added a new prototype family, `lowrank_multi_branch_residual`, in `sparsify/` and registered it in config/factory dispatch. The architecture applies the existing low-rank trunk first, then mixes three residual encoder branches with a learned sample-level routing head before sparse selection. Exact smoke test passed for `architecture=lowrank_multi_branch_residual, K=24, EF=12`, and a quick encode comparison confirmed behavior differs from `lowrank_residual`. This is a fundamentally different conditional-dictionary architecture for severe-stagnation recovery, not a scalar or K sweep.",
+    "self_review": "This follows the severe-stagnation policy by introducing a new mechanism family rather than tuning previous losers. The experiment remains architecture-only at the pinned `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe, so attribution stays clean. Main risk: the earlier plain `multi_branch_gated` baseline failed badly, so the gain depends on the low-rank trunk making branch specialization operate on an easier residual space rather than repeating that failure pattern.",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0060_standard_1774223566.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0060/round0060_standard_1774223566_dp2_bs1_ga8_ef12_k24_20260323_075252/metrics.jsonl",
+    "error_type": "RuntimeError",
+    "error_summary": "RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by",
+    "traceback_excerpt": "[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 215, in run\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 640, in fit\n[rank0]:   File \"/root/sparsify-ascend/sparsify/utils.py\", line 146, in partial_forward_to_layer\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/generic.py\", line 1072, in wrapper\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 410, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 414, in __call__\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 832, in compile_wrapper\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/modeling_layers.py\", line 94, in __call__\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 260, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 229, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1881, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1842, in inner\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 1044, in _fn\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 467, in _hook_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1657, in forward\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1546, in _pre_forward\n[rank0]: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank0]:     hidden_states, _ = self.self_attn(\n[rank0]:                        ^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:     return forward_call(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/utils/deprecation.py\", line 172, in wrapped_func\n[rank0]:     return func(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/transformers/models/qwen3/modeling_qwen3.py\", line 229, in forward\n[rank0]:     attn_output = self.o_proj(attn_output)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1881, in _call_impl\n[rank0]:     return inner()\n[rank0]:            ^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1842, in inner\n[rank0]:     hook_result = hook(self, args, result)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py\", line 1044, in _fn\n[rank0]:     return fn(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/sparsify-ascend/sparsify/trainer.py\", line 467, in _hook_impl\n[rank0]:     out = wrapped(\n[rank0]:           ^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1775, in _wrapped_call_impl\n[rank0]:     return self._call_impl(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py\", line 1786, in _call_impl\n[rank0]:     return forward_call(*args, **kwargs)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1657, in forward\n[rank0]:     inputs, kwargs = self._pre_forward(*inputs, **kwargs)\n[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py\", line 1546, in _pre_forward\n[rank0]:     if torch.is_grad_enabled() and self.reducer._rebuild_buckets():\n[rank0]:                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]: RuntimeError: Expected to have finished reduction in the prior iteration before starting a new one. This error indicates that your module has parameters that were not used in producing loss. You can enable unused parameter detection by passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`, and by\n[rank0]: making sure all `forward` function outputs participate in calculating loss.\n[rank0]: If you already have done the above, then the distributed data parallel module wasn't able to locate the output tensors in the return value of your module's `forward` function. Please include the loss function and the structure of the return value of `forward` of your module when reporting this issue (e.g. list, dict, iterable).\n[rank0]: Parameter indices which did not receive grad for rank 0: 4 5\n[rank0]:  In addition, you can set the environment variable TORCH_DISTRIBUTED_DEBUG to either INFO or DETAIL to print out information about which particular parameters did not receive gradient on this rank as part of this error\nW0323 07:53:02.032000 66391 site-packages/torch/distributed/elastic/multiprocessing/api.py:908] Sending process 66431 closing signal SIGTERM\nE0323 07:53:02.196000 66391 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 1 (pid: 66432) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n  <NO_OTHER_FAILURES>\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-23_07:53:02\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 66432)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================"
+  }
+}
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+The crash is a DDP unused-parameter issue, so I’m identifying exactly which parameters map to the reported indices before patching. The goal is to keep the same architecture and make every parameter participate in the loss path under the real `K=24, EF=12` launch contract.
+exec
+/bin/bash -lc 'rg -n "lowrank_multi_branch_residual|class LowRankMultiBranchResidualSparseCoder|branch_mix_logits|branch_encoders" sparsify/sparse_coder.py sparsify/config.py' in /root/sparsify-ascend succeeded in 0ms:
+sparsify/config.py:214:            "lowrank_multi_branch_residual",
+sparsify/sparse_coder.py:334:    if architecture == "lowrank_multi_branch_residual":
+sparsify/sparse_coder.py:1610:class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1624:        self.branch_encoders = nn.ModuleList(
+sparsify/sparse_coder.py:1630:        self.branch_mix_logits = nn.Linear(
+sparsify/sparse_coder.py:1634:        for encoder in self.branch_encoders:
+sparsify/sparse_coder.py:1636:        self.branch_mix_logits.weight.data.zero_()
+sparsify/sparse_coder.py:1637:        self.branch_mix_logits.bias.data.zero_()
+sparsify/sparse_coder.py:1641:                [branch.weight.data for branch in self.branch_encoders], dim=0
+sparsify/sparse_coder.py:1650:        branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+sparsify/sparse_coder.py:1652:        for branch_idx, encoder in enumerate(self.branch_encoders):
+sparsify/sparse_coder.py:2289:        self.branch_encoders = nn.ModuleList(
+sparsify/sparse_coder.py:2301:        self.branch_mix_logits = nn.Linear(
+sparsify/sparse_coder.py:2305:        for encoder in self.branch_encoders:
+sparsify/sparse_coder.py:2311:        self.branch_mix_logits.weight.data.zero_()
+sparsify/sparse_coder.py:2312:        self.branch_mix_logits.bias.data.zero_()
+sparsify/sparse_coder.py:2316:                [branch.weight.data for branch in self.branch_encoders], dim=0
+sparsify/sparse_coder.py:2328:        branch_weights = torch.softmax(self.branch_mix_logits(x), dim=-1)
+sparsify/sparse_coder.py:2332:            zip(self.branch_encoders, self.branch_gates)
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+cfg = SparseCoderConfig(architecture='lowrank_multi_branch_residual', k=24, expansion_factor=12)
+sae = SparseCoder(128, cfg, device='cpu')
+for i, (name, p) in enumerate(sae.named_parameters()):
+    print(i, name, tuple(p.shape))
+PY" in /root/sparsify-ascend succeeded in 3.94s:
+Using fused decoder on CUDA.
+0 W_dec (1536, 128)
+1 b_dec (128,)
+2 encoder.weight (1536, 128)
+3 encoder.bias (1536,)
+codex
+The reported unused indices did not match the base `SparseCoder` at all, which exposed a more important detail: the earlier quick smoke was too weak because it instantiated the base class directly. I’m re-running the exact architecture through factory dispatch and patching the actual unused parameters on that concrete class.
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+arch='lowrank_multi_branch_residual'
+cls = _get_sae_class(arch)
+cfg = SparseCoderConfig(architecture=arch, k=24, expansion_factor=12)
+sae = cls(128, cfg, device='cpu')
+for i, (name, p) in enumerate(sae.named_parameters()):
+    print(i, name, tuple(p.shape))
+PY" in /root/sparsify-ascendexec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+arch='lowrank_multi_branch_residual'
+cls = _get_sae_class(arch)
+cfg = SparseCoderConfig(architecture=arch, k=24, expansion_factor=12)
+sae = cls(128, cfg, device='cpu', dtype=torch.float32)
+x = torch.randn(4, 128)
+out = sae(x)
+out.fvu.backward()
+for i,(name,p) in enumerate(sae.named_parameters()):
+    print(i, name, p.grad is None, 0.0 if p.grad is None else float(p.grad.abs().sum()))
+PY" in /root/sparsify-ascend succeeded in 4.02s:
+Using fused decoder on CUDA.
+0 b_dec (128,)
+1 W_dec (1536, 128)
+2 trunk_encoder.weight (48, 128)
+3 trunk_decoder.weight (128, 48)
+4 encoder.weight (1536, 128)
+5 encoder.bias (1536,)
+6 branch_encoders.0.weight (1536, 128)
+7 branch_encoders.0.bias (1536,)
+8 branch_encoders.1.weight (1536, 128)
+9 branch_encoders.1.bias (1536,)
+10 branch_encoders.2.weight (1536, 128)
+11 branch_encoders.2.bias (1536,)
+12 branch_mix_logits.weight (3, 128)
+13 branch_mix_logits.bias (3,)
+ succeeded in 4.15s:
+Using fused decoder on CUDA.
+0 b_dec False 0.7396461367607117
+1 W_dec False 33.423397064208984
+2 trunk_encoder.weight False 36.060855865478516
+3 trunk_decoder.weight False 19.23101234436035
+4 encoder.weight True 0.0
+5 encoder.bias True 0.0
+6 branch_encoders.0.weight False 11.757368087768555
+7 branch_encoders.0.bias False 0.10122177749872208
+8 branch_encoders.1.weight False 11.528654098510742
+9 branch_encoders.1.bias False 0.09939558804035187
+10 branch_encoders.2.weight False 10.431110382080078
+11 branch_encoders.2.bias False 0.09016741067171097
+12 branch_mix_logits.weight False 2.0840368270874023
+13 branch_mix_logits.bias False 0.023473206907510757
+codex
+I found the exact blocker: the inherited `encoder.weight` and `encoder.bias` from `LowRankResidualSparseCoder` were never used in `lowrank_multi_branch_residual`, and those are exactly the DDP-unused parameters. I’m patching the family so the inherited residual encoder becomes an always-on anchor branch, which preserves the original experiment while closing the reduction bug.
+file update
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -1649,2 +1649,5 @@
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+@@ -1655,3 +1658,5 @@
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+apply_patch(auto_approved=true) exited 0 in 5ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index c0a9fa70401978323b040a172613a2f80e4d2db1..ad7ba4db350ee0fafa0ba84a93d214897b8022a7
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1647,13 +1647,18 @@
+             self.W_dec = None
+ 
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+         branch_acts = []
+         for branch_idx, encoder in enumerate(self.branch_encoders):
+             acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+             branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+
+file update:
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index c0a9fa70401978323b040a172613a2f80e4d2db1..ad7ba4db350ee0fafa0ba84a93d214897b8022a7
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1647,13 +1647,18 @@
+             self.W_dec = None
+ 
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+         branch_acts = []
+         for branch_idx, encoder in enumerate(self.branch_encoders):
+             acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+             branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+
+codex
+The fix is in. I’m validating two things now: the formerly-unused parameters receive gradients on the concrete class, and the exact `ARCHITECTURE=lowrank_multi_branch_residual, K=24, EF=12` smoke path instantiates, runs forward, and backward through factory dispatch.
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+arch='lowrank_multi_branch_residual'
+cls = _get_sae_class(arch)
+cfg = SparseCoderConfig(architecture=arch, k=24, expansion_factor=12)
+sae = cls(128, cfg, device='cpu', dtype=torch.float32)
+x = torch.randn(4, 128)
+out = sae(x)
+out.fvu.backward()
+for i,(name,p) in enumerate(sae.named_parameters()):
+    print(i, name, p.grad is None, 0.0 if p.grad is None else float(p.grad.abs().sum()))
+PY" in /root/sparsify-ascendexec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'lowrank_multi_branch_residual'
+k = 24
+ef = 12
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+cls = _get_sae_class(arch)
+sae = cls(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index c0a9fa70401978323b040a172613a2f80e4d2db1..ad7ba4db350ee0fafa0ba84a93d214897b8022a7
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1647,13 +1647,18 @@
+             self.W_dec = None
+ 
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+         branch_acts = []
+         for branch_idx, encoder in enumerate(self.branch_encoders):
+             acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+             branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+
+ succeeded in 3.97s:
+Using fused decoder on CUDA.
+0 b_dec False 0.9876009225845337
+1 W_dec False 34.778175354003906
+2 trunk_encoder.weight False 42.994712829589844
+3 trunk_decoder.weight False 21.136138916015625
+4 encoder.weight False 9.245762825012207
+5 encoder.bias False 0.08684947341680527
+6 branch_encoders.0.weight False 9.702605247497559
+7 branch_encoders.0.bias False 0.09214279800653458
+8 branch_encoders.1.weight False 9.768072128295898
+9 branch_encoders.1.bias False 0.09253886342048645
+10 branch_encoders.2.weight False 10.164648056030273
+11 branch_encoders.2.bias False 0.09597315639257431
+12 branch_mix_logits.weight False 1.3417223691940308
+13 branch_mix_logits.bias False 0.014435948804020882
+ succeeded in 4.55s:
+Using fused decoder on CUDA.
+integration_smoke: OK lowrank_multi_branch_residual 24 12 cuda
+file update:
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index c0a9fa70401978323b040a172613a2f80e4d2db1..ad7ba4db350ee0fafa0ba84a93d214897b8022a7
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1647,13 +1647,18 @@
+             self.W_dec = None
+ 
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+         branch_acts = []
+         for branch_idx, encoder in enumerate(self.branch_encoders):
+             acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+             branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+
+codex
+{"command":"run","hypothesis":"A conditional mixture of residual dictionaries may recover the mid-K lane where fixed residual mechanisms have stalled: `lowrank_multi_branch_residual` keeps the strong low-rank trunk, then lets a learned sample-level router mix several residual scoring branches before final top-k selection, potentially matching heterogeneous residual regimes better than a single encoder.","summary":"Repaired `lowrank_multi_branch_residual` so the original round-60 experiment can run under DDP. The crash was caused by inherited `encoder.weight` and `encoder.bias` from `LowRankResidualSparseCoder` being unused in the new family, which triggered the prior-iteration reduction error. Patched `_mixed_acts()` so the inherited residual encoder is an always-on anchor branch alongside the routed branches, then re-ran the concrete factory-dispatch checks. Validation passed: all parameters now receive gradients, and the exact smoke target `architecture=lowrank_multi_branch_residual, K=24, EF=12` instantiates, runs forward, and backward successfully.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_multi_branch_residual","family_stage":"prototype","self_review":"This is a repair only; the architecture name, hypothesis, and env overrides are unchanged. The fix addresses the precise DDP-unused-parameter blocker without redesigning the experiment. I also corrected the validation path by smoke-testing the actual architecture class through `_get_sae_class()` at the exact failing `(architecture, K, EF)` instead of relying on the base `SparseCoder` constructor.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_multi_branch_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 60 attempt 1: `lowrank_multi_branch_residual` crashed under DDP because inherited `encoder.weight` and `encoder.bias` were unused in the forward pass.","Patched `lowrank_multi_branch_residual` so the inherited residual encoder participates as an always-on anchor branch in `_mixed_acts()`, eliminating the unused-parameter reduction bug.","Verified on the concrete architecture class via `_get_sae_class('lowrank_multi_branch_residual')` that all parameters now receive gradients.","Exact integration smoke passed for `lowrank_multi_branch_residual` at `K=24, EF=12` with forward/backward on the real architecture class."],"next_hypotheses":["Run the original `lowrank_multi_branch_residual` experiment again at the same pinned `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` recipe now that the DDP blocker is fixed.","If the repaired run is competitive but slightly worse at `K=24`, test `K=16` to see whether conditional branch specialization helps more under tighter sparsity.","If the repaired run still fails, inspect the new failure mode directly rather than changing architecture or hyperparameters."],"primary_variable":"architecture"}
+file update:
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index c0a9fa70401978323b040a172613a2f80e4d2db1..ad7ba4db350ee0fafa0ba84a93d214897b8022a7
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1647,13 +1647,18 @@
+             self.W_dec = None
+ 
+     def _mixed_acts(self, residual: Tensor) -> Tensor:
++        # Keep the inherited residual encoder on the reconstruction path so
++        # DDP does not mark it unused while the routed branches specialize.
++        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+         branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+         branch_acts = []
+         for branch_idx, encoder in enumerate(self.branch_encoders):
+             acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+             branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+             branch_acts.append(acts * branch_weight)
+-        return torch.stack(branch_acts, dim=0).sum(dim=0)
++        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
++        anchor_scale = 1.0 / (self.num_branches + 1)
++        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+
+tokens used
+174,930

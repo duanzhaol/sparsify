@@ -331,6 +331,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankGatedResidualSparseCoder
     if architecture == "lowrank_jumprelu_residual":
         return LowRankJumpReLUResidualSparseCoder
+    if architecture == "lowrank_multi_branch_residual":
+        return LowRankMultiBranchResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
         return WhitenedLowRankGatedResidualSparseCoder
     if architecture == "lowrank_grouped_residual":
@@ -1588,6 +1590,110 @@ class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
                 + self.decode_residual(auxk_acts, auxk_indices)
                 + self.b_dec
             )
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with a learned mixture of residual scoring branches."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=False)
+        self.num_branches = 3
+        self.branch_encoders = nn.ModuleList(
+            [
+                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+                for _ in range(self.num_branches)
+            ]
+        )
+        self.branch_mix_logits = nn.Linear(
+            d_in, self.num_branches, device=device, dtype=dtype
+        )
+
+        for encoder in self.branch_encoders:
+            encoder.bias.data.zero_()
+        self.branch_mix_logits.weight.data.zero_()
+        self.branch_mix_logits.bias.data.zero_()
+
+        if decoder:
+            decoder_init = torch.stack(
+                [branch.weight.data for branch in self.branch_encoders], dim=0
+            ).mean(dim=0)
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+    def _mixed_acts(self, residual: Tensor) -> Tensor:
+        # Keep the inherited residual encoder on the reconstruction path so
+        # DDP does not mark it unused while the routed branches specialize.
+        anchor_acts = F.relu(F.linear(residual, self.encoder.weight, self.encoder.bias))
+        branch_weights = torch.softmax(self.branch_mix_logits(residual), dim=-1)
+        branch_acts = []
+        for branch_idx, encoder in enumerate(self.branch_encoders):
+            acts = F.relu(F.linear(residual, encoder.weight, encoder.bias))
+            branch_weight = branch_weights[..., branch_idx].unsqueeze(-1)
+            branch_acts.append(acts * branch_weight)
+        routed_acts = torch.stack(branch_acts, dim=0).sum(dim=0)
+        anchor_scale = 1.0 / (self.num_branches + 1)
+        return routed_acts * (1.0 - anchor_scale) + anchor_acts * anchor_scale
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        acts = self._mixed_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        acts = self._mixed_acts(residual)
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
         else:
