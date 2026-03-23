@@ -335,6 +335,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankMultiBranchResidualSparseCoder
     if architecture == "lowrank_factorized_residual":
         return LowRankFactorizedResidualSparseCoder
+    if architecture == "lowrank_soft_codebook_residual":
+        return LowRankSoftCodebookResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
         return WhitenedLowRankGatedResidualSparseCoder
     if architecture == "lowrank_grouped_residual":
@@ -1802,6 +1804,93 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
             auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
             auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
             e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with soft codebook residual projection before sparse correction."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.num_codes = min(256, max(32, cfg.k * 2))
+        self.codebook = nn.Parameter(
+            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+        )
+        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
+        self.code_router.bias.data.zero_()
+
+    def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
+        logits = self.code_router(residual)
+        routing = logits.softmax(dim=-1)
+        coarse = routing @ self.codebook
+        return coarse, logits
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+        return fused_encoder(
+            code_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+        top_acts, top_indices, pre_acts = fused_encoder(
+            code_residual, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+        sparse_residual = self.decode_residual(top_acts, top_indices)
+        sae_out = trunk + coarse + sparse_residual + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = (
+                trunk
+                + coarse
+                + self.decode_residual(auxk_acts, auxk_indices)
+                + self.b_dec
+            )
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
         else:

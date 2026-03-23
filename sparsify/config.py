@@ -213,6 +213,7 @@ class TrainConfig(Serializable):
             "lowrank_jumprelu_residual",
             "lowrank_multi_branch_residual",
             "lowrank_factorized_residual",
+            "lowrank_soft_codebook_residual",
             "whitened_lowrank_gated_residual",
             "lowrank_grouped_residual",
             "whitened_topk",

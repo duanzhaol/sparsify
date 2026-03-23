@@ -9,7 +9,8 @@
     "r58 lowrank_jumprelu_residual edit_sae_code k24 -> discard fvu=0.1026327833533287",
     "r59 lowrank_residual_vq edit_sae_code k24 -> discard fvu=0.10183659940958023",
     "r60 lowrank_multi_branch_residual edit_sae_code k24 -> discard fvu=0.10131727159023285",
-    "r61 lowrank_factorized_residual edit_sae_code k24 -> discard fvu=0.12982133030891418"
+    "r61 lowrank_factorized_residual edit_sae_code k24 -> discard fvu=0.12982133030891418",
+    "r62 lowrank_soft_codebook_residual edit_sae_code k24 -> archive fvu=0.09756404161453247"
   ],
   "performance_findings": [],
   "failure_patterns": [
@@ -196,6 +197,13 @@
       "architecture": "lowrank_factorized_residual",
       "k": 24,
       "updated_at": 1774224459
+    },
+    "standard|lowrank_soft_codebook_residual|layers.[3].self_attn.o_proj": {
+      "tokens_per_sec": 208174.8580225454,
+      "round": 62,
+      "architecture": "lowrank_soft_codebook_residual",
+      "k": 24,
+      "updated_at": 1774224778
     }
   },
   "architecture_families": {
@@ -928,29 +936,31 @@
       ],
       "best_fvu": null,
       "last_round": 61
+    },
+    "lowrank_soft_codebook_residual": {
+      "status": "incubating",
+      "design_hypothesis": "A soft residual codebook may recover the stalled mid-K lane better than hard residual VQ: `lowrank_soft_codebook_residual` keeps the strong low-rank trunk, then uses a learned soft codebook projection to absorb coarse residual structure before sparse correction, avoiding the brittle discrete assignment that hurt the hard-VQ branch.",
+      "tested_configs": [
+        {
+          "round": 62,
+          "stage": "prototype",
+          "k": "24",
+          "decision": "archive",
+          "val_fvu": "0.09756404161453247",
+          "run_health": "normal"
+        }
+      ],
+      "known_issues": [],
+      "next_steps": [
+        "If `lowrank_soft_codebook_residual` is competitive but slightly worse at `K=24`, test `K=16` to see whether soft coarse residual coding helps more under tighter sparsity.",
+        "If `lowrank_soft_codebook_residual` wins at `K=24`, follow with `K=32` to check whether the gain persists across the mid-K band.",
+        "If it clearly loses at `K=24`, retire the codebook-projection branch and move to another mechanism family rather than tuning code count or router softness."
+      ],
+      "best_fvu": null,
+      "last_round": 62
     }
   },
   "recent_rounds": [
-    {
-      "round": 50,
-      "hypothesis": "`routed_lowrank_two_stage_residual` was previously blocked by a training-graph issue: its routers only influenced top-k indices, so DDP could treat router parameters as unused. Routing the selected activation magnitudes themselves should stabilize training and give the architecture a fair mid-K test against the current `K=16` frontier point.",
-      "change_type": "edit_sae_code",
-      "expected_win": "lower_fvu",
-      "family_name": "routed_lowrank_two_stage_residual",
-      "family_stage": "stabilize",
-      "decision": "policy_reject",
-      "val_fvu": null,
-      "observed_fvu": null,
-      "k": null,
-      "architecture": "routed_lowrank_two_stage_residual",
-      "touched_files": [
-        "sparsify/sparse_coder.py"
-      ],
-      "run_health": "normal",
-      "termination_reason": "Behavioral diff: routed_lowrank_two_stage_residual encode() identical to topk \u2014 blocked",
-      "tokens_per_sec": null,
-      "baseline_ratio": null
-    },
     {
       "round": 51,
       "hypothesis": "After `residual_vq` and `codebook_topk` both underperformed at `K=24`, a deeper discrete coarse stage is the next fundamentally different architecture worth testing: `two_code_residual_vq` may recover more shared structure before sparse correction and produce a better mid-K FVU/K tradeoff than the single-code discrete families.",
@@ -1160,14 +1170,30 @@
       "termination_reason": "completed",
       "tokens_per_sec": "237911.967312",
       "baseline_ratio": null
+    },
+    {
+      "round": 62,
+      "hypothesis": "A soft residual codebook may recover the stalled mid-K lane better than hard residual VQ: `lowrank_soft_codebook_residual` keeps the strong low-rank trunk, then uses a learned soft codebook projection to absorb coarse residual structure before sparse correction, avoiding the brittle discrete assignment that hurt the hard-VQ branch.",
+      "change_type": "edit_sae_code",
+      "expected_win": "lower_fvu",
+      "family_name": "lowrank_soft_codebook_residual",
+      "family_stage": "prototype",
+      "decision": "archive",
+      "val_fvu": "0.09756404161453247",
+      "observed_fvu": "0.097564",
+      "k": "24",
+      "architecture": "lowrank_soft_codebook_residual",
+      "touched_files": [
+        "sparsify/config.py",
+        "sparsify/sparse_coder.py"
+      ],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "208174.858023",
+      "baseline_ratio": null
     }
   ],
   "recent_insights": [
-    "NOTE: Round 53 continues severe-stagnation recovery with a pure `gated` architecture test after `bucketed_lowrank_residual` came closer than recent branches but still lost at K=24.",
-    "NOTE: Keep the run pinned at `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` so architecture is the only primary variable.",
-    "NOTE: `gated` tests whether a simpler non-lowrank learned admission mechanism works better in the mid-K regime than the recent low-rank, grouped, and discrete branches.",
-    "r53 gated param_only k24 -> discard fvu=0.2678903341293335",
-    "NOTE: Round 54 continues severe-stagnation recovery with a pure `routed` architecture test after `gated` also failed badly at K=24.",
     "NOTE: Keep the run pinned at `K=24, EF=12, signum, LR=3.2e-3, AUXK_ALPHA=0.0` so architecture is the only primary variable.",
     "NOTE: `routed` tests whether simple input-dependent support routing, without low-rank trunks or discrete codebooks, works better in the mid-K regime than the recent losing branches.",
     "r54 routed param_only k24 -> discard fvu=0.2877921462059021",
@@ -1202,7 +1228,12 @@
     "NOTE: Integration chain completed for `lowrank_factorized_residual`: config whitelist + `_get_sae_class()` dispatch + class implementation.",
     "NOTE: Exact smoke test passed for `lowrank_factorized_residual` at `K=24, EF=12` on the concrete dispatched architecture class.",
     "NOTE: Gradient check confirmed all parameters in `lowrank_factorized_residual` received gradients, reducing risk of another DDP unused-parameter crash.",
-    "r61 lowrank_factorized_residual edit_sae_code k24 -> discard fvu=0.12982133030891418"
+    "r61 lowrank_factorized_residual edit_sae_code k24 -> discard fvu=0.12982133030891418",
+    "NOTE: Added new prototype architecture `lowrank_soft_codebook_residual` that combines the existing low-rank trunk with a soft codebook residual projection before sparse correction.",
+    "NOTE: Integration chain completed for `lowrank_soft_codebook_residual`: config whitelist + `_get_sae_class()` dispatch + class implementation.",
+    "NOTE: Exact smoke test passed for `lowrank_soft_codebook_residual` at `K=24, EF=12` on the concrete dispatched architecture class.",
+    "NOTE: Gradient check confirmed all parameters in `lowrank_soft_codebook_residual` received gradients, reducing risk of DDP unused-parameter crashes.",
+    "r62 lowrank_soft_codebook_residual edit_sae_code k24 -> archive fvu=0.09756404161453247"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [
@@ -1234,8 +1265,8 @@
     }
   ],
   "next_hypotheses": [
-    "If `lowrank_factorized_residual` is competitive but slightly worse at `K=24`, test `K=16` to see whether bottleneck residual mixing helps more under tighter sparsity.",
-    "If `lowrank_factorized_residual` wins at `K=24`, follow with `K=32` to check whether the gain persists across the mid-K band.",
-    "If it clearly loses at `K=24`, retire the factorized-residual branch and move to another mechanism family rather than tuning hidden width or bottleneck size."
+    "If `lowrank_soft_codebook_residual` is competitive but slightly worse at `K=24`, test `K=16` to see whether soft coarse residual coding helps more under tighter sparsity.",
+    "If `lowrank_soft_codebook_residual` wins at `K=24`, follow with `K=32` to check whether the gain persists across the mid-K band.",
+    "If it clearly loses at `K=24`, retire the codebook-projection branch and move to another mechanism family rather than tuning code count or router softness."
   ]
 }
