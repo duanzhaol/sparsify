@@ -1,0 +1,635 @@
+{"command":"run","hypothesis":"At K=24, the current two-stage soft-codebook backbone may be wasting scarce support by splitting K evenly across stages. A new `lowrank_asymmetric_two_stage_soft_codebook_residual` family that allocates more of K to the first sparse pass and keeps a smaller refinement pass could beat the K=24 anchor by using the strongest existing backbone but changing the stage budget structurally for the small-K regime.","summary":"Repaired the original experiment by completing the architecture integration chain for `lowrank_asymmetric_two_stage_soft_codebook_residual` under `sparsify/` only. The architecture string is now whitelisted in config, dispatched in `_get_sae_class()`, implemented as a concrete class with a front-loaded stage budget, and the exact smoke test passed at `architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12` with forward and backward succeeding.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_asymmetric_two_stage_soft_codebook_residual","family_stage":"prototype","self_review":"This repair stayed within the original experiment design and fixed the actual blocker instead of redesigning the run. The registration chain is now complete and the concrete target passed instantiate/forward/backward smoke validation; the remaining risk is scientific quality, not parse/dispatch failure.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_asymmetric_two_stage_soft_codebook_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 115 attempt 1 fixed a registration-chain blocker for `lowrank_asymmetric_two_stage_soft_codebook_residual`: added config whitelist entry, factory dispatch, and concrete class implementation.","The new class inherits the two-stage soft-codebook backbone and changes only the stage budget structure, using an asymmetric split that front-loads support into stage 1.","Exact smoke test passed for `architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12` with forward/backward succeeding on CUDA, so the next real run should no longer fail at parse/dispatch time."],"next_hypotheses":["If `lowrank_asymmetric_two_stage_soft_codebook_residual` is competitive at K=24, follow with K=16 to test whether asymmetric budget allocation helps even more under tighter sparsity.","If it clearly loses at K=24, continue severe-stagnation search with another structurally different new family rather than returning to selector, routing, or whitening tweaks.","If the full training run fails with a new runtime or autograd issue, treat that as a new blocker distinct from registration and repair the architecture-specific implementation without changing the experiment contract."],"primary_variable":"architecture"}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d194c-659a-71b3-abf4-736f887936dc
+--------
+user
+Continue round 115 in repair mode.
+
+The previous code-edit failed with an engineering blocker.
+Do NOT redesign the experiment. Do NOT change family_name or env_overrides.
+Patch the implementation so the original experiment can run.
+Stay within sparsify/ only.
+Attempt 1 of 5.
+Return one final JSON object matching the action schema.
+
+Architecture integration checklist:
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+Repair context:
+{
+  "round": 115,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "lowrank_asymmetric_two_stage_soft_codebook_residual",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "lowrank_asymmetric_two_stage_soft_codebook_residual"
+      },
+      {
+        "key": "K",
+        "value": "24"
+      },
+      {
+        "key": "EXPANSION_FACTOR",
+        "value": "12"
+      },
+      {
+        "key": "OPTIMIZER",
+        "value": "signum"
+      },
+      {
+        "key": "LR",
+        "value": "3.2e-3"
+      },
+      {
+        "key": "AUXK_ALPHA",
+        "value": "0.0"
+      }
+    ],
+    "summary": "Severe stagnation is now at 16 non-improving rounds, so this round should not do another scalar tweak or reuse another recently losing built-in family. The best next move is a fundamentally different architecture edit on the strongest current backbone: add an asymmetric two-stage soft-codebook variant under `sparsify/` and test it directly at the frontier-relevant K=24 slot with the fixed EF=12/signum/LR=3.2e-3/AUXK recipe.",
+    "hypothesis": "At K=24, the current two-stage soft-codebook backbone may be wasting scarce support by splitting K evenly across stages. A new `lowrank_asymmetric_two_stage_soft_codebook_residual` family that allocates more of K to the first sparse pass and keeps a smaller refinement pass could beat the K=24 anchor by using the strongest existing backbone but changing the stage budget structurally for the small-K regime."
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774246324",
+    "k": "24",
+    "architecture": "lowrank_asymmetric_two_stage_soft_codebook_residual",
+    "expansion_factor": "12",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "experiment_id": "r115_1774246324",
+    "head_commit": "a98cc60f9512b65aa80d3cf6ab71a6d7d5a6e4db",
+    "description": "Severe stagnation is now at 16 non-improving rounds, so this round should not do another scalar tweak or reuse another recently losing built-in family. The best next move is a fundamentally different architecture edit on the strongest current backbone: add an asymmetric two-stage soft-codebook variant under `sparsify/` and test it directly at the frontier-relevant K=24 slot with the fixed EF=12/signum/LR=3.2e-3/AUXK recipe.",
+    "self_review": "This keeps one hypothesis and changes architecture only. It is bolder than another built-in retry but still disciplined because it starts from the current winning family rather than inventing a disconnected mechanism. Main risk: asymmetry may simply reduce second-stage correction capacity and underperform the symmetric split, but that is precisely the structural question worth testing under severe stagnation.",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0115_standard_1774246294.log",
+    "error_type": "ValueError",
+    "error_summary": "ValueError: Unknown architecture: 'lowrank_asymmetric_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')",
+    "traceback_excerpt": "[rank1]: Traceback (most recent call last):\n[rank1]: ValueError: Unknown architecture: 'lowrank_asymmetric_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 229, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'lowrank_asymmetric_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank1]:     parsed_args = self._postprocessing(parsed_args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank1]:     parsed_args = self._instantiate_dataclasses(\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 229, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'lowrank_asymmetric_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:     run()\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:     args = parse(RunConfig)\n[rank0]:            ^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:     parsed_args = parser.parse_args(args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:     args, argv = self.parse_known_args(args, namespace)\n[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:     parsed_args = self._postprocessing(parsed_args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:     parsed_args = self._instantiate_dataclasses(\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 229, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'lowrank_asymmetric_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]:[W323 14:11:40.588968237 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nW0323 14:11:41.674000 115163 site-packages/torch/distributed/elastic/multiprocessing/api.py:908] Sending process 115204 closing signal SIGTERM\nE0323 14:11:41.738000 115163 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 0 (pid: 115203) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n  <NO_OTHER_FAILURES>\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-23_14:11:41\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 0 (local_rank: 0)\n  exitcode  : 1 (pid: 115203)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================"
+  }
+}
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+Using `sae-architecture-integration` here because this is a new-family registration failure. I’m fixing the whitelist, factory dispatch, and concrete class in `sparsify/`, then I’ll run the exact smoke test at `architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12`.
+exec
+/bin/bash -lc "sed -n '290,360p' sparsify/sparse_coder.py" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '193,236p' sparsify/config.py" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '2201,2503p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+ succeeded in 0ms:
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+ succeeded in 0ms:
+class LowRankTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageResidualSparseCoder
+):
+    """Low-rank trunk with soft codebook projection before two-stage sparse refinement."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.num_codes = min(256, max(32, cfg.k * 2))
+        self.codebook = nn.Parameter(
+            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+        )
+        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
+codex
+The blocker is exactly the registration-chain issue from the checklist: the architecture string is missing from config and dispatch, and there is no concrete class yet. I’m patching all three pieces now, keeping the original experiment and launch contract unchanged.
+file update
+M /root/sparsify-ascend/sparsify/config.py
+@@ -220,2 +220,3 @@
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -347,2 +347,4 @@
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+@@ -2323,2 +2325,24 @@
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+apply_patch(auto_approved=true) exited 0 in 7ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/config.py
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 043b60407e21234e7030f07a6857bfe4e9afc3e3..e82331ba73278fe046bfe98cd397551fc6d7f75c
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 152e56a5123fdaa7b5ffff47f8ca779accd56b7d..dc84876bcd61a84ccffbf006b644e0e950767aaa
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -345,6 +345,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+@@ -2321,6 +2323,28 @@
+         )
+ 
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 043b60407e21234e7030f07a6857bfe4e9afc3e3..e82331ba73278fe046bfe98cd397551fc6d7f75c
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 152e56a5123fdaa7b5ffff47f8ca779accd56b7d..dc84876bcd61a84ccffbf006b644e0e950767aaa
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -345,6 +345,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+@@ -2321,6 +2323,28 @@
+         )
+ 
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+codex
+The registration patch is in place. Next I’m running the exact required smoke test on `lowrank_asymmetric_two_stage_soft_codebook_residual` at `K=24, EF=12` to verify parse, dispatch, instantiation, forward, and backward.
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'lowrank_asymmetric_two_stage_soft_codebook_residual'
+k = 24
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 043b60407e21234e7030f07a6857bfe4e9afc3e3..e82331ba73278fe046bfe98cd397551fc6d7f75c
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 152e56a5123fdaa7b5ffff47f8ca779accd56b7d..dc84876bcd61a84ccffbf006b644e0e950767aaa
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -345,6 +345,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+@@ -2321,6 +2323,28 @@
+         )
+ 
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+codex
+The smoke test is still running. I’m waiting for the exact forward/backward result before closing the repair, since registration is not complete until the concrete `(architecture, K, EF)` target passes.
+ succeeded in 4.55s:
+Using fused decoder on CUDA.
+integration_smoke: OK lowrank_asymmetric_two_stage_soft_codebook_residual 24 12 cuda
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 043b60407e21234e7030f07a6857bfe4e9afc3e3..e82331ba73278fe046bfe98cd397551fc6d7f75c
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 152e56a5123fdaa7b5ffff47f8ca779accd56b7d..dc84876bcd61a84ccffbf006b644e0e950767aaa
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -345,6 +345,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+@@ -2321,6 +2323,28 @@
+         )
+ 
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+codex
+{"command":"run","hypothesis":"At K=24, the current two-stage soft-codebook backbone may be wasting scarce support by splitting K evenly across stages. A new `lowrank_asymmetric_two_stage_soft_codebook_residual` family that allocates more of K to the first sparse pass and keeps a smaller refinement pass could beat the K=24 anchor by using the strongest existing backbone but changing the stage budget structurally for the small-K regime.","summary":"Repaired the original experiment by completing the architecture integration chain for `lowrank_asymmetric_two_stage_soft_codebook_residual` under `sparsify/` only. The architecture string is now whitelisted in config, dispatched in `_get_sae_class()`, implemented as a concrete class with a front-loaded stage budget, and the exact smoke test passed at `architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12` with forward and backward succeeding.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"lowrank_asymmetric_two_stage_soft_codebook_residual","family_stage":"prototype","self_review":"This repair stayed within the original experiment design and fixed the actual blocker instead of redesigning the run. The registration chain is now complete and the concrete target passed instantiate/forward/backward smoke validation; the remaining risk is scientific quality, not parse/dispatch failure.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_asymmetric_two_stage_soft_codebook_residual"},{"key":"K","value":"24"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 115 attempt 1 fixed a registration-chain blocker for `lowrank_asymmetric_two_stage_soft_codebook_residual`: added config whitelist entry, factory dispatch, and concrete class implementation.","The new class inherits the two-stage soft-codebook backbone and changes only the stage budget structure, using an asymmetric split that front-loads support into stage 1.","Exact smoke test passed for `architecture=lowrank_asymmetric_two_stage_soft_codebook_residual, K=24, EF=12` with forward/backward succeeding on CUDA, so the next real run should no longer fail at parse/dispatch time."],"next_hypotheses":["If `lowrank_asymmetric_two_stage_soft_codebook_residual` is competitive at K=24, follow with K=16 to test whether asymmetric budget allocation helps even more under tighter sparsity.","If it clearly loses at K=24, continue severe-stagnation search with another structurally different new family rather than returning to selector, routing, or whitening tweaks.","If the full training run fails with a new runtime or autograd issue, treat that as a new blocker distinct from registration and repair the architecture-specific implementation without changing the experiment contract."],"primary_variable":"architecture"}
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 043b60407e21234e7030f07a6857bfe4e9afc3e3..e82331ba73278fe046bfe98cd397551fc6d7f75c
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+             "whitened_lowrank_gated_residual",
+             "lowrank_grouped_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 152e56a5123fdaa7b5ffff47f8ca779accd56b7d..dc84876bcd61a84ccffbf006b644e0e950767aaa
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -345,6 +345,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
++        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "whitened_lowrank_gated_residual":
+@@ -2321,6 +2323,28 @@
+         )
+ 
+ 
++class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        # Favor the first refinement pass at smaller K so most support is spent
++        # on the coarse residual after codebook projection, leaving a smaller
++        # cleanup budget for the second pass.
++        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++
+ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+tokens used
+174,472

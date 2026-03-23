@@ -1,4 +1,5 @@
 import json
+import math
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import NamedTuple
@@ -345,6 +346,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankGroupedSoftCodebookResidualSparseCoder
     if architecture == "lowrank_two_stage_soft_codebook_residual":
         return LowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
@@ -2319,6 +2322,28 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
             fvu,
             auxk_loss,
         )
+
+
+class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageSoftCodebookResidualSparseCoder
+):
+    """Soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        # Favor the first refinement pass at smaller K so most support is spent
+        # on the coarse residual after codebook projection, leaving a smaller
+        # cleanup budget for the second pass.
+        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
+        self.stage2_k = max(1, cfg.k - self.stage1_k)
 
 
 class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
