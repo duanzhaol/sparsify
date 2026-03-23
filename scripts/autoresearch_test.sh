@@ -9,7 +9,7 @@ MASTER_PORT="${MASTER_PORT:-29501}"
 # 输入输出路径配置。
 MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-0.6B}"
 DATASET_PATH="${DATASET_PATH:-$HOME/fineweb-edu/sample/10BT-tokenized-qwen3-2048}"
-ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json}"
+ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_o.json}"
 WANDB_PROJECT="${WANDB_PROJECT:-qwen3-0.6B-auto-0323}"
 SAVE_DIR="${SAVE_DIR:-checkpoints/auto}"
 RUN_NAME="${RUN_NAME:-qwen3-0.6B}"
