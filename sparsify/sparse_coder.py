@@ -348,6 +348,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
         return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "whitened_lowrank_two_stage_soft_codebook_residual":
+        return WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
@@ -2469,6 +2471,143 @@ class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
         )
         stage2_acts, stage2_indices = torch.topk(
             stage2_pre, self.stage2_k, dim=-1, sorted=False
+        )
+        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
+
+        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+
+            aux1_k = min(self.stage1_k, k_aux)
+            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
+
+            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
+
+            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
+
+            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageSoftCodebookResidualSparseCoder
+):
+    """Soft-codebook two-stage residual SAE with normalized residual preconditioning."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        mix_rank = min(d_in, max(cfg.k * 2, d_in // 8))
+        self.preconditioner_down = nn.Linear(
+            d_in, mix_rank, bias=False, device=device, dtype=dtype
+        )
+        self.preconditioner_up = nn.Linear(
+            mix_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+        self.preconditioner_down.weight.data.zero_()
+        self.preconditioner_up.weight.data.zero_()
+        diagonal = min(d_in, mix_rank)
+        self.preconditioner_down.weight.data[:diagonal, :diagonal] = torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+        self.preconditioner_up.weight.data[:diagonal, :diagonal] = 0.05 * torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+
+    def _precondition_residual(self, residual: Tensor) -> Tensor:
+        centered = residual - residual.mean(dim=-1, keepdim=True)
+        rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
+        normalized = centered * rms
+        mixed = normalized + 0.25 * torch.roll(normalized, shifts=1, dims=-1)
+        correction = self.preconditioner_up(self.preconditioner_down(normalized))
+        return mixed + correction
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_input = self._precondition_residual(code_residual)
+        stage1_acts, stage1_indices, stage1_pre = fused_encoder(
+            stage1_input, self.encoder.weight, self.encoder.bias, self.stage1_k
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = self._precondition_residual(code_residual - stage1_out)
+        stage2_acts, stage2_indices, stage2_pre = fused_encoder(
+            stage2_input,
+            self.residual_encoder.weight,
+            self.residual_encoder.bias,
+            self.stage2_k,
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_pre = torch.maximum(stage1_pre, stage2_pre)
+        return EncoderOutput(combined_acts, combined_indices, combined_pre)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_input = self._precondition_residual(code_residual)
+        stage1_acts, stage1_indices, stage1_pre = fused_encoder(
+            stage1_input, self.encoder.weight, self.encoder.bias, self.stage1_k
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = self._precondition_residual(code_residual - stage1_out)
+        stage2_acts, stage2_indices, stage2_pre = fused_encoder(
+            stage2_input,
+            self.residual_encoder.weight,
+            self.residual_encoder.bias,
+            self.stage2_k,
         )
         stage2_out = self.decode_residual(stage2_acts, stage2_indices)
 
