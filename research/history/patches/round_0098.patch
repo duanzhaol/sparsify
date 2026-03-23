@@ -1,0 +1,96 @@
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -2154,6 +2154,15 @@
+         self.stage1_router.bias.data.zero_()
+         self.stage2_router.bias.data.zero_()
+ 
++    @staticmethod
++    def _straight_through_top_acts(
++        acts: Tensor, routed_acts: Tensor, top_indices: Tensor
++    ) -> Tensor:
++        top_raw = acts.gather(-1, top_indices)
++        top_routed = routed_acts.gather(-1, top_indices)
++        # Preserve router gradients while decoding the unshrunk activations.
++        return top_routed + (top_raw - top_routed).detach()
++
+     def _route_stage(
+         self,
+         inputs: Tensor,
+@@ -2161,7 +2170,7 @@
+         bias: Tensor,
+         router: nn.Linear,
+         k: int,
+-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
++    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+         pre_acts = F.linear(inputs, weight, bias)
+         acts = F.relu(pre_acts)
+         router_logits = router(inputs) / self.cfg.gated_temperature
+@@ -2169,8 +2178,8 @@
+         routed_acts = acts * router_gate
+         scores = routed_acts + 0.1 * torch.tanh(router_logits)
+         _, top_indices = torch.topk(scores, k, dim=-1, sorted=False)
+-        top_acts = routed_acts.gather(-1, top_indices)
+-        return top_acts, top_indices, scores, routed_acts
++        top_acts = self._straight_through_top_acts(acts, routed_acts, top_indices)
++        return top_acts, top_indices, scores, acts, routed_acts
+ 
+     def encode(self, x: Tensor) -> EncoderOutput:
+         x = x - self.b_dec
+@@ -2179,7 +2188,7 @@
+         coarse, _ = self._project_codebook(residual)
+         code_residual = residual - coarse
+ 
+-        stage1_acts, stage1_indices, stage1_scores, _ = self._route_stage(
++        stage1_acts, stage1_indices, stage1_scores, _, _ = self._route_stage(
+             code_residual,
+             self.encoder.weight,
+             self.encoder.bias,
+@@ -2189,7 +2198,7 @@
+         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+ 
+         stage2_input = code_residual - stage1_out
+-        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
++        stage2_acts, stage2_indices, stage2_scores, _, _ = self._route_stage(
+             stage2_input,
+             self.residual_encoder.weight,
+             self.residual_encoder.bias,
+@@ -2212,7 +2221,7 @@
+         coarse, _ = self._project_codebook(residual)
+         code_residual = residual - coarse
+ 
+-        stage1_acts, stage1_indices, stage1_scores, stage1_routed = self._route_stage(
++        stage1_acts, stage1_indices, stage1_scores, stage1_full, stage1_routed = self._route_stage(
+             code_residual,
+             self.encoder.weight,
+             self.encoder.bias,
+@@ -2222,7 +2231,7 @@
+         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+ 
+         stage2_input = code_residual - stage1_out
+-        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
++        stage2_acts, stage2_indices, stage2_scores, _, _ = self._route_stage(
+             stage2_input,
+             self.residual_encoder.weight,
+             self.residual_encoder.bias,
+@@ -2250,7 +2259,9 @@
+             aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
+ 
+             _, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+-            aux1_acts = stage1_routed.gather(-1, aux1_indices)
++            aux1_acts = self._straight_through_top_acts(
++                stage1_full, stage1_routed, aux1_indices
++            )
+             aux1_out = self.decode_residual(aux1_acts, aux1_indices)
+ 
+             aux2_input = code_residual - aux1_out
+@@ -2270,7 +2281,9 @@
+                 -torch.inf,
+             )
+             _, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+-            aux2_acts = aux2_routed.gather(-1, aux2_indices)
++            aux2_acts = self._straight_through_top_acts(
++                aux2_full, aux2_routed, aux2_indices
++            )
+             aux2_out = self.decode_residual(aux2_acts, aux2_indices)
+ 
+             e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec

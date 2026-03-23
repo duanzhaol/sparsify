@@ -126,7 +126,7 @@ def commit_round_state(
     for d in (log_dir, patch_dir):
         if d.is_dir():
             for f in d.iterdir():
-                if f.is_file() and f"_{round_id:04d}" in f.name:
+                if f.is_file() and (f"_{round_id:04d}" in f.name or f.name.startswith(f"round{round_id:04d}")):
                     paths.append(f)
     stage_paths(paths)
     if git(["diff", "--cached", "--quiet"], check=False).returncode == 0:
