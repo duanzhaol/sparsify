@@ -348,6 +348,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
     if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
         return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
@@ -2524,6 +2526,25 @@ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
             fvu,
             auxk_loss,
         )
+
+
+class RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+    RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+):
+    """Routed soft-codebook two-stage residual SAE with a front-loaded sparse budget."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.stage1_k = max(1, math.ceil(cfg.k * 0.75))
+        self.stage2_k = max(1, cfg.k - self.stage1_k)
 
 
 class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
