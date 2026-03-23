@@ -218,6 +218,7 @@ class TrainConfig(Serializable):
             "lowrank_gated_soft_codebook_residual",
             "lowrank_grouped_soft_codebook_residual",
             "lowrank_two_stage_soft_codebook_residual",
+            "bucketed_lowrank_two_stage_soft_codebook_residual",
             "lowrank_asymmetric_two_stage_soft_codebook_residual",
             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
             "routed_lowrank_two_stage_soft_codebook_residual",

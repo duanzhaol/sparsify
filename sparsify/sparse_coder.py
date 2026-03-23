@@ -346,6 +346,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankGroupedSoftCodebookResidualSparseCoder
     if architecture == "lowrank_two_stage_soft_codebook_residual":
         return LowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
+        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
@@ -2277,6 +2279,196 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
             self.residual_encoder.weight,
             self.residual_encoder.bias,
             self.stage2_k,
+        )
+        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
+
+        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+
+            aux1_k = min(self.stage1_k, k_aux)
+            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
+
+            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
+
+            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
+
+            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageSoftCodebookResidualSparseCoder
+):
+    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        # This variant replaces the inherited stage scorers with bucketed
+        # low/high mixtures, so keep the parent scorer weights out of DDP.
+        self.encoder.weight.requires_grad_(False)
+        self.encoder.bias.requires_grad_(False)
+        self.residual_encoder.weight.requires_grad_(False)
+        self.residual_encoder.bias.requires_grad_(False)
+        self.stage1_low_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.stage1_high_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.stage2_low_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.stage2_high_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.stage1_low_encoder.bias.data.zero_()
+        self.stage1_high_encoder.bias.data.zero_()
+        self.stage2_low_encoder.bias.data.zero_()
+        self.stage2_high_encoder.bias.data.zero_()
+
+        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
+        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
+        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
+        self.stage2_high_encoder.weight.data.copy_(
+            self.residual_encoder.weight.data * 1.05
+        )
+
+        self.stage1_bucket_scale = nn.Parameter(
+            torch.tensor(2.0, device=device, dtype=dtype)
+        )
+        self.stage1_bucket_bias = nn.Parameter(
+            torch.tensor(0.0, device=device, dtype=dtype)
+        )
+        self.stage2_bucket_scale = nn.Parameter(
+            torch.tensor(2.0, device=device, dtype=dtype)
+        )
+        self.stage2_bucket_bias = nn.Parameter(
+            torch.tensor(0.0, device=device, dtype=dtype)
+        )
+
+    def _bucketed_stage_acts(
+        self,
+        residual: Tensor,
+        low_encoder: nn.Linear,
+        high_encoder: nn.Linear,
+        bucket_scale: Tensor,
+        bucket_bias: Tensor,
+    ) -> Tensor:
+        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
+        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
+        norms = residual.norm(dim=-1, keepdim=True)
+        centered_norms = norms - norms.mean()
+        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
+        return (1.0 - gate) * low_acts + gate * high_acts
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_pre = self._bucketed_stage_acts(
+            code_residual,
+            self.stage1_low_encoder,
+            self.stage1_high_encoder,
+            self.stage1_bucket_scale,
+            self.stage1_bucket_bias,
+        )
+        stage1_acts, stage1_indices = torch.topk(
+            stage1_pre, self.stage1_k, dim=-1, sorted=False
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = code_residual - stage1_out
+        stage2_pre = self._bucketed_stage_acts(
+            stage2_input,
+            self.stage2_low_encoder,
+            self.stage2_high_encoder,
+            self.stage2_bucket_scale,
+            self.stage2_bucket_bias,
+        )
+        stage2_acts, stage2_indices = torch.topk(
+            stage2_pre, self.stage2_k, dim=-1, sorted=False
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_pre = torch.maximum(stage1_pre, stage2_pre)
+        return EncoderOutput(combined_acts, combined_indices, combined_pre)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_pre = self._bucketed_stage_acts(
+            code_residual,
+            self.stage1_low_encoder,
+            self.stage1_high_encoder,
+            self.stage1_bucket_scale,
+            self.stage1_bucket_bias,
+        )
+        stage1_acts, stage1_indices = torch.topk(
+            stage1_pre, self.stage1_k, dim=-1, sorted=False
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = code_residual - stage1_out
+        stage2_pre = self._bucketed_stage_acts(
+            stage2_input,
+            self.stage2_low_encoder,
+            self.stage2_high_encoder,
+            self.stage2_bucket_scale,
+            self.stage2_bucket_bias,
+        )
+        stage2_acts, stage2_indices = torch.topk(
+            stage2_pre, self.stage2_k, dim=-1, sorted=False
         )
         stage2_out = self.decode_residual(stage2_acts, stage2_indices)
 

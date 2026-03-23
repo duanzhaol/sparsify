@@ -1,0 +1,1629 @@
+{"command":"run","hypothesis":"At smaller K, a single global residual dictionary may be the remaining bottleneck even on the strong soft-codebook backbone. A new `bucketed_lowrank_two_stage_soft_codebook_residual` family could beat the K=16 frontier by routing samples into different residual dictionaries after the low-rank trunk and soft codebook coarse path, improving conditional specialization without changing the fixed recipe.","summary":"Repaired the original experiment by completing the full integration loop for `bucketed_lowrank_two_stage_soft_codebook_residual` inside `sparsify/` only. The exact architecture string is now whitelisted in config, dispatched in `_get_sae_class()`, and implemented as a concrete class that keeps the two-stage soft-codebook backbone while replacing each sparse stage scorer with the working norm-bucketed mixture pattern. The required smoke test passed at `architecture=bucketed_lowrank_two_stage_soft_codebook_residual, K=16, EF=12` with forward and backward succeeding on CUDA.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"bucketed_lowrank_two_stage_soft_codebook_residual","family_stage":"prototype","self_review":"This repair fixed the actual registration blocker without redesigning the experiment or changing its launch contract. The new family now satisfies the integration checklist: config whitelist updated, factory dispatch added, class implementation present, and the exact target passed instantiate/forward/backward smoke validation.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"bucketed_lowrank_two_stage_soft_codebook_residual"},{"key":"K","value":"16"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 117 attempt 1 fixed a registration-chain blocker for `bucketed_lowrank_two_stage_soft_codebook_residual` by adding the exact architecture string to `valid_archs`, wiring `_get_sae_class()` dispatch, and implementing the concrete class in `sparsify/sparse_coder.py`.","The new class keeps the low-rank trunk and soft-codebook coarse path from `lowrank_two_stage_soft_codebook_residual` and replaces each sparse stage scorer with a norm-bucketed low/high encoder mixture patterned after the working `bucketed_lowrank_residual` family.","Exact smoke test passed for `architecture=bucketed_lowrank_two_stage_soft_codebook_residual, K=16, EF=12` with forward/backward succeeding on CUDA, so the next real run should no longer fail at parse/dispatch time."],"next_hypotheses":["If `bucketed_lowrank_two_stage_soft_codebook_residual` trains cleanly and is competitive at K=16, follow with K=24 to see whether the conditional specialization benefit persists across the mid-K band.","If the full training run now fails with a different runtime or autograd issue, repair that new architecture-specific blocker while keeping the same family and env overrides.","If it trains successfully but clearly loses at K=16, continue severe-stagnation search with another genuinely different new family rather than more soft-codebook conditional variants."],"primary_variable":"architecture"}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d194c-659a-71b3-abf4-736f887936dc
+--------
+user
+Continue round 117 in repair mode.
+
+The previous code-edit failed with an engineering blocker.
+Do NOT redesign the experiment. Do NOT change family_name or env_overrides.
+Patch the implementation so the original experiment can run.
+Stay within sparsify/ only.
+Attempt 1 of 5.
+Return one final JSON object matching the action schema.
+
+Architecture integration checklist:
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+Repair context:
+{
+  "round": 117,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "bucketed_lowrank_two_stage_soft_codebook_residual",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "bucketed_lowrank_two_stage_soft_codebook_residual"
+      },
+      {
+        "key": "K",
+        "value": "16"
+      },
+      {
+        "key": "EXPANSION_FACTOR",
+        "value": "12"
+      },
+      {
+        "key": "OPTIMIZER",
+        "value": "signum"
+      },
+      {
+        "key": "LR",
+        "value": "3.2e-3"
+      },
+      {
+        "key": "AUXK_ALPHA",
+        "value": "0.0"
+      }
+    ],
+    "summary": "Severe stagnation has reached 18 non-improving rounds, so another minor tweak is not justified. The next move should be a genuinely different new family, and the most promising untried direction is conditional specialization on top of the strongest backbone rather than more stage-split or selector variants. I would add `bucketed_lowrank_two_stage_soft_codebook_residual` under `sparsify/` and test it directly at the more valuable smaller-K slot `K=16` with the fixed EF=12/signum/LR=3.2e-3/AUXK recipe.",
+    "hypothesis": "At smaller K, a single global residual dictionary may be the remaining bottleneck even on the strong soft-codebook backbone. A new `bucketed_lowrank_two_stage_soft_codebook_residual` family could beat the K=16 frontier by routing samples into different residual dictionaries after the low-rank trunk and soft codebook coarse path, improving conditional specialization without changing the fixed recipe."
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774247529",
+    "k": "16",
+    "architecture": "bucketed_lowrank_two_stage_soft_codebook_residual",
+    "expansion_factor": "12",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "experiment_id": "r117_1774247529",
+    "head_commit": "97ae83b9481c3f6fa0e621482c6c55d924166b00",
+    "description": "Severe stagnation has reached 18 non-improving rounds, so another minor tweak is not justified. The next move should be a genuinely different new family, and the most promising untried direction is conditional specialization on top of the strongest backbone rather than more stage-split or selector variants. I would add `bucketed_lowrank_two_stage_soft_codebook_residual` under `sparsify/` and test it directly at the more valuable smaller-K slot `K=16` with the fixed EF=12/signum/LR=3.2e-3/AUXK recipe.",
+    "self_review": "This is a real architecture change and a more structurally different hypothesis than the recent soft-codebook budget/routing variants. The main risk is that bucketing already lost on the weaker low-rank residual backbone, but pairing it with the much stronger two-stage soft-codebook trunk is a defensible severe-stagnation probe rather than a minor tweak.",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0117_standard_1774247499.log",
+    "error_type": "ValueError",
+    "error_summary": "ValueError: Unknown architecture: 'bucketed_lowrank_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')",
+    "traceback_excerpt": "[rank1]: Traceback (most recent call last):\n[rank1]: ValueError: Unknown architecture: 'bucketed_lowrank_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 231, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'bucketed_lowrank_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 231, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'bucketed_lowrank_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 219, in <module>\n[rank0]:     run()\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 155, in run\n[rank0]:     args = parse(RunConfig)\n[rank0]:            ^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:     parsed_args = parser.parse_args(args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:     args, argv = self.parse_known_args(args, namespace)\n[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:     parsed_args = self._postprocessing(parsed_args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:     parsed_args = self._instantiate_dataclasses(\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 231, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'bucketed_lowrank_two_stage_soft_codebook_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]:[W323 14:31:45.351682585 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nE0323 14:31:46.524000 117985 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 0 (pid: 118025) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n[1]:\n  time      : 2026-03-23_14:31:46\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 118026)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-23_14:31:46\n  host      : iZwz97h4mvmwsu3ln6y18eZ\n  rank      : 0 (local_rank: 0)\n  exitcode  : 1 (pid: 118025)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================"
+  }
+}
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+Using `sae-architecture-integration` here because this is another exact unknown-architecture failure. I’m wiring `bucketed_lowrank_two_stage_soft_codebook_residual` through config and dispatch, implementing the concrete class under `sparsify/`, and then I’ll run the exact smoke test at `K=16, EF=12`.
+exec
+/bin/bash -lc "sed -n '193,236p' sparsify/config.py" in /root/sparsify-ascend succeeded in 0ms:
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+exec
+/bin/bash -lc "sed -n '290,360p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+exec
+/bin/bash -lc "sed -n '1500,1618p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+    """Low-rank trunk with norm-routed residual dictionaries."""
+
+    def __init__(
+exec
+/bin/bash -lc "sed -n '2201,2320p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+            fvu,
+            auxk_loss,
+        )
+
+
+class LowRankTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageResidualSparseCoder
+):
+    """Low-rank trunk with soft codebook projection before two-stage sparse refinement."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+codex
+The new family is missing exactly the required registration pieces. I’m implementing it as a focused variant of the existing two-stage soft-codebook model: keep the low-rank trunk and soft codebook coarse path, but replace each stage’s scorer with the norm-bucketed residual mixture pattern from the working `bucketed_lowrank_residual`.
+file update
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+@@ -348,2 +348,4 @@
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2328,2 +2330,186 @@
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+M /root/sparsify-ascend/sparsify/config.py
+@@ -220,2 +220,3 @@
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+apply_patch(auto_approved=true) exited 0 in 8ms:
+Success. Updated the following files:
+M /root/sparsify-ascend/sparsify/config.py
+M /root/sparsify-ascend/sparsify/sparse_coder.py
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 98ea9d5e9e6eb2bea4c7a13ceb3ac76ea672a2f5..e0de77f13eb92c64b083e123967b5b5f125de646
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index afa99ea9d2726ac2e248fa931610f781c93afab3..b8cf02a1ec650e28a332bb49c5a9ef24c002a0c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -346,6 +346,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2326,6 +2328,190 @@
+         )
+ 
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 98ea9d5e9e6eb2bea4c7a13ceb3ac76ea672a2f5..e0de77f13eb92c64b083e123967b5b5f125de646
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index afa99ea9d2726ac2e248fa931610f781c93afab3..b8cf02a1ec650e28a332bb49c5a9ef24c002a0c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -346,6 +346,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2326,6 +2328,190 @@
+         )
+ 
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+codex
+The new bucketed soft-codebook family is now registered and implemented. I’m running the exact smoke test at `architecture=bucketed_lowrank_two_stage_soft_codebook_residual, K=16, EF=12` to verify the real target before returning the repair.
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'bucketed_lowrank_two_stage_soft_codebook_residual'
+k = 16
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+PY" in /root/sparsify-ascendfile update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 98ea9d5e9e6eb2bea4c7a13ceb3ac76ea672a2f5..e0de77f13eb92c64b083e123967b5b5f125de646
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index afa99ea9d2726ac2e248fa931610f781c93afab3..b8cf02a1ec650e28a332bb49c5a9ef24c002a0c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -346,6 +346,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2326,6 +2328,190 @@
+         )
+ 
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+ succeeded in 4.54s:
+Using fused decoder on CUDA.
+integration_smoke: OK bucketed_lowrank_two_stage_soft_codebook_residual 16 12 cuda
+codex
+The exact smoke test is still running. I’m waiting on the concrete forward/backward result because the integration is only complete if this specific `(architecture, K=16, EF=12)` target passes.
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 98ea9d5e9e6eb2bea4c7a13ceb3ac76ea672a2f5..e0de77f13eb92c64b083e123967b5b5f125de646
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index afa99ea9d2726ac2e248fa931610f781c93afab3..b8cf02a1ec650e28a332bb49c5a9ef24c002a0c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -346,6 +346,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2326,6 +2328,190 @@
+         )
+ 
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+codex
+{"command":"run","hypothesis":"At smaller K, a single global residual dictionary may be the remaining bottleneck even on the strong soft-codebook backbone. A new `bucketed_lowrank_two_stage_soft_codebook_residual` family could beat the K=16 frontier by routing samples into different residual dictionaries after the low-rank trunk and soft codebook coarse path, improving conditional specialization without changing the fixed recipe.","summary":"Repaired the original experiment by completing the full integration loop for `bucketed_lowrank_two_stage_soft_codebook_residual` inside `sparsify/` only. The exact architecture string is now whitelisted in config, dispatched in `_get_sae_class()`, and implemented as a concrete class that keeps the two-stage soft-codebook backbone while replacing each sparse stage scorer with the working norm-bucketed mixture pattern. The required smoke test passed at `architecture=bucketed_lowrank_two_stage_soft_codebook_residual, K=16, EF=12` with forward and backward succeeding on CUDA.","change_type":"edit_sae_code","experiment_tier":"full","expected_win":"lower_fvu","family_name":"bucketed_lowrank_two_stage_soft_codebook_residual","family_stage":"prototype","self_review":"This repair fixed the actual registration blocker without redesigning the experiment or changing its launch contract. The new family now satisfies the integration checklist: config whitelist updated, factory dispatch added, class implementation present, and the exact target passed instantiate/forward/backward smoke validation.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"bucketed_lowrank_two_stage_soft_codebook_residual"},{"key":"K","value":"16"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.2e-3"},{"key":"AUXK_ALPHA","value":"0.0"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Repair round 117 attempt 1 fixed a registration-chain blocker for `bucketed_lowrank_two_stage_soft_codebook_residual` by adding the exact architecture string to `valid_archs`, wiring `_get_sae_class()` dispatch, and implementing the concrete class in `sparsify/sparse_coder.py`.","The new class keeps the low-rank trunk and soft-codebook coarse path from `lowrank_two_stage_soft_codebook_residual` and replaces each sparse stage scorer with a norm-bucketed low/high encoder mixture patterned after the working `bucketed_lowrank_residual` family.","Exact smoke test passed for `architecture=bucketed_lowrank_two_stage_soft_codebook_residual, K=16, EF=12` with forward/backward succeeding on CUDA, so the next real run should no longer fail at parse/dispatch time."],"next_hypotheses":["If `bucketed_lowrank_two_stage_soft_codebook_residual` trains cleanly and is competitive at K=16, follow with K=24 to see whether the conditional specialization benefit persists across the mid-K band.","If the full training run now fails with a different runtime or autograd issue, repair that new architecture-specific blocker while keeping the same family and env overrides.","If it trains successfully but clearly loses at K=16, continue severe-stagnation search with another genuinely different new family rather than more soft-codebook conditional variants."],"primary_variable":"architecture"}
+file update:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 98ea9d5e9e6eb2bea4c7a13ceb3ac76ea672a2f5..e0de77f13eb92c64b083e123967b5b5f125de646
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -218,6 +218,7 @@
+             "lowrank_gated_soft_codebook_residual",
+             "lowrank_grouped_soft_codebook_residual",
+             "lowrank_two_stage_soft_codebook_residual",
++            "bucketed_lowrank_two_stage_soft_codebook_residual",
+             "lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+             "routed_lowrank_two_stage_soft_codebook_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index afa99ea9d2726ac2e248fa931610f781c93afab3..b8cf02a1ec650e28a332bb49c5a9ef24c002a0c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -346,6 +346,8 @@
+         return LowRankGroupedSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_two_stage_soft_codebook_residual":
+         return LowRankTwoStageSoftCodebookResidualSparseCoder
++    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
++        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+         return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+     if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+@@ -2326,6 +2328,190 @@
+         )
+ 
+ 
++class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
++    LowRankTwoStageSoftCodebookResidualSparseCoder
++):
++    """Soft-codebook two-stage residual SAE with norm-bucketed stage scorers."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        self.stage1_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_low_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage2_high_encoder = nn.Linear(
++            d_in, self.num_latents, device=device, dtype=dtype
++        )
++        self.stage1_low_encoder.bias.data.zero_()
++        self.stage1_high_encoder.bias.data.zero_()
++        self.stage2_low_encoder.bias.data.zero_()
++        self.stage2_high_encoder.bias.data.zero_()
++
++        self.stage1_low_encoder.weight.data.copy_(self.encoder.weight.data)
++        self.stage1_high_encoder.weight.data.copy_(self.encoder.weight.data * 1.05)
++        self.stage2_low_encoder.weight.data.copy_(self.residual_encoder.weight.data)
++        self.stage2_high_encoder.weight.data.copy_(
++            self.residual_encoder.weight.data * 1.05
++        )
++
++        self.stage1_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage1_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_scale = nn.Parameter(
++            torch.tensor(2.0, device=device, dtype=dtype)
++        )
++        self.stage2_bucket_bias = nn.Parameter(
++            torch.tensor(0.0, device=device, dtype=dtype)
++        )
++
++    def _bucketed_stage_acts(
++        self,
++        residual: Tensor,
++        low_encoder: nn.Linear,
++        high_encoder: nn.Linear,
++        bucket_scale: Tensor,
++        bucket_bias: Tensor,
++    ) -> Tensor:
++        low_acts = F.relu(F.linear(residual, low_encoder.weight, low_encoder.bias))
++        high_acts = F.relu(F.linear(residual, high_encoder.weight, high_encoder.bias))
++        norms = residual.norm(dim=-1, keepdim=True)
++        centered_norms = norms - norms.mean()
++        gate = torch.sigmoid(bucket_scale * centered_norms + bucket_bias)
++        return (1.0 - gate) * low_acts + gate * high_acts
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_pre = torch.maximum(stage1_pre, stage2_pre)
++        return EncoderOutput(combined_acts, combined_indices, combined_pre)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        coarse, _ = self._project_codebook(residual)
++        code_residual = residual - coarse
++
++        stage1_pre = self._bucketed_stage_acts(
++            code_residual,
++            self.stage1_low_encoder,
++            self.stage1_high_encoder,
++            self.stage1_bucket_scale,
++            self.stage1_bucket_bias,
++        )
++        stage1_acts, stage1_indices = torch.topk(
++            stage1_pre, self.stage1_k, dim=-1, sorted=False
++        )
++        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
++
++        stage2_input = code_residual - stage1_out
++        stage2_pre = self._bucketed_stage_acts(
++            stage2_input,
++            self.stage2_low_encoder,
++            self.stage2_high_encoder,
++            self.stage2_bucket_scale,
++            self.stage2_bucket_bias,
++        )
++        stage2_acts, stage2_indices = torch.topk(
++            stage2_pre, self.stage2_k, dim=-1, sorted=False
++        )
++        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
++
++        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++
++            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
++            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
++
++            aux1_k = min(self.stage1_k, k_aux)
++            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
++
++            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
++            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
++
++            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
++            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
++
++            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+     LowRankTwoStageSoftCodebookResidualSparseCoder
+ ):
+
+tokens used
+235,000
