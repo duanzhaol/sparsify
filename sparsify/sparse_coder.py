@@ -341,6 +341,8 @@ def _get_sae_class(architecture: str) -> type:
         return LowRankGroupedSoftCodebookResidualSparseCoder
     if architecture == "lowrank_two_stage_soft_codebook_residual":
         return LowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+        return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
     if architecture == "whitened_lowrank_gated_residual":
         return WhitenedLowRankGatedResidualSparseCoder
     if architecture == "lowrank_grouped_residual":
@@ -2102,6 +2104,173 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
             aux1_out = self.decode_residual(aux1_acts, aux1_indices)
 
             aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+            aux2_out = self.decode_residual(aux2_acts, aux2_indices)
+
+            e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+    LowRankTwoStageSoftCodebookResidualSparseCoder
+):
+    """Soft-codebook two-stage residual SAE with explicit router-driven support selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.stage1_router = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+        self.stage2_router = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        nn.init.kaiming_uniform_(self.stage1_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.stage2_router.weight, a=5**0.5)
+        self.stage1_router.bias.data.zero_()
+        self.stage2_router.bias.data.zero_()
+
+    def _route_stage(
+        self,
+        inputs: Tensor,
+        weight: Tensor,
+        bias: Tensor,
+        router: nn.Linear,
+        k: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        pre_acts = F.linear(inputs, weight, bias)
+        acts = F.relu(pre_acts)
+        router_logits = router(inputs) / self.cfg.gated_temperature
+        router_gate = torch.sigmoid(router_logits)
+        routed_acts = acts * router_gate
+        scores = routed_acts + 0.1 * torch.tanh(router_logits)
+        _, top_indices = torch.topk(scores, k, dim=-1, sorted=False)
+        top_acts = routed_acts.gather(-1, top_indices)
+        return top_acts, top_indices, scores, routed_acts
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x))
+        residual = x - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_acts, stage1_indices, stage1_scores, _ = self._route_stage(
+            code_residual,
+            self.encoder.weight,
+            self.encoder.bias,
+            self.stage1_router,
+            self.stage1_k,
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = code_residual - stage1_out
+        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
+            stage2_input,
+            self.residual_encoder.weight,
+            self.residual_encoder.bias,
+            self.stage2_router,
+            self.stage2_k,
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_scores = torch.maximum(stage1_scores, stage2_scores)
+        return EncoderOutput(combined_acts, combined_indices, combined_scores)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
+        residual = x_centered - trunk
+        coarse, _ = self._project_codebook(residual)
+        code_residual = residual - coarse
+
+        stage1_acts, stage1_indices, stage1_scores, stage1_routed = self._route_stage(
+            code_residual,
+            self.encoder.weight,
+            self.encoder.bias,
+            self.stage1_router,
+            self.stage1_k,
+        )
+        stage1_out = self.decode_residual(stage1_acts, stage1_indices)
+
+        stage2_input = code_residual - stage1_out
+        stage2_acts, stage2_indices, stage2_scores, _ = self._route_stage(
+            stage2_input,
+            self.residual_encoder.weight,
+            self.residual_encoder.bias,
+            self.stage2_router,
+            self.stage2_k,
+        )
+        stage2_out = self.decode_residual(stage2_acts, stage2_indices)
+
+        sae_out = trunk + coarse + stage1_out + stage2_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+
+            aux_stage1 = torch.where(dead_mask[None], stage1_scores, -torch.inf)
+
+            aux1_k = min(self.stage1_k, k_aux)
+            aux2_k = min(self.stage2_k, max(1, k_aux - aux1_k))
+
+            _, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+            aux1_acts = stage1_routed.gather(-1, aux1_indices)
+            aux1_out = self.decode_residual(aux1_acts, aux1_indices)
+
+            aux2_input = code_residual - aux1_out
+            aux2_logits = F.linear(
+                aux2_input,
+                self.residual_encoder.weight,
+                self.residual_encoder.bias,
+            )
+            aux2_full = F.relu(aux2_logits)
+            aux2_router_logits = (
+                self.stage2_router(aux2_input) / self.cfg.gated_temperature
+            )
+            aux2_routed = aux2_full * torch.sigmoid(aux2_router_logits)
+            aux_stage2 = torch.where(
+                dead_mask[None],
+                aux2_routed + 0.1 * torch.tanh(aux2_router_logits),
+                -torch.inf,
+            )
+            _, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+            aux2_acts = aux2_routed.gather(-1, aux2_indices)
             aux2_out = self.decode_residual(aux2_acts, aux2_indices)
 
             e_hat = trunk + coarse + aux1_out + aux2_out + self.b_dec
