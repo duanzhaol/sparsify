@@ -1,4 +1,7 @@
-"""Agent module: LLM invocation, prompt construction, and response parsing."""
+"""Agent module: LLM invocation and response parsing.
+
+Prompt construction is delegated to prompt.py.
+"""
 
 from __future__ import annotations
 
@@ -11,16 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from .git_ops import REPO_ROOT
+from .prompt import compose_proposal, compose_resume, compose_repair
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
     LOG_DIR,
     SCHEMA_PATH,
     LoopConfig,
-)
-
-ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
-    "/root/.codex/skills/sae-architecture-integration/SKILL.md"
 )
 
 
@@ -146,56 +146,8 @@ class Agent:
         state: Any,  # StateManager
         policy_guidance: str,
     ) -> str:
-        """Construct the full proposal prompt."""
-        context = {
-            "frontier": state.frontier_digest(limit=8),
-            "agent_state": {
-                "round_index": state.round_index,
-                "consecutive_crashes": state.consecutive_crashes,
-                "consecutive_no_improve": state.consecutive_no_improve,
-                "rounds_since_new_family": state.rounds_since_new_family,
-            },
-            "memory_digest": state.memory_digest(),
-            "operator_hints": state.get_pending_hints()[:8],
-            "operator_guide_excerpt": state.load_operator_guide_excerpt(),
-            "prior_research_history": state.load_prior_research(),
-            "recent_results": _summarize_results(state.load_results(limit=8)),
-            "recent_round_summaries": state.recent_round_summaries_trimmed(limit=3),
-        }
-
-        # Architecture integration checklist (conditional)
-        checklist = _load_architecture_checklist()
-        if checklist and _should_include_checklist(state.memory, context["recent_round_summaries"]):
-            context["architecture_integration_checklist"] = checklist
-
-        policy_section = ""
-        if policy_guidance:
-            policy_section = f"\n\nPolicy guidance:\n{policy_guidance}\n"
-
-        return f"""\
-You are the SAE research agent for this repository.
-
-Primary objective:
-- Maintain and improve the Pareto frontier across FVU and K
-- K=128 is an anchor, not the only success criterion
-- Smaller K is valuable when it creates a non-dominated tradeoff
-- Reducing K is more important than reducing expansion_factor
-
-Execution layer is fixed:
-- Training: scripts/autoresearch_test.sh
-- Results: research/controller.py
-- Memory: research/history/
-
-Rules:
-- Edit ONLY files under sparsify/
-- Use env_overrides for parameter-only experiments
-- ONE hypothesis per round
-- Set primary_variable to indicate which dimension changes
-- Never return command="stop"
-- Return a final JSON object matching the action schema
-{policy_section}
-Current context:
-{json.dumps(context, indent=2)}"""
+        """Construct the full proposal prompt via prompt.py."""
+        return compose_proposal(state, policy_guidance)
 
     def _build_resume_prompt(
         self,
@@ -203,42 +155,8 @@ Current context:
         round_id: int,
         policy_guidance: str,
     ) -> str:
-        """Lightweight delta prompt for resuming an existing session.
-
-        The agent already has the full system instructions and operator guide
-        from the initial prompt.  We only send what changed since last round:
-        latest results, updated frontier, and policy guidance.
-        """
-        update = {
-            "round": round_id,
-            "frontier": state.frontier_digest(limit=8),
-            "latest_results": _summarize_results(state.load_results(limit=3)),
-            "latest_round_summary": state.recent_round_summaries_trimmed(limit=1),
-            "agent_state": {
-                "consecutive_crashes": state.consecutive_crashes,
-                "consecutive_no_improve": state.consecutive_no_improve,
-                "rounds_since_new_family": state.rounds_since_new_family,
-            },
-            "pending_hints": state.get_pending_hints()[:4],
-            "next_hypotheses": state.memory.get("next_hypotheses", [])[:5],
-        }
-
-        # Only include checklist if needed (same logic as full prompt)
-        checklist = _load_architecture_checklist()
-        summaries = state.recent_round_summaries_trimmed(limit=2)
-        if checklist and _should_include_checklist(state.memory, summaries):
-            update["architecture_integration_checklist"] = checklist
-
-        policy_section = ""
-        if policy_guidance:
-            policy_section = f"\nPolicy guidance:\n{policy_guidance}\n"
-
-        return f"""\
-Continue the SAE research session. Round {round_id}.
-Return one JSON object matching the action schema. No markdown fences.
-{policy_section}
-Structured update:
-{json.dumps(update, indent=2)}"""
+        """Lightweight delta prompt via prompt.py."""
+        return compose_resume(state, round_id, policy_guidance)
 
     def _build_repair_prompt(
         self,
@@ -248,35 +166,11 @@ Structured update:
         failure_payload: dict[str, Any],
         repair_attempt: int,
     ) -> str:
-        checklist = _load_architecture_checklist()
-        payload = {
-            "round": round_id,
-            "repair_attempt": repair_attempt,
-            "max_repair_attempts": self.config.max_repair_attempts,
-            "failure_kind": failure_kind,
-            "base_action": {
-                "family_name": base_action.family_name,
-                "family_stage": base_action.family_stage,
-                "change_type": base_action.change_type,
-                "env_overrides": base_action.env_overrides,
-                "summary": base_action.summary,
-                "hypothesis": base_action.hypothesis,
-            },
-            "failure_payload": failure_payload,
-        }
-        checklist_section = f"\nArchitecture integration checklist:\n{checklist}\n" if checklist else ""
-        return f"""\
-Continue round {round_id} in repair mode.
-
-The previous code-edit failed with an engineering blocker.
-Do NOT redesign the experiment. Do NOT change family_name or env_overrides.
-Patch the implementation so the original experiment can run.
-Stay within sparsify/ only.
-Attempt {repair_attempt} of {self.config.max_repair_attempts}.
-Return one final JSON object matching the action schema.
-{checklist_section}
-Repair context:
-{json.dumps(payload, indent=2)}"""
+        """Repair prompt via prompt.py."""
+        return compose_repair(
+            round_id, base_action, failure_kind, failure_payload,
+            repair_attempt, self.config.max_repair_attempts,
+        )
 
     # -------------------------------------------------------------------
     # Codex invocation
@@ -435,50 +329,9 @@ def _extract_session_id(output: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _summarize_results(rows: list[dict[str, str]]) -> list[str]:
-    """Compress result rows into one-liner strings."""
-    lines: list[str] = []
-    for row in rows:
-        eid = row.get("experiment_id", "?")
-        dec = row.get("decision", "?")
-        fvu = row.get("val_fvu", "")
-        k = row.get("k", "?")
-        arch = row.get("architecture", "?")
-        desc = row.get("description", "")
-        fvu_part = f" fvu={fvu}" if fvu else ""
-        desc_part = f" | {desc[:60]}" if desc else ""
-        lines.append(f"{eid} {arch} k{k} {dec}{fvu_part}{desc_part}")
-    return lines
 
-
-def _load_architecture_checklist() -> str:
-    if not ARCHITECTURE_INTEGRATION_SKILL_PATH.exists():
-        return ""
-    text = ARCHITECTURE_INTEGRATION_SKILL_PATH.read_text().strip()
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            text = parts[2].strip()
-    return text
-
-
-def _should_include_checklist(
-    memory: dict[str, Any],
-    recent_summaries: list[dict[str, Any]],
-) -> bool:
-    for s in recent_summaries[-2:]:
-        if not isinstance(s, dict):
-            continue
-        if str(s.get("change_type", "")) == "edit_sae_code":
-            return True
-        if s.get("family_stage") == "prototype" and s.get("decision") in ("crash", "policy_reject"):
-            return True
-    for entry in list(memory.get("recent_training_failures", []))[-4:] + list(memory.get("recent_sanity_failures", []))[-2:]:
-        if isinstance(entry, dict):
-            summary = str(entry.get("error_summary") or "").lower()
-            if any(kw in summary for kw in ("unknown architecture", "dispatch", "registration")):
-                return True
-    return False
+# _summarize_results, _load_architecture_checklist, _should_include_checklist
+# moved to prompt.py
 
 
 def coerce_stop_action(action: Action, state: Any, round_id: int) -> Action:
