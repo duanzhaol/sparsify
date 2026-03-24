@@ -74,3 +74,40 @@ class TaskPack:
         if path.is_absolute():
             return path
         return (self.base_dir / path).resolve()
+
+
+@dataclass(frozen=True)
+class CompileResult:
+    """Result of compiling a Markdown task request into a task pack."""
+
+    task_id: str
+    output_dir: Path
+    taskpack_path: Path
+    compiler_report_path: Path
+    created_files: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class WorkflowNodePreview:
+    """Single workflow node in a dry-run or stub-run report."""
+
+    name: str
+    kind: str
+    uses: str | None
+    role: str | None
+    input_keys: tuple[str, ...]
+    output: str | None
+    branches: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class RunReport:
+    """Summarized workflow run plan."""
+
+    dry_run: bool
+    taskpack_path: Path
+    runtime_root: Path
+    entry_node: str
+    nodes: tuple[WorkflowNodePreview, ...]
+    created_paths: tuple[Path, ...]
+    report_path: Path | None = None

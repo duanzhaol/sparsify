@@ -38,3 +38,15 @@ def initialize_runtime(taskpack: TaskPack, runtime_root: Path) -> list[Path]:
         created.append(path)
 
     return created
+
+
+def resolve_store_paths(taskpack: TaskPack, runtime_root: Path) -> dict[str, Path]:
+    """Resolve state store paths under the given runtime root."""
+    runtime_root = runtime_root.resolve()
+    resolved: dict[str, Path] = {}
+    for store_name, store in taskpack.state_model.get("stores", {}).items():
+        rel_path = store.get("path")
+        if not rel_path:
+            continue
+        resolved[store_name] = (runtime_root / rel_path).resolve()
+    return resolved

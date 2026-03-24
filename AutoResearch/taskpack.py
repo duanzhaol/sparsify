@@ -67,6 +67,7 @@ def describe_taskpack(taskpack: TaskPack) -> dict[str, Any]:
         "prompts": sorted(taskpack.knowledge.get("prompt_library", {})),
         "skills": sorted(taskpack.knowledge.get("skill_library", {})),
         "stores": sorted(taskpack.state_model.get("stores", {})),
+        "reviewers": sorted(taskpack.adapter_registry.get("reviewers", {})),
         "workflow_node_count": len(taskpack.workflow.get("nodes", {})),
         "workflow_edge_count": len(taskpack.workflow.get("edges", [])),
         "warnings": [m.render() for m in messages if m.level == "warning"],
@@ -278,6 +279,24 @@ def _validate_workflow(taskpack: TaskPack) -> list[ValidationMessage]:
             uses = node.get("uses")
             if uses not in registries.get("recorders", {}):
                 messages.append(ValidationMessage("error", f"unknown recorder adapter: {uses}", f"workflow.nodes.{node_name}.uses"))
+        elif kind == "mcp_review":
+            uses = node.get("uses")
+            if uses not in registries.get("reviewers", {}):
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        f"unknown reviewer adapter: {uses}",
+                        f"workflow.nodes.{node_name}.uses",
+                    )
+                )
+        elif kind not in {"router", "reducer"}:
+            messages.append(
+                ValidationMessage(
+                    "error",
+                    f"unsupported workflow node kind: {kind}",
+                    f"workflow.nodes.{node_name}.kind",
+                )
+            )
 
     for index, edge in enumerate(edges):
         src = edge.get("from")
