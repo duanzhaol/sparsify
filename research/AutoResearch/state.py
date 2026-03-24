@@ -155,14 +155,14 @@ class StateManager:
         """Update all state files after a round completes."""
         action_dict = action.to_dict()
         result_dict = result.to_dict()
+        family_name = (action.family_name or action.effective_config().get("ARCHITECTURE", "")).lower()
+        existing_family = self.families.get(family_name)
+        is_new_family = existing_family is None or existing_family.get("last_round") is None
 
         # 1. Update memory (families, insights, failures)
         self._append_memory(action, result, round_id, touched_files)
 
         # 2. Update agent counters
-        is_new_family = action.family_name not in self.families or (
-            self.families[action.family_name].get("last_round") is None
-        )
         self._update_agent_counters(result, is_new_family)
 
         # 3. Write round summary
@@ -433,7 +433,7 @@ class StateManager:
                 continue
             k = int(entry.get("k", old_key))
             cfg = entry.get("config", {})
-            ef = int(cfg.get("expansion_factor", cfg.get("EXPANSION_FACTOR", 8)))
+            ef = int(cfg.get("expansion_factor", cfg.get("EXPANSION_FACTOR", 12)))
             entry["k"] = k
             entry["ef"] = ef
             from .controller import frontier_key

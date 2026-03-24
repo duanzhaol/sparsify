@@ -1,7 +1,12 @@
-"""Main orchestration loop for the autoresearch framework.
+"""AutoResearch 主循环。
 
-This module contains ONLY flow control logic. All business logic
-lives in agent, policy, runner, and state modules.
+这个文件只保留流程编排：
+- 读取 state
+- 调用 policy 生成本轮策略说明
+- 调 agent 提案
+- 校验 action
+- 训练 / repair
+- 落盘结果
 """
 
 from __future__ import annotations
@@ -118,16 +123,18 @@ def _run_round(
     state.write_status("round_started", round=round_id)
     state.log_round_event(ctx, "round_started")
 
-    # 1. Detect stagnation and build policy guidance
-    stagnation = detect_stagnation(state.consecutive_no_improve, state.consecutive_crashes)
-    force_param_only = stagnation["recommended_mode"] == "stabilize_after_crashes"
+    # 1. 判定本轮策略模式，并生成给 agent 的策略说明
+    policy_state = detect_stagnation(
+        state.consecutive_no_improve,
+        state.consecutive_crashes,
+    )
 
     # Auto-archive stale families
     archived = auto_archive_stale_families(state.families)
     if archived:
         print(f"Round {round_id}: auto-archived stale families: {archived}")
 
-    guidance = build_policy_guidance(round_id, state, stagnation)
+    policy_guidance = build_policy_guidance(round_id, state, policy_state)
 
     # 2. Snapshot code before agent edits
     print(f"Round {round_id}: snapshotting files...")
@@ -138,7 +145,7 @@ def _run_round(
     # 3. Agent proposal
     print(f"Round {round_id}: invoking agent...")
     try:
-        action, stdout_path = agent.propose(state, round_id, guidance)
+        action, _stdout_path = agent.propose(state, round_id, policy_guidance)
     except RuntimeError as exc:
         print(f"Round {round_id}: agent invocation failed: {exc}")
         state.log_round_event(ctx, "agent_failed", error=str(exc))
@@ -148,19 +155,11 @@ def _run_round(
     if action.command != "run":
         action = coerce_stop_action(action, state, round_id)
 
-    # 5. Force param_only if crash recovery
-    if force_param_only and action.is_code_edit:
-        print(f"Round {round_id}: forcing param_only (crash recovery mode)")
-        d = action.to_dict()
-        d["change_type"] = "param_only"
-        d["needs_sanity"] = False
-        action = Action.from_dict(d)
-
     ctx.family_name = action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"]
     ctx.family_stage = action.family_stage
     ctx.session_id = state.agent.get("active_session_id")
 
-    # 6. Detect code changes
+    # 5. Detect code changes
     after = snapshot_paths()
     changed = touched_files(before, after) if before else []
     if changed:
@@ -174,20 +173,24 @@ def _run_round(
     ctx.touched_files = changed
     ctx.patch_path = build_patch(before, changed, round_id) if changed else None
 
-    # 7. Policy validation
-    action, rejection = validate_action(action, state, force_param_only)
+    # 6. Policy validation
+    action, rejection = validate_action(action, state)
     if rejection:
         print(f"Round {round_id}: policy rejected: {rejection}")
         state.record_round_outcome(round_id, action, Result.policy_reject(rejection), changed, ctx.patch_path, ctx)
         cleanup_round_snapshots(round_id)
         return
 
-    # 8. Behavioral diff test (for code edits with architecture changes)
+    # 7. Behavioral diff test (for code edits with architecture changes)
     if action.is_code_edit and action.change_type == "edit_sae_code":
         cfg = action.effective_config()
         arch = cfg.get("ARCHITECTURE", "topk").lower()
         if arch != "topk":
-            diff_result = behavioral_diff_test(arch, int(cfg.get("K", "128")), int(cfg.get("EXPANSION_FACTOR", "8")))
+            diff_result = behavioral_diff_test(
+                arch,
+                int(cfg.get("K", "128")),
+                int(cfg.get("EXPANSION_FACTOR", "12")),
+            )
             if diff_result.get("identical") and action.family_stage != "prototype":
                 msg = f"Behavioral diff: {arch} encode() identical to topk — blocked"
                 print(f"Round {round_id}: {msg}")
@@ -195,13 +198,13 @@ def _run_round(
                 cleanup_round_snapshots(round_id)
                 return
 
-    # 9. Train with repair loop
+    # 8. Train with repair loop
     result = _train_with_repair(round_id, action, ctx, state, agent, config, start_time, before)
 
-    # 10. Record outcome
+    # 9. Record outcome
     state.record_round_outcome(round_id, action, result, ctx.touched_files, ctx.patch_path, ctx)
 
-    # 11. Git commit
+    # 10. Git commit
     if config.auto_commit:
         _commit_round(round_id, action, result, ctx, state)
 
@@ -241,7 +244,7 @@ def _train_with_repair(
                 run_sanity(
                     cfg.get("ARCHITECTURE", "topk").lower(),
                     int(cfg.get("K", "128")),
-                    int(cfg.get("EXPANSION_FACTOR", "8")),
+                    int(cfg.get("EXPANSION_FACTOR", "12")),
                 )
                 print(f"Round {round_id}: sanity passed")
             except SanityCheckError as exc:

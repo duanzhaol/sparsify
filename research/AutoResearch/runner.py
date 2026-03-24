@@ -496,7 +496,7 @@ def _build_env(
 
     config_json: dict[str, Any] = {
         "architecture": merged.get("ARCHITECTURE", "topk").lower(),
-        "expansion_factor": int(merged.get("EXPANSION_FACTOR", "8")),
+        "expansion_factor": int(merged.get("EXPANSION_FACTOR", "12")),
         "k": int(merged.get("K", "128")),
         "optimizer": merged.get("OPTIMIZER", "signum"),
         "lr": merged.get("LR", "8e-4"),

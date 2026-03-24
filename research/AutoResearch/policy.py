@@ -1,7 +1,17 @@
-"""Policy layer: pure validation functions for the autoresearch framework.
+"""AutoResearch 的策略层。
 
-All functions are side-effect-free except ``behavioral_diff_test`` which
-spawns a short-lived subprocess.
+这个文件只负责三件事：
+1. 校验 action 是否违反少数几个硬规则
+2. 根据最近的 crash / no-improve 情况判定当前策略模式
+3. 把策略模式渲染成一段简洁的 prompt 引导文字
+
+当前 policy 只有三种模式：
+- engineering_repair: 最近连续 crash，优先修最近失败实现
+- mainline: 默认模式，围绕当前主线 family 推进
+- architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
+
+这里刻意不做“恢复到默认主线”的强制回退。
+如果新架构写坏了，应该通过 repair loop 修代码，而不是用 policy 逃避问题。
 """
 
 from __future__ import annotations
@@ -14,7 +24,16 @@ from .types import Action, BASE_ENV_DEFAULTS
 
 MAX_INCUBATING_FAMILIES = 10
 MAX_INCUBATING_PROXY_ROUNDS = 3
-LANE_HIGH_K_THRESHOLD = 64
+CRASH_STREAK_FOR_ENGINEERING_REPAIR = 2
+NO_IMPROVE_STREAK_FOR_ARCH_PROBE = 5
+
+_CORE_AXES = {
+    "architecture": "ARCHITECTURE",
+    "optimizer": "OPTIMIZER",
+    "lr": "LR",
+    "k": "K",
+    "expansion_factor": "EXPANSION_FACTOR",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -25,62 +44,32 @@ LANE_HIGH_K_THRESHOLD = 64
 def validate_action(
     action: Action,
     state: Any,  # StateManager
-    force_param_only: bool = False,
 ) -> tuple[Action | None, str | None]:
-    """Run all policy checks. Returns (action, rejection_reason).
+    """运行少量硬校验。
 
-    If ``rejection_reason`` is not None the round should be aborted.
-    The returned ``action`` may be modified (e.g. forced to param_only).
+    设计原则：
+    - 尽量少拦，只拦那些明显会让本轮实验含义不清的情况
+    - repair 由 repair loop 处理，不在这里强制改写 action
     """
-    if force_param_only and action.is_code_edit:
-        action = _force_param_only(action)
+    if action.command != "run":
+        return action, "command 只能是 'run'"
 
-    # Variable isolation is enforced via prompt guidance only — no hard rejection.
-    # Hard checks caused too many false positives (new architectures inheriting
-    # a recipe were flagged as multi-variable changes).
+    if action.change_type == "no_change":
+        return action, "不允许 no_change；每一轮都必须提出可执行的实验或修复"
 
-    # Incubation limits
+    ok, msg = _check_param_only_single_variable(action, state)
+    if not ok:
+        return action, msg
+
     ok, msg = check_incubation_limits(
-        state.families, action.family_name, action.family_stage,
+        state.families,
+        action.family_name,
+        action.family_stage,
     )
     if not ok:
         return action, f"Incubation limit: {msg}"
 
     return action, None
-
-
-# ---------------------------------------------------------------------------
-# Variable isolation
-# ---------------------------------------------------------------------------
-
-
-def check_variable_isolation(
-    changes: dict[str, Any],
-    change_type: str,
-) -> tuple[bool, str]:
-    """Single-variable principle. Returns (ok, violation)."""
-    dims: list[str] = []
-    if change_type in ("edit_sae_code", "edit_perf_code"):
-        dims.append("code_edit")
-    if changes.get("architecture"):
-        dims.append("architecture")
-    if changes.get("optimizer"):
-        dims.append("optimizer")
-    if changes.get("k"):
-        dims.append("k")
-    # ef coupled with architecture is acceptable
-    if "architecture" in dims and changes.get("ef") and not changes.get("k"):
-        pass
-    elif changes.get("ef") and len(dims) > 0:
-        dims.append("ef")
-    # lr coupled with optimizer is acceptable
-    if "optimizer" in dims and changes.get("lr") and not changes.get("architecture"):
-        pass
-    elif changes.get("lr") and len(dims) > 0:
-        dims.append("lr")
-    if len(dims) <= 1:
-        return True, ""
-    return False, f"Multiple primary variables: {', '.join(dims)}"
 
 
 # ---------------------------------------------------------------------------
@@ -93,55 +82,51 @@ def check_incubation_limits(
     family_name: str,
     family_stage: str,
 ) -> tuple[bool, str]:
-    """Returns (ok, message)."""
+    """限制同时存活的孵化 family 数量，并自动淘汰长期无正结果的分支。"""
     name = (family_name or "").lower()
     is_new = name not in families
     is_incubating_stage = family_stage not in ("mainline", "promote_to_mainline")
 
-    # Count currently incubating
-    active = sum(1 for f in families.values() if f.get("status") == "incubating")
+    active_incubating = sum(
+        1 for family in families.values() if family.get("status") == "incubating"
+    )
 
-    if is_new and is_incubating_stage and active >= MAX_INCUBATING_FAMILIES:
+    if is_new and is_incubating_stage and active_incubating >= MAX_INCUBATING_FAMILIES:
         stale = [
-            n for n, f in families.items()
-            if f.get("status") == "incubating"
-            and sum(1 for c in f.get("tested_configs", []) if c.get("stage") != "mainline") >= MAX_INCUBATING_PROXY_ROUNDS
-            and not any(c.get("decision") in ("keep", "promote") for c in f.get("tested_configs", []))
+            family_name
+            for family_name, family in families.items()
+            if family.get("status") == "incubating"
+            and _proxy_round_count(family) >= MAX_INCUBATING_PROXY_ROUNDS
+            and not _has_positive_result(family)
         ]
         return False, (
-            f"Already {active} incubating families (limit {MAX_INCUBATING_FAMILIES}). "
-            f"Stale: {stale}"
+            f"当前已经有 {active_incubating} 个 incubating family，"
+            f"达到上限 {MAX_INCUBATING_FAMILIES}。stale={stale}"
         )
 
-    if not is_new and name in families:
-        fam = families[name]
-        if fam.get("status") == "incubating":
-            configs = fam.get("tested_configs", [])
-            proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
-            has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
-            if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not has_positive:
-                return False, f"Family '{name}' exhausted {proxy_rounds} rounds without positive result"
+    family = families.get(name)
+    if family and family.get("status") == "incubating":
+        proxy_rounds = _proxy_round_count(family)
+        if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not _has_positive_result(family):
+            return False, f"family '{name}' 已在孵化期尝试 {proxy_rounds} 轮且没有正结果"
 
     return True, ""
 
 
 def auto_archive_stale_families(families: dict[str, Any]) -> list[str]:
-    """Archive stale incubating families. Mutates dict. Returns archived names."""
+    """自动归档长期无正结果的 incubating family。"""
     archived: list[str] = []
-    for name, fam in families.items():
-        if fam.get("status") != "incubating":
+    for name, family in families.items():
+        if family.get("status") != "incubating":
             continue
-        configs = fam.get("tested_configs", [])
-        proxy_rounds = sum(1 for c in configs if c.get("stage") != "mainline")
-        has_positive = any(c.get("decision") in ("keep", "promote") for c in configs)
-        if proxy_rounds >= MAX_INCUBATING_PROXY_ROUNDS and not has_positive:
-            fam["status"] = "archived"
+        if _proxy_round_count(family) >= MAX_INCUBATING_PROXY_ROUNDS and not _has_positive_result(family):
+            family["status"] = "archived"
             archived.append(name)
     return archived
 
 
 # ---------------------------------------------------------------------------
-# Stagnation detection
+# Policy mode detection
 # ---------------------------------------------------------------------------
 
 
@@ -149,22 +134,34 @@ def detect_stagnation(
     consecutive_no_improve: int,
     consecutive_crashes: int,
 ) -> dict[str, Any]:
-    """Returns {level, crash_streak, recommended_mode}."""
-    crash_streak = consecutive_crashes >= 2
-    if consecutive_no_improve >= 5:
-        level, mode = "severe", "k_exploration"
-    elif consecutive_no_improve >= 3:
-        level, mode = "mild", "exploitation"
+    """把当前轮次归入三种策略模式之一。"""
+    if consecutive_crashes >= CRASH_STREAK_FOR_ENGINEERING_REPAIR:
+        mode = "engineering_repair"
+        reason = (
+            f"最近连续 {consecutive_crashes} 轮 crash，"
+            "先判断是不是最近实现写坏了。"
+        )
+    elif consecutive_no_improve >= NO_IMPROVE_STREAK_FOR_ARCH_PROBE:
+        mode = "architecture_probe"
+        reason = (
+            f"主线已经连续 {consecutive_no_improve} 轮没有改进，"
+            "可以插入 1 个 matched architecture probe。"
+        )
     else:
-        level, mode = "none", "normal"
-    if crash_streak:
-        mode = "stabilize_after_crashes"
+        mode = "mainline"
+        if consecutive_no_improve >= 3:
+            reason = (
+                f"主线已连续 {consecutive_no_improve} 轮没有改进，"
+                "但还应先把同一 family 的 recipe 与训练曲线看清。"
+            )
+        else:
+            reason = "当前没有连续 crash，主线仍应继续推进。"
+
     return {
-        "level": level,
-        "crash_streak": crash_streak,
+        "mode": mode,
+        "reason": reason,
         "consecutive_no_improve": consecutive_no_improve,
         "consecutive_crashes": consecutive_crashes,
-        "recommended_mode": mode,
     }
 
 
@@ -176,48 +173,50 @@ def detect_stagnation(
 def build_policy_guidance(
     round_id: int,
     state: Any,  # StateManager
-    stagnation: dict[str, Any],
+    policy_state: dict[str, Any],
 ) -> str:
-    """Assemble policy guidance text for the agent prompt."""
-    parts: list[str] = []
+    """把当前策略模式渲染成 prompt 中直接可读的中文说明。"""
+    mainline = _resolve_mainline_snapshot(state)
+    recipe_line = _format_recipe_line(mainline["config"])
+    mode = policy_state["mode"]
+    reason = policy_state["reason"]
 
-    # Crash recovery
-    if stagnation["recommended_mode"] == "stabilize_after_crashes":
-        parts.append(
-            "CRASH RECOVERY MODE: Recent rounds crashed consecutively.\n"
-            "You MUST use change_type='param_only' — do NOT edit code.\n"
-            "Use the current best configuration with minor parameter adjustments."
-        )
-        return "\n\n".join(parts)
+    if mode == "engineering_repair":
+        return "\n".join([
+            f"Round {round_id} 策略模式：工程修复",
+            f"原因：{reason}",
+            f"当前主线 family：{mainline['family_name']}",
+            f"当前主线参考配方：{recipe_line}",
+            "本轮要求：",
+            "1. 优先继续修最近失败实现，不要新开 architecture family。",
+            "2. 不要同时换 optimizer、lr、loss、preprocess 等训练 recipe。",
+            "3. 如果判断不是代码问题，而是训练链路本身异常，先做最小健康检查确认系统状态。",
+        ])
 
-    # Stagnation
-    no_improve = stagnation["consecutive_no_improve"]
-    if stagnation["level"] == "mild":
-        parts.append(
-            f"STAGNATION WARNING: {no_improve} rounds without improvement.\n"
-            "Switch to exploitation: sweep LR, auxk_alpha on current best.\n"
-            "Prefer K reduction over EF reduction. Avoid new architectures."
-        )
-    elif stagnation["level"] == "severe":
-        parts.append(
-            f"SEVERE STAGNATION: {no_improve} rounds without improvement.\n"
-            "1. If only K=128 tested, MUST try K=64 or K=32\n"
-            "2. Otherwise try fundamentally different architecture\n"
-            "3. Stop minor tweaks — they haven't worked"
-        )
+    if mode == "architecture_probe":
+        return "\n".join([
+            f"Round {round_id} 策略模式：架构探针",
+            f"原因：{reason}",
+            f"当前主线 family：{mainline['family_name']}",
+            f"当前主线参考配方：{recipe_line}",
+            "本轮要求：",
+            "1. 只允许做 1 个 matched architecture probe。",
+            "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
+            "3. 这个 probe 只回答一个问题：该架构本身值不值得继续。",
+            "4. probe 完成后下一轮回到主线，不要连续开多个新 family。",
+        ])
 
-    # K exploration guidance
-    k_guidance = _k_exploration_guidance(state.frontier, state.memory)
-    if k_guidance and stagnation["level"] != "none":
-        parts.append(k_guidance)
-
-    # Sweep guidance in exploitation mode
-    if stagnation["recommended_mode"] == "exploitation":
-        sweep = _sweep_guidance(state)
-        if sweep:
-            parts.append(sweep)
-
-    return "\n\n".join(parts)
+    return "\n".join([
+        f"Round {round_id} 策略模式：主线推进",
+        f"原因：{reason}",
+        f"当前主线 family：{mainline['family_name']}",
+        f"当前主线参考配方：{recipe_line}",
+        "本轮要求：",
+        "1. 默认继续围绕同一个 family 推进，不要新开 family。",
+        "2. 推荐顺序：先补 clean baseline，再调学习率，再换优化器，再给新优化器一轮学习率回调，再看 loss/preprocess，最后才动 K。",
+        "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
+        "4. 每轮只回答一个问题。",
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +259,11 @@ print(f"DIFF:{{'identical' if torch.equal(ba, ca) and torch.equal(bi, ci) else '
 """
     try:
         result = subprocess.run(
-            ["python", "-c", code], cwd=REPO_ROOT,
-            capture_output=True, text=True, timeout=60,
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         for line in (result.stdout + result.stderr).splitlines():
             if line.startswith("DIFF:"):
@@ -271,47 +273,178 @@ print(f"DIFF:{{'identical' if torch.equal(ba, ca) and torch.equal(bi, ci) else '
                     "max_diff": float(parts[1]) if len(parts) > 1 else 0.0,
                     "architecture": architecture,
                 }
-        return {"identical": False, "max_diff": -1.0, "architecture": architecture, "error": "parse_failed"}
+        return {
+            "identical": False,
+            "max_diff": -1.0,
+            "architecture": architecture,
+            "error": "parse_failed",
+        }
     except subprocess.TimeoutExpired:
-        return {"identical": False, "max_diff": -1.0, "architecture": architecture, "error": "timeout"}
+        return {
+            "identical": False,
+            "max_diff": -1.0,
+            "architecture": architecture,
+            "error": "timeout",
+        }
     except Exception as exc:
-        return {"identical": False, "max_diff": -1.0, "architecture": architecture, "error": str(exc)}
+        return {
+            "identical": False,
+            "max_diff": -1.0,
+            "architecture": architecture,
+            "error": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------
-# Private helpers
+# Small helpers
 # ---------------------------------------------------------------------------
 
 
-def _resolve_baseline_for_policy(action: Action, frontier: dict[str, Any]) -> dict[str, str]:
-    """Find the best frontier config matching the action's family to use as baseline.
+def _check_param_only_single_variable(
+    action: Action,
+    state: Any,  # StateManager
+) -> tuple[bool, str]:
+    """只对 param_only 做轻量单变量校验。"""
+    if action.change_type != "param_only":
+        return True, ""
 
-    This ensures variable isolation is checked against the actual winning recipe,
-    not against BASE_ENV_DEFAULTS. When agent sends ARCHITECTURE+K+EF+LR matching
-    a frontier entry and only changes K, this correctly detects a single-variable change.
-    """
-    family = (action.family_name or "").lower()
-    best_entry = None
+    candidate = _candidate_config(action)
+    reference = _resolve_reference_config(action, state)
+
+    changed_axes = [
+        axis
+        for axis, env_key in _CORE_AXES.items()
+        if str(candidate.get(env_key)) != str(reference.get(env_key))
+    ]
+
+    if len(changed_axes) > 1:
+        return False, (
+            "param_only 一次只能改一个主轴；"
+            f"当前同时改了 {', '.join(changed_axes)}"
+        )
+
+    if not changed_axes:
+        if action.primary_variable in _CORE_AXES:
+            return False, (
+                f"primary_variable={action.primary_variable}，"
+                "但和参考配方相比没有看到这个主轴发生变化"
+            )
+        return True, ""
+
+    changed_axis = changed_axes[0]
+    if action.primary_variable == "other_param":
+        return False, (
+            f"当前实际改动主轴是 {changed_axis}，"
+            "primary_variable 不应写 other_param"
+        )
+    if action.primary_variable != changed_axis:
+        return False, (
+            f"primary_variable={action.primary_variable}，"
+            f"但实际改动主轴是 {changed_axis}"
+        )
+
+    return True, ""
+
+
+def _candidate_config(action: Action) -> dict[str, str]:
+    """得到这轮 action 实际会训练的核心配置。"""
+    config = action.effective_config()
+    if action.family_name and not any(
+        item.get("key") == "ARCHITECTURE" for item in action.env_overrides
+    ):
+        config["ARCHITECTURE"] = action.family_name.lower()
+    return config
+
+
+def _resolve_reference_config(
+    action: Action,
+    state: Any,  # StateManager
+) -> dict[str, str]:
+    """给单变量校验选择一个清晰的参考配方。"""
+    family_name = (action.family_name or "").lower()
+
+    family_best = _best_frontier_entry(state.frontier, family_name=family_name)
+    if family_best is not None:
+        return _frontier_entry_to_env_config(family_best)
+
+    mainline = _resolve_mainline_snapshot(state)
+    return dict(mainline["config"])
+
+
+def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
+    """找到当前最像“主线”的 family 与配方。"""
+    best_entry = _best_frontier_entry(state.frontier)
+    if best_entry is not None:
+        config = _frontier_entry_to_env_config(best_entry)
+        family_name = str(
+            best_entry.get("config", {}).get("family_name")
+            or best_entry.get("architecture")
+            or config.get("ARCHITECTURE", "topk")
+        ).lower()
+        return {
+            "family_name": family_name,
+            "config": config,
+            "source": "frontier_best",
+        }
+
+    active_family_name = _latest_active_family_name(state.families)
+    config = dict(BASE_ENV_DEFAULTS)
+    config["EXPANSION_FACTOR"] = "12"
+    if active_family_name:
+        config["ARCHITECTURE"] = active_family_name
+        return {
+            "family_name": active_family_name,
+            "config": config,
+            "source": "latest_active_family",
+        }
+
+    return {
+        "family_name": "topk",
+        "config": config,
+        "source": "topk_baseline",
+    }
+
+
+def _best_frontier_entry(
+    frontier: dict[str, Any],
+    family_name: str | None = None,
+) -> dict[str, Any] | None:
+    """按 FVU 选择最佳 frontier entry；可选按 family 过滤。"""
+    best_entry: dict[str, Any] | None = None
     best_fvu = float("inf")
 
+    target_family = (family_name or "").lower()
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
-        cfg = entry.get("config", {})
-        arch = str(cfg.get("architecture", "")).lower()
-        if arch == family:
+
+        if target_family:
+            entry_family = str(
+                entry.get("config", {}).get("family_name")
+                or entry.get("architecture")
+                or ""
+            ).lower()
+            if entry_family != target_family:
+                continue
+
+        try:
             fvu = float(entry.get("fvu", float("inf")))
-            if fvu < best_fvu:
-                best_fvu = fvu
-                best_entry = entry
+        except (TypeError, ValueError):
+            continue
 
-    if best_entry is None:
-        return dict(BASE_ENV_DEFAULTS)
+        if fvu < best_fvu:
+            best_fvu = fvu
+            best_entry = entry
 
-    # Convert frontier config to env-var format
-    cfg = best_entry["config"]
-    base = dict(BASE_ENV_DEFAULTS)
-    key_map = {
+    return best_entry
+
+
+def _frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
+    """把 frontier 里的 config 还原成 env 风格配置。"""
+    config = dict(BASE_ENV_DEFAULTS)
+    raw = entry.get("config", {})
+
+    mapping = {
         "architecture": "ARCHITECTURE",
         "expansion_factor": "EXPANSION_FACTOR",
         "k": "K",
@@ -324,138 +457,62 @@ def _resolve_baseline_for_policy(action: Action, frontier: dict[str, Any]) -> di
         "auxk_alpha": "AUXK_ALPHA",
         "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
         "use_hadamard": "USE_HADAMARD",
+        "family_name": "FAMILY_NAME",
+        "family_stage": "FAMILY_STAGE",
     }
-    for json_key, env_key in key_map.items():
-        val = cfg.get(json_key)
-        if val is not None:
-            if env_key == "USE_HADAMARD":
-                base[env_key] = "1" if bool(val) else "0"
-            else:
-                base[env_key] = str(val)
-    return base
+    for src_key, dst_key in mapping.items():
+        value = raw.get(src_key)
+        if value is not None:
+            config[dst_key] = str(value)
+
+    if entry.get("architecture") is not None:
+        config["ARCHITECTURE"] = str(entry["architecture"]).lower()
+    if entry.get("k") is not None:
+        config["K"] = str(entry["k"])
+    if entry.get("ef") is not None:
+        config["EXPANSION_FACTOR"] = str(entry["ef"])
+
+    config["EXPANSION_FACTOR"] = "12"
+    return config
 
 
-def _force_param_only(action: Action) -> Action:
-    """Return a copy with change_type forced to param_only."""
-    d = action.to_dict()
-    d["change_type"] = "param_only"
-    d["needs_sanity"] = False
-    return Action.from_dict(d)
+def _latest_active_family_name(families: dict[str, Any]) -> str | None:
+    """在没有 frontier 时，用最近活跃 family 作为主线参考。"""
+    best_name: str | None = None
+    best_round = -1
 
-
-def _classify_changes(
-    env_overrides: list[dict[str, str]],
-    defaults: dict[str, str],
-) -> dict[str, Any]:
-    """Classify which dimensions are changed vs defaults."""
-    changed: dict[str, str] = {}
-    for item in env_overrides:
-        key = item.get("key", "")
-        value = str(item.get("value", ""))
-        if value != str(defaults.get(key, "")):
-            changed[key] = value
-    return {
-        "architecture": "ARCHITECTURE" in changed,
-        "optimizer": "OPTIMIZER" in changed,
-        "lr": "LR" in changed,
-        "k": "K" in changed,
-        "ef": "EXPANSION_FACTOR" in changed,
-        "other": [k for k in changed if k not in {"ARCHITECTURE", "OPTIMIZER", "LR", "K", "EXPANSION_FACTOR"}],
-    }
-
-
-def _k_exploration_guidance(frontier: dict[str, Any], memory: dict[str, Any]) -> str:
-    """Check K value coverage and generate guidance."""
-    tested_ks: set[int] = set()
-
-    # From frontier
-    for key, entry in frontier.items():
-        k_val = entry.get("k") if isinstance(entry, dict) else None
-        if k_val is None and str(key).isdigit():
-            k_val = int(key)
-        if k_val is not None:
-            try:
-                tested_ks.add(int(k_val))
-            except (TypeError, ValueError):
-                pass
-
-    # From recent rounds
-    for entry in memory.get("recent_rounds", []):
-        k_val = entry.get("k")
-        if k_val is not None:
-            try:
-                tested_ks.add(int(k_val))
-            except (TypeError, ValueError):
-                pass
-
-    if not tested_ks:
-        tested_ks.add(128)
-
-    if tested_ks == {128}:
-        return (
-            "K EXPLORATION REQUIRED: Only K=128 has been tested.\n"
-            "Test the best architecture with K=64 before opening new branches."
-        )
-
-    high_ks = {k for k in tested_ks if k >= LANE_HIGH_K_THRESHOLD}
-    if 64 not in high_ks and high_ks:
-        return f"K coverage: {sorted(tested_ks)}. Consider testing K=64."
-
-    return f"K coverage: {sorted(tested_ks)}."
-
-
-def _sweep_guidance(state: Any) -> str:
-    """Generate simple sweep suggestions in exploitation mode."""
-    m = state.memory
-    # Find best active family
-    best_family = None
-    best_fvu = float("inf")
-    for name, fam in m.get("architecture_families", {}).items():
-        if fam.get("status") != "active":
+    for name, family in families.items():
+        if family.get("status") != "active":
             continue
-        for key in ("best_fvu", "best_full_fvu", "best_proxy_fvu"):
-            val = fam.get(key)
-            if val is not None:
-                try:
-                    v = float(val)
-                    if v < best_fvu:
-                        best_fvu = v
-                        best_family = name
-                except (TypeError, ValueError):
-                    pass
+        last_round = int(family.get("last_round") or -1)
+        if last_round > best_round:
+            best_round = last_round
+            best_name = name
 
-    # Collect tested params from recent rounds
-    tested_lrs: set[str] = {BASE_ENV_DEFAULTS["LR"]}
-    tested_auxk: set[str] = {BASE_ENV_DEFAULTS["AUXK_ALPHA"]}
-    for entry in m.get("recent_rounds", []):
-        # Not perfect but sufficient for guidance
-        pass
+    return best_name
 
-    # Collect from round summaries
-    for s in state.recent_round_summaries(limit=20):
-        action = s.get("action", {})
-        sf = str(action.get("family_name", "")).lower()
-        if best_family and sf != best_family:
-            continue
-        overrides = action.get("env_overrides", [])
-        if isinstance(overrides, list):
-            for item in overrides:
-                if item.get("key") == "LR":
-                    tested_lrs.add(str(item.get("value", "")))
-                elif item.get("key") == "AUXK_ALPHA":
-                    tested_auxk.add(str(item.get("value", "")))
 
-    all_lrs = {"2e-4", "4e-4", "8e-4", "1.6e-3", "3.2e-3"}
-    all_auxk = {"0", "0.01", "0.03125", "0.0625"}
-    untested_lrs = sorted(all_lrs - tested_lrs)
-    untested_auxk = sorted(all_auxk - tested_auxk)
+def _format_recipe_line(config: dict[str, str]) -> str:
+    """把最关键的 recipe 压成一行。"""
+    return (
+        f"ARCHITECTURE={config.get('ARCHITECTURE', '?')} "
+        f"K={config.get('K', '?')} "
+        f"EXPANSION_FACTOR={config.get('EXPANSION_FACTOR', '?')} "
+        f"OPTIMIZER={config.get('OPTIMIZER', '?')} "
+        f"LR={config.get('LR', '?')}"
+    )
 
-    parts: list[str] = [f"EXPLOITATION MODE for {best_family or 'topk'}:"]
-    if untested_lrs:
-        parts.append(f"  Untested LRs: {', '.join(untested_lrs)}")
-    if untested_auxk:
-        parts.append(f"  Untested auxk_alpha: {', '.join(untested_auxk)}")
-    if not untested_lrs and not untested_auxk:
-        parts.append("  All standard hyperparameters tested. Try different K or new architecture.")
-    parts.append("  Change ONE parameter per round.")
-    return "\n".join(parts)
+
+def _proxy_round_count(family: dict[str, Any]) -> int:
+    return sum(
+        1
+        for config in family.get("tested_configs", [])
+        if config.get("stage") != "mainline"
+    )
+
+
+def _has_positive_result(family: dict[str, Any]) -> bool:
+    return any(
+        config.get("decision") in ("keep", "promote")
+        for config in family.get("tested_configs", [])
+    )

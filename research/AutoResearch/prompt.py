@@ -22,37 +22,50 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 ROLE_AND_OBJECTIVE = """\
-You are the SAE research agent for this repository.
+你是本仓库中的 LUTurbo 自动研究 Agent。
 
-Primary objective:
-- Maintain and improve the Pareto frontier across FVU and K
-- K=128 is an anchor, not the only success criterion
-- Smaller K is valuable when it creates a non-dominated tradeoff"""
+系统使命：
+- 为 LUTurbo 搜索可部署的基向量分解模块
+- 真正目标是降低 LUTurbo 在 CPU 上的总在线成本与时延，而不只是把 sparsify-ascend 内部的 SAE 指标做高
+- 优先考虑那些有希望同时降低“选择 + 系数计算 + 查表 + 在线补偿”总成本的方案"""
+
+MODULE_CONTRACT = """\
+模块契约：
+- 学到的表示必须能导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”推理流水线
+- 最终重构必须能表示成一个或多个静态向量库上的有限加权和
+- SAE 只是当前基线实现，不是必须坚持的唯一架构形式"""
+
+PROXY_OBJECTIVE = """\
+训练侧代理目标：
+- 维护并改善 FVU 与 K 的 Pareto frontier
+- 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
+- 更小的 K 只有在兼容性和潜在补偿行为仍然可接受时才真正有价值"""
 
 EXECUTION_LAYER = """\
-Execution layer is fixed:
-- Training: scripts/autoresearch_test.sh
-- Results: research/controller.py
-- Memory: research/history/"""
+执行层是固定的：
+- 训练：scripts/autoresearch_test.sh
+- 结果：research/controller.py
+- 记忆：research/history/
+- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境"""
 
 EDIT_RULES = """\
-Rules:
-- Edit ONLY files under sparsify/
-- Use env_overrides for parameter-only experiments
-- ONE hypothesis per round
-- Set primary_variable to indicate which dimension changes
-- Never return command="stop"
-- Return a final JSON object matching the action schema"""
+规则：
+- 只能编辑 sparsify/ 下的文件
+- 纯参数实验必须使用 env_overrides
+- 每一轮只允许一个主假设
+- 必须设置 primary_variable，明确本轮主变化维度
+- 不要返回 command="stop"
+- 最终必须返回一个符合 action schema 的 JSON 对象"""
 
-K_WHITELIST = "K constraint: K must be one of {4, 8, 16, 24, 32, 64, 96, 128}. No other K value is allowed."
+K_WHITELIST = "K 约束：K 只能取 {4, 8, 16, 24, 32, 64, 96, 128} 中的值，禁止使用其他 K。"
 
-EF_CONSTRAINT = "EF constraint: EXPANSION_FACTOR is fixed at 16 for ALL experiments. Set EXPANSION_FACTOR=16 in every env_overrides."
+EF_CONSTRAINT = "EF 约束：所有实验的 EXPANSION_FACTOR 固定为 12。每次 env_overrides 都必须显式设置 EXPANSION_FACTOR=12。"
 
-SINGLE_VARIABLE_PRINCIPLE = "Single-variable principle: Change ONE primary dimension per round."
+SINGLE_VARIABLE_PRINCIPLE = "单变量原则：每一轮只改变一个主维度。"
 
 HARD_CONSTRAINT_REMINDER = (
-    "Reminders: K in {4,8,16,24,32,64,96,128}. EF=16 always. "
-    "One variable per round. Edit only sparsify/. Return JSON."
+    "提醒：K 只能取 {4,8,16,24,32,64,96,128}；EF 永远为 12；"
+    "每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
 )
 
 ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
@@ -75,6 +88,8 @@ def section_hard_constraints() -> str:
     """All hard constraint text, always present at prompt top."""
     return "\n\n".join([
         ROLE_AND_OBJECTIVE,
+        MODULE_CONTRACT,
+        PROXY_OBJECTIVE,
         EXECUTION_LAYER,
         EDIT_RULES,
         K_WHITELIST,
@@ -91,7 +106,7 @@ def section_hard_constraints() -> str:
 def section_policy_guidance(policy_guidance: str) -> str:
     if not policy_guidance:
         return ""
-    return f"Policy guidance:\n{policy_guidance}"
+    return f"策略引导：\n{policy_guidance}"
 
 
 def section_agent_state(
@@ -101,7 +116,7 @@ def section_agent_state(
     rounds_since_new_family: int,
 ) -> str:
     return (
-        f"Agent state: round={round_index}, "
+        f"Agent 状态：round={round_index}, "
         f"consecutive_crashes={consecutive_crashes}, "
         f"consecutive_no_improve={consecutive_no_improve}, "
         f"rounds_since_new_family={rounds_since_new_family}"
@@ -109,9 +124,8 @@ def section_agent_state(
 
 
 def section_frontier(frontier: dict[str, Any], limit: int = 10) -> str:
-    """Frontier snapshot sorted by K, split into EF=16 (main) and EF=12 (legacy)."""
+    """按 K 排序的训练代理 frontier，并区分 EF=12 主 regime 与其他历史参考。"""
     main: list[tuple[int, str]] = []
-    legacy: list[tuple[int, str]] = []
 
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
@@ -124,41 +138,32 @@ def section_frontier(frontier: dict[str, Any], limit: int = 10) -> str:
         lr = cfg.get("lr", "?")
         opt = cfg.get("optimizer", "?")
 
-        if ef == 16:
+        if ef == 12:
             main.append((k, f"  k={k:>3d}  fvu={fvu:<12}  arch={arch}  lr={lr} opt={opt}"))
-        else:
-            legacy.append((k, f"  k={k:>3d}  ef={ef}  fvu={fvu:<12}  arch={arch}"))
 
     main.sort()
-    legacy.sort()
 
-    parts = ["Frontier (EF=16, current regime):"]
+    parts = ["训练代理 frontier（EF=12，当前主 regime）："]
     if main:
         for _, line in main[:limit]:
             parts.append(line)
     else:
-        parts.append("  (no entries yet)")
-
-    if legacy:
-        parts.append("")
-        parts.append("Legacy frontier (EF=12, reference only):")
-        for _, line in legacy[:6]:
-            parts.append(line)
+        parts.append("  （暂无条目）")
 
     return "\n".join(parts)
 
 
 def section_recent_rounds(round_summaries: list[str]) -> str:
-    """Recent round summaries as one-liners (already formatted by state)."""
+    """最近几轮摘要，每轮一行。"""
     if not round_summaries:
         return ""
-    return f"Recent rounds ({len(round_summaries)}):\n" + "\n".join(
-        f"  {s}" for s in round_summaries
+    return f"最近几轮（{len(round_summaries)}）：\n" + "\n".join(
+        f"  {_normalize_ef_text(s)}" for s in round_summaries
     )
 
 
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
-    """Tactical operator hints only. Filters out K/EF hard constraints."""
+    """只保留战术性 hint，过滤掉已经固化到模板里的 K/EF 硬约束。"""
     tactical = []
     for hint in hints:
         text = hint.get("text", "")
@@ -168,7 +173,7 @@ def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
 
     if not tactical:
         return ""
-    lines = ["Operator hints:"]
+    lines = ["操作提示："]
     for i, t in enumerate(tactical, 1):
         lines.append(f"  {i}. {t}")
     return "\n".join(lines)
@@ -184,7 +189,7 @@ def section_memory_brief(
     frontier: dict[str, Any],
     recent_round_limit: int = 10,
 ) -> str:
-    """Slim memory: only frontier-holding + recently tested families, failures, hypotheses."""
+    """精简记忆：只保留 frontier 家族、最近测试家族与近期失败。"""
     families = memory.get("architecture_families", {})
 
     # Which families to show
@@ -204,7 +209,7 @@ def section_memory_brief(
 
     show = frontier_families | recent_families
 
-    parts: list[str] = ["Architecture families (frontier holders + recently tested):"]
+    parts: list[str] = ["架构家族（frontier 持有者 + 最近测试）："]
     for name in sorted(show):
         fam = families.get(name)
         if fam is None:
@@ -228,7 +233,8 @@ def section_memory_brief(
         fails = memory.get(key, [])[-n:]
         if fails:
             parts.append("")
-            parts.append(f"{label}:")
+            label_cn = "近期训练失败" if key == "recent_training_failures" else "近期 sanity 失败"
+            parts.append(f"{label_cn}：")
             for f in fails:
                 if isinstance(f, dict):
                     parts.append(
@@ -245,7 +251,7 @@ def section_memory_brief(
 
 
 def section_operator_guide_digest(guide_text: str, max_chars: int = 3000) -> str:
-    """Extract Runtime Priorities section from operator_guide.md."""
+    """从 operator_guide.md 中提取 Runtime Priorities。"""
     if not guide_text:
         return ""
 
@@ -265,16 +271,17 @@ def section_operator_guide_digest(guide_text: str, max_chars: int = 3000) -> str
 
     if extracted:
         text = "\n".join(extracted)
+        text = _normalize_ef_text(text)
         if len(text) > max_chars:
             text = text[:max_chars - 20] + "\n[truncated]"
-        return f"Operator guide (key priorities):\n{text}"
+        return f"Operator guide 关键优先级：\n{text}"
 
-    truncated = guide_text[:max_chars - 20] + "\n[truncated]"
-    return f"Operator guide (excerpt):\n{truncated}"
+    truncated = _normalize_ef_text(guide_text[:max_chars - 20]) + "\n[truncated]"
+    return f"Operator guide 摘要：\n{truncated}"
 
 
 def section_prior_research_digest(prior_text: str, max_chars: int = 2000) -> str:
-    """Extract sections 1-2 + phase table from prior_research_history.md."""
+    """从 prior_research_history.md 中提取 1/2 关键段落。"""
     if not prior_text:
         return ""
 
@@ -287,12 +294,7 @@ def section_prior_research_digest(prior_text: str, max_chars: int = 2000) -> str
         if line.startswith("## 1.") or line.startswith("## 2."):
             in_section = True
             section_depth = 2
-        elif line.startswith("### 3.1"):
-            in_section = True
-            section_depth = 3
         elif in_section and line.startswith("## ") and section_depth == 2:
-            in_section = False
-        elif in_section and line.startswith("### ") and section_depth == 3 and "3.1" not in line:
             in_section = False
 
         if in_section:
@@ -300,12 +302,13 @@ def section_prior_research_digest(prior_text: str, max_chars: int = 2000) -> str
 
     if extracted:
         text = "\n".join(extracted)
+        text = _normalize_ef_text(text)
         if len(text) > max_chars:
             text = text[:max_chars - 20] + "\n[truncated]"
-        return f"Prior research (key findings):\n{text}"
+        return f"历史研究关键结论：\n{text}"
 
-    truncated = prior_text[:max_chars - 20] + "\n[truncated]"
-    return f"Prior research (excerpt):\n{truncated}"
+    truncated = _normalize_ef_text(prior_text[:max_chars - 20]) + "\n[truncated]"
+    return f"历史研究摘要：\n{truncated}"
 
 
 def section_architecture_checklist(
@@ -313,16 +316,16 @@ def section_architecture_checklist(
     memory: dict[str, Any],
     raw_summaries: list[dict[str, Any]],
 ) -> str:
-    """Conditionally include architecture integration checklist.
+    """按条件注入架构集成 checklist。
 
-    Fixed: uses raw dict summaries from state.recent_round_summaries(),
-    not trimmed strings from recent_round_summaries_trimmed().
+    这里使用 state.recent_round_summaries() 的原始 dict，
+    而不是 recent_round_summaries_trimmed() 的字符串摘要。
     """
     if not checklist_text:
         return ""
     if not _should_include_checklist(memory, raw_summaries):
         return ""
-    return f"Architecture integration checklist:\n{checklist_text}"
+    return f"架构集成检查清单：\n{checklist_text}"
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +334,7 @@ def section_architecture_checklist(
 
 
 def compose_proposal(state: Any, policy_guidance: str) -> str:
-    """Full proposal prompt in 4 layers."""
+    """四层结构的完整 proposal prompt。"""
     sections: list[str] = []
 
     # Layer 1
@@ -369,11 +372,11 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
 
 
 def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
-    """Lightweight delta prompt for session resume."""
+    """用于 session resume 的轻量增量 prompt。"""
     sections: list[str] = []
 
-    sections.append(f"Continue the SAE research session. Round {round_id}.")
-    sections.append("Return one JSON object matching the action schema. No markdown fences.")
+    sections.append(f"继续 LUTurbo 研究会话。当前轮次：Round {round_id}。")
+    sections.append("返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。")
     sections.append(HARD_CONSTRAINT_REMINDER)
 
     sections.append(section_policy_guidance(policy_guidance))
@@ -390,9 +393,9 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     # Open hypotheses
     hypotheses = state.memory.get("next_hypotheses", [])[:5]
     if hypotheses:
-        lines = ["Open hypotheses:"]
+        lines = ["当前开放假设："]
         for h in hypotheses:
-            lines.append(f"  - {_truncate(h, 100)}")
+            lines.append(f"  - {_truncate(_normalize_ef_text(h), 100)}")
         sections.append("\n".join(lines))
 
     checklist = _load_architecture_checklist()
@@ -411,17 +414,17 @@ def compose_repair(
     repair_attempt: int,
     max_repair_attempts: int,
 ) -> str:
-    """Repair prompt: fix engineering blocker without redesigning."""
+    """Repair prompt：修复工程性阻塞，但不改变实验设计。"""
     sections: list[str] = []
 
-    sections.append(f"Continue round {round_id} in repair mode.")
+    sections.append(f"Round {round_id} 进入 repair 模式。")
     sections.append(
-        "The previous code-edit failed with an engineering blocker.\n"
-        "Do NOT redesign the experiment. Do NOT change family_name or env_overrides.\n"
-        "Patch the implementation so the original experiment can run.\n"
-        "Stay within sparsify/ only.\n"
-        f"Attempt {repair_attempt} of {max_repair_attempts}.\n"
-        "Return one final JSON object matching the action schema."
+        "上一轮代码修改遇到了工程性阻塞。\n"
+        "不要重新设计实验，不要修改 family_name 或 env_overrides。\n"
+        "你的任务是补丁修复实现，让原始实验能够跑通。\n"
+        "只能在 sparsify/ 内修改。\n"
+        f"当前是第 {repair_attempt} / {max_repair_attempts} 次 repair 尝试。\n"
+        "最终返回一个符合 action schema 的 JSON 对象。"
     )
     sections.append(HARD_CONSTRAINT_REMINDER)
 
@@ -440,11 +443,11 @@ def compose_repair(
         },
         "failure_payload": failure_payload,
     }
-    sections.append(f"Repair context:\n{json.dumps(payload, indent=2)}")
+    sections.append(f"Repair 上下文：\n{json.dumps(payload, indent=2, ensure_ascii=False)}")
 
     checklist = _load_architecture_checklist()
     if checklist:
-        sections.append(f"Architecture integration checklist:\n{checklist}")
+        sections.append(f"架构集成检查清单：\n{checklist}")
 
     return "\n\n".join(s for s in sections if s)
 
@@ -455,7 +458,7 @@ def compose_repair(
 
 
 def _load_architecture_checklist() -> str:
-    """Load architecture integration checklist from SKILL.md."""
+    """从 SKILL.md 加载架构集成检查清单。"""
     if not ARCHITECTURE_INTEGRATION_SKILL_PATH.exists():
         return ""
     text = ARCHITECTURE_INTEGRATION_SKILL_PATH.read_text().strip()
@@ -470,9 +473,9 @@ def _should_include_checklist(
     memory: dict[str, Any],
     recent_summaries: list[dict[str, Any]],
 ) -> bool:
-    """Determine whether to include the architecture checklist.
+    """判断是否需要注入架构 checklist。
 
-    Takes list[dict] (raw round summaries), NOT list[str].
+    输入必须是 list[dict] 的原始 round summaries，而不是 list[str]。
     """
     for s in recent_summaries[-2:]:
         if not isinstance(s, dict):
@@ -518,3 +521,21 @@ def _truncate(s: str, limit: int) -> str:
     if not isinstance(s, str):
         return str(s)[:limit]
     return s if len(s) <= limit else s[:limit - 3] + "..."
+
+
+def _normalize_ef_text(s: str) -> str:
+    if not isinstance(s, str):
+        return str(s)
+    replacements = [
+        ("EF=16", "EF=12"),
+        ("EF = 16", "EF = 12"),
+        ("EF 16", "EF 12"),
+        ("EXPANSION_FACTOR=16", "EXPANSION_FACTOR=12"),
+        ("EXPANSION_FACTOR = 16", "EXPANSION_FACTOR = 12"),
+        ("固定到 EF=16", "固定到 EF=12"),
+        ("current `K=32, EF=16` backbone", "current `K=32, EF=12` backbone"),
+    ]
+    out = s
+    for old, new in replacements:
+        out = out.replace(old, new)
+    return out

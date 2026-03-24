@@ -37,7 +37,7 @@ SCHEMA_PATH = RESEARCH_DIR / "agent_action.schema.json"
 
 BASE_ENV_DEFAULTS: dict[str, str] = {
     "ARCHITECTURE": "topk",
-    "EXPANSION_FACTOR": "8",
+    "EXPANSION_FACTOR": "12",
     "K": "128",
     "HOOKPOINTS": "layers.[3].self_attn.o_proj",
     "OPTIMIZER": "signum",

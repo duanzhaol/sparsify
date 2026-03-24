@@ -103,7 +103,7 @@ def decide(
         return "crash"
 
     if ef is None:
-        ef = 8  # fallback default
+        ef = 12  # fallback default
 
     key = frontier_key(int(k), int(ef))
     current = frontier.get(key)
@@ -144,7 +144,7 @@ def update_frontier(
     if k is None or fvu is None:
         return
     if ef is None:
-        ef = 8
+        ef = 12
 
     key = frontier_key(int(k), int(ef))
     frontier[key] = {
@@ -187,7 +187,7 @@ def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
         try:
             # New format stores k and ef explicitly in entry
             k = int(entry.get("k", key.split("_")[0] if "_" in key else key))
-            ef = int(entry.get("ef", key.split("_")[1] if "_" in key else 8))
+            ef = int(entry.get("ef", key.split("_")[1] if "_" in key else 12))
             points.append({
                 "k": k,
                 "ef": ef,
