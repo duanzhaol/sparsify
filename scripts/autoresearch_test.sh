@@ -52,6 +52,7 @@ RESIDUAL_FROM="${RESIDUAL_FROM:-}"
 PROFILE="${PROFILE:-0}"
 PROFILE_OUTPUT="${PROFILE_OUTPUT:-logs/nsys/qwen3-0.6B-sae}"
 COMPILE_MODEL="${COMPILE_MODEL:-1}"
+RESUME="${RESUME:-0}"
 
 cmd=(
   torchrun
@@ -138,6 +139,10 @@ fi
 
 if [[ "${COMPILE_MODEL}" == "1" ]]; then
   cmd+=(--compile_model)
+fi
+
+if [[ "${RESUME}" == "1" ]]; then
+  cmd+=(--resume)
 fi
 
 if [[ "${PROFILE}" == "1" ]]; then

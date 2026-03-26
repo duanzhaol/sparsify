@@ -1,9 +1,11 @@
 import logging
 import os
+import json
 from contextlib import nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
 from glob import glob
+from pathlib import Path
 from multiprocessing import cpu_count
 
 import torch
@@ -26,6 +28,110 @@ from .trainer import Trainer, TrainConfig
 from .utils import simple_parse_args_string
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_resume_signature_from_args(args: "RunConfig") -> dict:
+    return {
+        "sae": {
+            "architecture": args.sae.architecture,
+            "k": args.sae.k,
+            "expansion_factor": args.sae.expansion_factor,
+            "jumprelu_init_threshold": args.sae.jumprelu_init_threshold,
+            "jumprelu_bandwidth": args.sae.jumprelu_bandwidth,
+            "gated_temperature": args.sae.gated_temperature,
+            "gated_init_logit": args.sae.gated_init_logit,
+            "group_topk_size": args.sae.group_topk_size,
+        },
+        "batch_size": args.batch_size,
+        "grad_acc_steps": args.grad_acc_steps,
+        "micro_acc_steps": args.micro_acc_steps,
+        "lr": args.lr,
+        "auxk_alpha": args.auxk_alpha,
+        "dead_feature_threshold": args.dead_feature_threshold,
+        "hookpoints": list(args.hookpoints),
+        "init_seeds": list(args.init_seeds),
+        "num_tiles": args.num_tiles,
+        "global_topk": args.global_topk,
+        "input_mixing": args.input_mixing,
+        "use_hadamard": args.use_hadamard,
+        "compile_model": args.compile_model,
+        "optimizer": args.optimizer,
+        "matryoshka_ks": list(args.matryoshka_ks),
+        "matryoshka_weights": list(args.matryoshka_weights),
+        "ortho_lambda": args.ortho_lambda,
+        "residual_from": args.residual_from,
+        "model": args.model,
+        "dataset": args.dataset,
+        "split": args.split,
+        "ctx_len": args.ctx_len,
+        "max_examples": args.max_examples,
+        "shuffle_seed": args.shuffle_seed,
+    }
+
+
+def _normalize_resume_signature_from_checkpoint(path: str | Path) -> dict:
+    with open(Path(path) / "config.json") as f:
+        cfg = json.load(f)
+    return {
+        "sae": {
+            "architecture": cfg.get("sae", {}).get("architecture"),
+            "k": cfg.get("sae", {}).get("k"),
+            "expansion_factor": cfg.get("sae", {}).get("expansion_factor"),
+            "jumprelu_init_threshold": cfg.get("sae", {}).get("jumprelu_init_threshold"),
+            "jumprelu_bandwidth": cfg.get("sae", {}).get("jumprelu_bandwidth"),
+            "gated_temperature": cfg.get("sae", {}).get("gated_temperature"),
+            "gated_init_logit": cfg.get("sae", {}).get("gated_init_logit"),
+            "group_topk_size": cfg.get("sae", {}).get("group_topk_size"),
+        },
+        "batch_size": cfg.get("batch_size"),
+        "grad_acc_steps": cfg.get("grad_acc_steps"),
+        "micro_acc_steps": cfg.get("micro_acc_steps"),
+        "lr": cfg.get("lr"),
+        "auxk_alpha": cfg.get("auxk_alpha"),
+        "dead_feature_threshold": cfg.get("dead_feature_threshold"),
+        "hookpoints": list(cfg.get("hookpoints", [])),
+        "init_seeds": list(cfg.get("init_seeds", [])),
+        "num_tiles": cfg.get("num_tiles"),
+        "global_topk": cfg.get("global_topk"),
+        "input_mixing": cfg.get("input_mixing"),
+        "use_hadamard": cfg.get("use_hadamard"),
+        "compile_model": cfg.get("compile_model"),
+        "optimizer": cfg.get("optimizer"),
+        "matryoshka_ks": list(cfg.get("matryoshka_ks", [])),
+        "matryoshka_weights": list(cfg.get("matryoshka_weights", [])),
+        "ortho_lambda": cfg.get("ortho_lambda"),
+        "residual_from": cfg.get("residual_from"),
+        "model": cfg.get("model"),
+        "dataset": cfg.get("dataset"),
+        "split": cfg.get("split"),
+        "ctx_len": cfg.get("ctx_len"),
+        "max_examples": cfg.get("max_examples"),
+        "shuffle_seed": cfg.get("shuffle_seed"),
+    }
+
+
+def _validate_resume_compatibility(args: "RunConfig", resume_path: str) -> None:
+    current = _normalize_resume_signature_from_args(args)
+    previous = _normalize_resume_signature_from_checkpoint(resume_path)
+    if current == previous:
+        return
+
+    mismatches = []
+    for key in sorted(set(previous) | set(current)):
+        if key == "sae":
+            for sae_key in sorted(set(previous["sae"]) | set(current["sae"])):
+                if previous["sae"].get(sae_key) != current["sae"].get(sae_key):
+                    mismatches.append(
+                        f"sae.{sae_key}: checkpoint={previous['sae'].get(sae_key)!r} current={current['sae'].get(sae_key)!r}"
+                    )
+        elif previous.get(key) != current.get(key):
+            mismatches.append(
+                f"{key}: checkpoint={previous.get(key)!r} current={current.get(key)!r}"
+            )
+    raise ValueError(
+        "Resume config mismatch; only token/logging fields may change between continuation stages:\n"
+        + "\n".join(mismatches)
+    )
 
 
 def _is_local_artifact(path: str) -> bool:
@@ -205,6 +311,7 @@ def run():
 
         trainer = Trainer(args, dataset, model, resume_from=resume_path)
         if args.resume:
+            _validate_resume_compatibility(args, resume_path)
             trainer.load_state(resume_path)
         elif args.finetune:
             for name, sae in trainer.saes.items():

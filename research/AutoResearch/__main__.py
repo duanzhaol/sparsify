@@ -9,12 +9,15 @@ from .types import (
     DEFAULT_AGENT_PROXY,
     DEFAULT_AGENT_RETRY_BASE_SEC,
     DEFAULT_AGENT_TIMEOUT_SEC,
+    DEFAULT_CONTINUATION_MAX_TOKENS,
+    DEFAULT_CONTINUATION_MIN_FVU_DROP,
+    DEFAULT_CONTINUATION_STEP_TOKENS,
     DEFAULT_FIRST_STEP_TIMEOUT_SEC,
+    DEFAULT_INITIAL_MAX_TOKENS,
     DEFAULT_MAX_REPAIR_ATTEMPTS,
     DEFAULT_MAX_SESSION_FAILURES,
     DEFAULT_MAX_SESSION_HOURS,
     DEFAULT_MAX_SESSION_ROUNDS,
-    DEFAULT_MAX_TOKENS,
     DEFAULT_MIN_PROGRESS_STEPS,
     DEFAULT_MIN_TOKENS_PER_SEC_RATIO,
     DEFAULT_POLL_INTERVAL_SEC,
@@ -31,7 +34,12 @@ def main() -> int:
     parser.add_argument("--budget-hours", type=float, default=8.0)
     parser.add_argument("--model", default=None)
     parser.add_argument("--agent-proxy", default=DEFAULT_AGENT_PROXY)
-    parser.add_argument("--max-tokens", default=DEFAULT_MAX_TOKENS)
+    parser.add_argument("--initial-max-tokens", type=int, default=DEFAULT_INITIAL_MAX_TOKENS)
+    parser.add_argument("--continuation-step-tokens", type=int, default=DEFAULT_CONTINUATION_STEP_TOKENS)
+    parser.add_argument("--continuation-max-tokens", type=int, default=DEFAULT_CONTINUATION_MAX_TOKENS)
+    parser.add_argument("--continuation-min-fvu-drop", type=float, default=DEFAULT_CONTINUATION_MIN_FVU_DROP)
+    parser.add_argument("--disable-auto-continuation", action="store_true")
+    parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--timeout-sec", type=int, default=DEFAULT_TIMEOUT_SEC)
     parser.add_argument("--stall-timeout-sec", type=int, default=DEFAULT_STALL_TIMEOUT_SEC)
     parser.add_argument("--poll-interval-sec", type=int, default=DEFAULT_POLL_INTERVAL_SEC)

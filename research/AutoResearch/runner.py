@@ -104,7 +104,15 @@ def run_training(
     save_dir = SAVE_ROOT / f"round_{round_id:04d}"
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    env, config_json = _build_env(action, run_name, save_dir, config, state.frontier)
+    env, config_json = _build_env(
+        action,
+        run_name,
+        save_dir,
+        config,
+        state.frontier,
+        target_max_tokens=config.initial_max_tokens,
+        resume=False,
+    )
     baseline_key = _baseline_key(config_json)
     baseline_tps = state.get_baseline_tps(
         config_json["architecture"], config_json["hookpoints"]
@@ -125,10 +133,73 @@ def run_training(
     state.log_round_event(ctx, "training_started", run_name=run_name, config=config_json)
     state.write_status("training_started", round=round_id, run_name=run_name)
 
-    # Run subprocess with watchdog
-    termination_reason, latest_tps, baseline_ratio, last_step_record, step_records = (
-        _run_with_watchdog(log_path, save_dir, run_name, config, round_id, baseline_tps, env)
-    )
+    current_target_tokens = config.initial_max_tokens
+    initial_target_tokens = current_target_tokens
+    resume_stage_count = 0
+    continued_from_checkpoint = False
+    continuation_stop_reason = "initial_budget_reached"
+    termination_reason = "completed"
+    latest_tps: float | None = None
+    baseline_ratio: float | None = None
+    last_step_record: dict[str, Any] | None = None
+    step_records: list[dict[str, Any]] = []
+
+    while True:
+        stage_index = resume_stage_count + 1
+        (
+            termination_reason,
+            latest_tps,
+            baseline_ratio,
+            last_step_record,
+            step_records,
+        ) = _run_with_watchdog(
+            log_path,
+            save_dir,
+            run_name,
+            config,
+            round_id,
+            baseline_tps,
+            env,
+            append=stage_index > 1,
+            stage_index=stage_index,
+            target_max_tokens=current_target_tokens,
+        )
+        resume_stage_count = stage_index
+
+        if termination_reason != "completed":
+            continuation_stop_reason = termination_reason
+            break
+
+        should_continue, continuation_stop_reason = _should_continue_training(
+            step_records,
+            config,
+            current_target_tokens,
+        )
+        if not should_continue:
+            break
+
+        next_target_tokens = min(
+            current_target_tokens + config.continuation_step_tokens,
+            config.continuation_max_tokens,
+        )
+        if next_target_tokens <= current_target_tokens:
+            continuation_stop_reason = "max_tokens_reached"
+            break
+
+        continued_from_checkpoint = True
+        current_target_tokens = next_target_tokens
+        print(
+            f"Round {round_id}: continuing from checkpoint to {current_target_tokens} tokens"
+        )
+        env, config_json = _build_env(
+            action,
+            run_name,
+            save_dir,
+            config,
+            state.frontier,
+            target_max_tokens=current_target_tokens,
+            resume=True,
+        )
 
     # Finalize
     checkpoint_dir = _latest_checkpoint_dir(save_dir, run_name)
@@ -204,6 +275,16 @@ def run_training(
             "true" if curve_metrics.get("curve_still_improving") else
             "false" if curve_metrics.get("curve_still_improving") is not None else None
         ),
+        initial_target_tokens=str(initial_target_tokens),
+        final_target_tokens=str(current_target_tokens),
+        final_total_tokens=(
+            str(last_step_record.get("total_tokens"))
+            if last_step_record and last_step_record.get("total_tokens") is not None
+            else None
+        ),
+        resume_stage_count=str(resume_stage_count),
+        continuation_stop_reason=continuation_stop_reason,
+        continued_from_checkpoint="true" if continued_from_checkpoint else "false",
     )
 
     if result.decision == "crash":
@@ -243,6 +324,10 @@ def _run_with_watchdog(
     round_id: int,
     baseline_tps: float | None,
     env: dict[str, str],
+    *,
+    append: bool,
+    stage_index: int,
+    target_max_tokens: int,
 ) -> tuple[str, float | None, float | None, dict[str, Any] | None, list[dict[str, Any]]]:
     """Run training subprocess with monitoring.
 
@@ -255,8 +340,16 @@ def _run_with_watchdog(
     last_step_record: dict[str, Any] | None = None
     first_step_seen = False
     slow_trigger_count = 0
+    initial_checkpoint_dir = _latest_checkpoint_dir(save_dir, run_name)
+    initial_step_record = _read_latest_step(initial_checkpoint_dir)
+    start_total_tokens = int(initial_step_record.get("total_tokens", 0) or 0) if initial_step_record else 0
 
-    with open(log_path, "w") as log_file:
+    with open(log_path, "a" if append else "w") as log_file:
+        if append:
+            log_file.write(
+                f"\n=== AutoResearch resume stage {stage_index} | target_tokens={target_max_tokens} ===\n"
+            )
+            log_file.flush()
         process = subprocess.Popen(
             ["/bin/bash", str(SCRIPT_PATH)],
             cwd=REPO_ROOT,
@@ -276,18 +369,22 @@ def _run_with_watchdog(
 
             last_step_record = _read_latest_step(checkpoint_dir)
             if last_step_record is not None:
-                first_step_seen = True
                 total_tokens = float(last_step_record.get("total_tokens", 0))
-                elapsed = max(time.time() - start, 1e-6)
-                latest_tps = total_tokens / elapsed if total_tokens > 0 else None
-                if latest_tps is not None and baseline_tps and baseline_tps > 0:
-                    baseline_ratio = latest_tps / baseline_tps
+                stage_tokens = max(total_tokens - start_total_tokens, 0.0)
+                has_new_progress = stage_tokens > 0 or not append
+                if has_new_progress:
+                    first_step_seen = True
+                    elapsed = max(time.time() - start, 1e-6)
+                    latest_tps = stage_tokens / elapsed if stage_tokens > 0 else None
+                    if latest_tps is not None and baseline_tps and baseline_tps > 0:
+                        baseline_ratio = latest_tps / baseline_tps
 
                 # Throughput watchdog
                 step = int(last_step_record.get("step", 0))
                 if (
                     time.time() - start >= config.slow_run_grace_sec
                     and step >= config.min_progress_steps
+                    and has_new_progress
                     and latest_tps is not None
                     and baseline_tps is not None
                     and baseline_tps > 0
@@ -465,6 +562,9 @@ def _build_env(
     save_dir: Path,
     config: LoopConfig,
     frontier: dict[str, Any] | None = None,
+    *,
+    target_max_tokens: int,
+    resume: bool,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Build subprocess env vars and config JSON from action.
 
@@ -492,7 +592,8 @@ def _build_env(
     env["RUN_NAME"] = run_name
     env["SAVE_DIR"] = str(save_dir)
     env["WANDB_PROJECT"] = env.get("WANDB_PROJECT", "qwen3-0.6B-auto")
-    env["MAX_TOKENS"] = config.max_tokens
+    env["MAX_TOKENS"] = str(target_max_tokens)
+    env["RESUME"] = "1" if resume else "0"
 
     config_json: dict[str, Any] = {
         "architecture": merged.get("ARCHITECTURE", "topk").lower(),
@@ -621,6 +722,45 @@ def _summarize_curve(step_records: list[dict[str, Any]]) -> dict[str, Any]:
         "curve_late_slope": late_slope,
         "curve_still_improving": still_improving,
     }
+
+
+def _should_continue_training(
+    step_records: list[dict[str, Any]],
+    config: LoopConfig,
+    current_target_tokens: int,
+) -> tuple[bool, str]:
+    if not config.continuation_enabled:
+        return False, "auto_continuation_disabled"
+    if not step_records:
+        return False, "missing_step_records"
+
+    end_record = step_records[-1]
+    end_total_tokens = int(end_record.get("total_tokens", 0) or 0)
+    if end_total_tokens >= config.continuation_max_tokens:
+        return False, "max_tokens_reached"
+    if end_total_tokens < current_target_tokens:
+        return False, "target_not_reached"
+    if end_total_tokens < config.continuation_step_tokens:
+        return False, "insufficient_window"
+
+    window_start_tokens = end_total_tokens - config.continuation_step_tokens
+    start_record = None
+    for record in step_records:
+        total_tokens = int(record.get("total_tokens", 0) or 0)
+        if total_tokens >= window_start_tokens:
+            start_record = record
+            break
+    if start_record is None:
+        return False, "insufficient_window"
+
+    start_fvu = _extract_step_fvu(start_record)
+    end_fvu = _extract_step_fvu(end_record)
+    if start_fvu is None or end_fvu is None:
+        return False, "missing_fvu"
+
+    if start_fvu - end_fvu >= config.continuation_min_fvu_drop:
+        return True, "significant_fvu_drop"
+    return False, "plateau"
 
 
 def _terminate(process: subprocess.Popen) -> None:

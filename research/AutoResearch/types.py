@@ -75,7 +75,10 @@ DEFAULT_SLOW_RUN_GRACE_SEC = 120
 DEFAULT_MIN_TOKENS_PER_SEC_RATIO = 0.25
 DEFAULT_MIN_PROGRESS_STEPS = 4
 DEFAULT_PROCESS_TERM_TIMEOUT_SEC = 15
-DEFAULT_MAX_TOKENS = "50000000"
+DEFAULT_INITIAL_MAX_TOKENS = 500000
+DEFAULT_CONTINUATION_STEP_TOKENS = 100000
+DEFAULT_CONTINUATION_MAX_TOKENS = 1000000
+DEFAULT_CONTINUATION_MIN_FVU_DROP = 0.002
 
 # Agent defaults
 DEFAULT_AGENT_PROXY: str | None = None
@@ -223,6 +226,12 @@ class Result:
     curve_end_fvu: str | None = None
     curve_late_slope: str | None = None
     curve_still_improving: str | None = None
+    initial_target_tokens: str | None = None
+    final_target_tokens: str | None = None
+    final_total_tokens: str | None = None
+    resume_stage_count: str | None = None
+    continuation_stop_reason: str | None = None
+    continued_from_checkpoint: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         """Convert to flat string dict (for results.tsv compatibility)."""
@@ -283,7 +292,11 @@ class LoopConfig:
     budget_hours: float = 8.0
     model: str | None = None
     agent_proxy: str | None = DEFAULT_AGENT_PROXY
-    max_tokens: str = DEFAULT_MAX_TOKENS
+    initial_max_tokens: int = DEFAULT_INITIAL_MAX_TOKENS
+    continuation_step_tokens: int = DEFAULT_CONTINUATION_STEP_TOKENS
+    continuation_max_tokens: int = DEFAULT_CONTINUATION_MAX_TOKENS
+    continuation_min_fvu_drop: float = DEFAULT_CONTINUATION_MIN_FVU_DROP
+    continuation_enabled: bool = True
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
     stall_timeout_sec: int = DEFAULT_STALL_TIMEOUT_SEC
     poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC
@@ -311,7 +324,15 @@ class LoopConfig:
             budget_hours=args.budget_hours,
             model=args.model,
             agent_proxy=args.agent_proxy,
-            max_tokens=args.max_tokens,
+            initial_max_tokens=args.initial_max_tokens,
+            continuation_step_tokens=args.continuation_step_tokens,
+            continuation_max_tokens=(
+                args.max_tokens
+                if getattr(args, "max_tokens", None) is not None
+                else args.continuation_max_tokens
+            ),
+            continuation_min_fvu_drop=args.continuation_min_fvu_drop,
+            continuation_enabled=not getattr(args, "disable_auto_continuation", False),
             timeout_sec=args.timeout_sec,
             stall_timeout_sec=args.stall_timeout_sec,
             poll_interval_sec=args.poll_interval_sec,

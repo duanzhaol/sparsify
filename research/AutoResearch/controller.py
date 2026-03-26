@@ -41,8 +41,8 @@ def parse_log(log_path: Path) -> dict[str, Any]:
     parsed: dict[str, Any] = {}
 
     for key, pattern in _SUMMARY_PATTERNS.items():
-        match = pattern.search(text)
-        parsed[key] = match.group(1).strip() if match else None
+        matches = list(pattern.finditer(text))
+        parsed[key] = matches[-1].group(1).strip() if matches else None
 
     # Type coercion
     if parsed.get("val_fvu") in (None, "nan"):
