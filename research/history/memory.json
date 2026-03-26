@@ -15,7 +15,7 @@
   "architecture_families": {
     "topk": {
       "status": "active",
-      "design_hypothesis": "\u5728 signum \u4e0b\u628a LR \u4ece 8e-4 \u63d0\u5347\u5230 1.8e-3 \u540e\uff0cfrontier \u6700\u4f18\u4ecd\u505c\u5728 1.6e-3\uff0c\u8bf4\u660e\u7ee7\u7eed\u5728 signum \u4e0a\u505a\u66f4\u9ad8 LR \u5916\u63a8\u7684\u4ef7\u503c\u5f00\u59cb\u4e0b\u964d\uff1b\u672c\u8f6e\u53ea\u5207\u6362\u4f18\u5316\u5668\u5230 adam\uff0c\u5e76\u4fdd\u6301 topk/K128/EF12/LR=1.6e-3 \u4e0d\u53d8\uff0c\u7528\u6765\u5224\u65ad\u4f18\u5316\u5668\u672c\u8eab\u662f\u5426\u80fd\u5e26\u6765\u66f4\u7a33\u7684\u8bad\u7ec3\u66f2\u7ebf\u548c\u66f4\u597d\u7684 FVU\u3002",
+      "design_hypothesis": "Because the policy layer validates `param_only` rounds against the current topk family best and only accepts one changed core axis, the deferred Adam callback cannot be isolated cleanly from the `signum@1.6e-3` reference. This round returns to the accepted mainline axis and changes only `LR`, setting `topk/signum/K128/EF12` to `1.7e-3` to resolve whether the useful region is a narrow band just above `1.6e-3` or whether the `1.8e-3` degradation already marks the onset of instability.",
       "tested_configs": [
         {
           "round": 1,
@@ -80,16 +80,24 @@
           "decision": "discard",
           "val_fvu": "0.7337483763694763",
           "run_health": "normal"
+        },
+        {
+          "round": 11,
+          "stage": "mainline",
+          "k": "128",
+          "decision": "archive",
+          "val_fvu": "0.15220221877098083",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "\u5982\u679c adam@1.6e-3 \u6bd4 signum@1.6e-3 \u66f4\u7a33\u4e14\u66f4\u4f18\uff0c\u4e0b\u4e00\u8f6e\u7ee7\u7eed\u7559\u5728 topk family\uff0c\u53ea\u8c03 adam \u7684 LR\u3002",
-        "\u5982\u679c adam@1.6e-3 \u53ef\u8fd0\u884c\u4f46\u504f\u4e0d\u7a33\u6216\u504f\u5f31\uff0c\u4e0b\u4e00\u8f6e\u4ecd\u53ea\u8c03 LR\uff0c\u7ed9 adam \u4e00\u8f6e\u5b66\u4e60\u7387\u56de\u8c03\u3002",
-        "\u5982\u679c adam \u660e\u663e\u4e0d\u5982 signum \u4e14\u6ca1\u6709\u66f2\u7ebf\u4f18\u52bf\uff0c\u53ef\u7ed3\u675f\u8be5\u4f18\u5316\u5668\u5206\u652f\u5e76\u56de\u5230 signum \u4e3b\u7ebf\u3002"
+        "If `signum@1.7e-3` is better and still smooth, one final narrow LR check around `1.75e-3` may be justified before moving on.",
+        "If `signum@1.7e-3` is similar but less stable than `1.6e-3`, keep `1.6e-3` as the mainline anchor and stop LR refinement.",
+        "If `signum@1.7e-3` is clearly worse, treat `1.6e-3` as the stable optimum and only then reconsider how to legally explore optimizer changes under the validator."
       ],
       "best_fvu": 0.15245991945266724,
-      "last_round": 8
+      "last_round": 11
     }
   },
   "recent_rounds": [
@@ -236,13 +244,63 @@
       "termination_reason": "completed",
       "tokens_per_sec": "111039.998972",
       "baseline_ratio": "0.533400"
+    },
+    {
+      "round": 9,
+      "hypothesis": "Round 8 showed that swapping `topk` from `signum` to `adam` while keeping `LR=1.6e-3` caused a large quality collapse, which is more consistent with Adam being mis-tuned than with the optimizer family being unusable. This round changes only Adam's learning rate, backing off to `8e-4` while keeping `topk/K=128/EF=12` fixed, to test whether Adam can recover a stable training curve and competitive FVU at a smaller step size.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "topk",
+      "family_stage": "mainline",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 optimizer, lr",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
+    },
+    {
+      "round": 10,
+      "hypothesis": "Round 8's failure at `adam@1.6e-3` is still most plausibly an Adam step-size mismatch rather than evidence that the optimizer branch is unusable. This round changes only the learning rate within the same `topk` family, backing Adam off to `8e-4` while keeping `K=128` and `EXPANSION_FACTOR=12` fixed, to test whether Adam can produce a stable curve shape and recover competitive FVU under a smaller step size.",
+      "change_type": "param_only",
+      "expected_win": "explore_unknown",
+      "family_name": "topk",
+      "family_stage": "mainline",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 optimizer, lr",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
+    },
+    {
+      "round": 11,
+      "hypothesis": "Because the policy layer validates `param_only` rounds against the current topk family best and only accepts one changed core axis, the deferred Adam callback cannot be isolated cleanly from the `signum@1.6e-3` reference. This round returns to the accepted mainline axis and changes only `LR`, setting `topk/signum/K128/EF12` to `1.7e-3` to resolve whether the useful region is a narrow band just above `1.6e-3` or whether the `1.8e-3` degradation already marks the onset of instability.",
+      "change_type": "param_only",
+      "expected_win": "lower_fvu",
+      "family_name": "topk",
+      "family_stage": "mainline",
+      "decision": "archive",
+      "val_fvu": "0.15220221877098083",
+      "observed_fvu": "0.152202",
+      "k": "128",
+      "architecture": "topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "111039.870487",
+      "baseline_ratio": "0.533399"
     }
   ],
   "recent_insights": [
-    "NOTE: Round 1 \u5148\u5efa\u7acb topk clean baseline\uff0c\u907f\u514d frontier \u4e3a\u7a7a\u65f6\u76f4\u63a5\u505a lr/optimizer \u5f52\u56e0\u4e0d\u6e05\u3002",
-    "NOTE: \u672c\u8f6e\u663e\u5f0f\u9501\u5b9a EF=12 \u4e0e\u4e3b\u7ebf\u53c2\u8003 recipe\uff0c\u91cd\u70b9\u89c2\u5bdf\u6574\u6bb5\u8bad\u7ec3\u66f2\u7ebf\u5f62\u72b6\u800c\u4e0d\u53ea\u770b\u6700\u7ec8 FVU\u3002",
-    "NOTE: \u5f53\u524d\u4ed3\u5e93\u65e0\u5df2\u8bb0\u5f55 frontier\uff0c\u4e14\u6267\u884c\u5c42\u9ed8\u8ba4\u503c\u4e0e\u4e3b\u7ebf\u53c2\u8003\u914d\u65b9\u4e00\u81f4\uff0c\u9002\u5408\u5148\u505a\u4e00\u6b21\u53d8\u91cf\u5b8c\u5168\u9694\u79bb\u7684\u57fa\u7ebf\u8fd0\u884c\u3002",
-    "r1 topk param_only k128 -> keep fvu=0.16425763070583344",
     "NOTE: Round 2 \u4fdd\u6301 topk/signum/K128/EF12 \u4e0d\u53d8\uff0c\u53ea\u505a LR \u56de\u8c03\u4ee5\u63d0\u9ad8\u5f52\u56e0\u6e05\u6670\u5ea6\u3002",
     "NOTE: \u672c\u8f6e\u91cd\u70b9\u770b\u8bad\u7ec3\u66f2\u7ebf\u662f\u5426\u66f4\u5e73\u6ed1\u3001\u540e\u6bb5\u662f\u5426\u4ecd\u6301\u7eed\u4e0b\u964d\uff0c\u800c\u4e0d\u53ea\u6bd4\u8f83\u6700\u7ec8\u5355\u70b9 FVU\u3002",
     "NOTE: \u5982\u679c 6e-4 \u660e\u663e\u66f4\u7a33\u4e14\u66f4\u4f18\uff0c\u540e\u7eed\u53ef\u7ee7\u7eed\u5728 signum \u4e0b\u505a\u5c0f\u8303\u56f4 LR \u7cbe\u8c03\uff1b\u5982\u679c\u66f4\u5dee\u6216\u6536\u655b\u66f4\u6162\uff0c\u518d\u8003\u8651\u6362 optimizer\u3002",
@@ -270,13 +328,25 @@
     "NOTE: Round 8 \u7ed3\u675f signum \u7684\u4e3b\u7ebf LR \u4e0a\u63a2\uff0c\u5f00\u59cb topk family \u5185\u7684 optimizer \u5bf9\u7167\u3002",
     "NOTE: r7 \u6ca1\u6709\u5237\u65b0 frontier\uff0c\u8bf4\u660e\u5f53\u524d\u4e0d\u80fd\u53ea\u8ffd\u66f4\u9ad8 LR\uff0c\u9700\u8981\u6bd4\u8f83\u4f18\u5316\u5668\u5bf9\u66f2\u7ebf\u5f62\u72b6\u548c\u7a33\u5b9a\u6027\u7684\u5f71\u54cd\u3002",
     "NOTE: \u672c\u8f6e\u56fa\u5b9a LR=1.6e-3 \u505a adam \u9996\u8f6e\u5bf9\u7167\uff1b\u5982\u679c\u53ef\u884c\uff0c\u4e0b\u4e00\u8f6e\u5e94\u53ea\u8c03 adam \u7684 LR\u3002",
-    "r8 topk param_only k128 -> discard fvu=0.7337483763694763"
+    "r8 topk param_only k128 -> discard fvu=0.7337483763694763",
+    "NOTE: Round 8's `adam@1.6e-3` collapse should be treated first as an Adam LR mismatch, not as a definitive optimizer verdict.",
+    "NOTE: This round performs the required one-step Adam LR callback while holding `topk/K128/EF12` constant for clean attribution.",
+    "NOTE: Judge the run by full training-curve shape as well as terminal FVU: recovery from early instability or smoother late descent would keep Adam viable even if it does not immediately beat signum.",
+    "r9 topk param_only k? -> policy_reject (param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 optimizer, lr)",
+    "NOTE: Round 9 did not execute a training run, so the Adam branch is still unresolved and should not be judged from round 8 alone.",
+    "NOTE: This round isolates Adam LR retuning by holding `topk/K128/EF12` fixed and only reducing the step size.",
+    "NOTE: Evaluate this run primarily by full training-curve shape: early stability, mid-training descent, and whether late-stage FVU keeps improving, not only the final scalar.",
+    "r10 topk param_only k? -> policy_reject (param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 optimizer, lr)",
+    "NOTE: The policy validator for `param_only` currently accepts only one changed core axis relative to the family reference, so optimizer+LR callbacks must be deferred unless the reference optimizer changes.",
+    "NOTE: Round 11 refines the active signum lane locally instead of reopening the rejected Adam callback path.",
+    "NOTE: Judge this run by full curve shape around the late phase: if `1.7e-3` keeps descending smoothly it suggests `1.6e-3` was slightly conservative; if oscillation grows or late FVU degrades, the practical peak is at or below `1.6e-3`.",
+    "r11 topk param_only k128 -> archive fvu=0.15220221877098083"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [],
   "next_hypotheses": [
-    "\u5982\u679c adam@1.6e-3 \u6bd4 signum@1.6e-3 \u66f4\u7a33\u4e14\u66f4\u4f18\uff0c\u4e0b\u4e00\u8f6e\u7ee7\u7eed\u7559\u5728 topk family\uff0c\u53ea\u8c03 adam \u7684 LR\u3002",
-    "\u5982\u679c adam@1.6e-3 \u53ef\u8fd0\u884c\u4f46\u504f\u4e0d\u7a33\u6216\u504f\u5f31\uff0c\u4e0b\u4e00\u8f6e\u4ecd\u53ea\u8c03 LR\uff0c\u7ed9 adam \u4e00\u8f6e\u5b66\u4e60\u7387\u56de\u8c03\u3002",
-    "\u5982\u679c adam \u660e\u663e\u4e0d\u5982 signum \u4e14\u6ca1\u6709\u66f2\u7ebf\u4f18\u52bf\uff0c\u53ef\u7ed3\u675f\u8be5\u4f18\u5316\u5668\u5206\u652f\u5e76\u56de\u5230 signum \u4e3b\u7ebf\u3002"
+    "If `signum@1.7e-3` is better and still smooth, one final narrow LR check around `1.75e-3` may be justified before moving on.",
+    "If `signum@1.7e-3` is similar but less stable than `1.6e-3`, keep `1.6e-3` as the mainline anchor and stop LR refinement.",
+    "If `signum@1.7e-3` is clearly worse, treat `1.6e-3` as the stable optimum and only then reconsider how to legally explore optimizer changes under the validator."
   ]
 }
