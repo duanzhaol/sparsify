@@ -1,0 +1,581 @@
+{"command":"run","hypothesis":"在当前 frontier 为空且主线 family 仍是 topk 的情况下，先跑一轮显式锁定的 clean baseline，能先验证训练链路稳定、拿到可解释的曲线形状与基准 FVU，再决定后续优先做 lr 微调还是优化器切换。","summary":"执行主线 topk 参考配方的 clean baseline，不开新 family，不改代码，不先动 K。用完整 env_overrides 显式锁定 ARCHITECTURE=topk、K=128、EXPANSION_FACTOR=12、OPTIMIZER=signum、LR=8e-4 及其余关键运行参数，优先消除变量隔离失效风险，并建立 round 1 的可比较基线。","change_type":"param_only","experiment_tier":"proxy","expected_win":"explore_unknown","family_name":"topk","family_stage":"mainline","self_review":"这轮不是为了直接拿更低 FVU，而是为了建立干净基线。风险是收益偏信息获取而非性能提升，但这符合当前“frontier 为空先补 clean baseline”的主线策略，也避免在没有曲线参考时过早调 lr 或换优化器。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"topk"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"8e-4"},{"key":"BATCH_SIZE","value":"1"},{"key":"GRAD_ACC_STEPS","value":"8"},{"key":"MICRO_ACC_STEPS","value":"1"},{"key":"AUXK_ALPHA","value":"0.03125"},{"key":"DEAD_FEATURE_THRESHOLD","value":"10000000"},{"key":"USE_HADAMARD","value":"0"},{"key":"COMPILE_MODEL","value":"1"}],"touched_files":[],"notes_to_memory":["Round 1 先建立 topk clean baseline，避免 frontier 为空时直接做 lr/optimizer 归因不清。","本轮显式锁定 EF=12 与主线参考 recipe，重点观察整段训练曲线形状而不只看最终 FVU。","当前仓库无已记录 frontier，且执行层默认值与主线参考配方一致，适合先做一次变量完全隔离的基线运行。"],"next_hypotheses":["如果 baseline 曲线平稳但后段仍明显下降未收敛，下一轮优先围绕 topk 只调 LR。","如果 baseline 曲线早早平台化或震荡明显，可尝试只改 LR 做更稳的学习率回调。","只有在 baseline 与一轮 LR 调整后，才考虑切换 optimizer 做同 family 主线比较。"],"primary_variable":"other_param"}
+
+--- STDERR ---
+Reading prompt from stdin...
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d29d3-876d-7ef1-972a-7b8c629a4868
+--------
+user
+你是本仓库中的 LUTurbo 自动研究 Agent。
+
+系统使命：
+- 为 LUTurbo 搜索可部署的基向量分解模块
+- 真正目标是降低 LUTurbo 在 CPU 上的总在线成本与时延，而不只是把 sparsify-ascend 内部的 SAE 指标做高
+- 优先考虑那些有希望同时降低“选择 + 系数计算 + 查表 + 在线补偿”总成本的方案
+
+模块契约：
+- 学到的表示必须能导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”推理流水线
+- 最终重构必须能表示成一个或多个静态向量库上的有限加权和
+- SAE 只是当前基线实现，不是必须坚持的唯一架构形式
+
+训练侧代理目标：
+- 维护并改善 FVU 与 K 的 Pareto frontier
+- 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
+- 更小的 K 只有在兼容性和潜在补偿行为仍然可接受时才真正有价值
+
+执行层是固定的：
+- 训练：scripts/autoresearch_test.sh
+- 结果：research/controller.py
+- 记忆：research/history/
+- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
+
+规则：
+- 只能编辑 sparsify/ 下的文件
+- 纯参数实验必须使用 env_overrides
+- 每一轮只允许一个主假设
+- 必须设置 primary_variable，明确本轮主变化维度
+- 不要返回 command="stop"
+- 最终必须返回一个符合 action schema 的 JSON 对象
+
+K 约束：K 只能取 {4, 8, 16, 24, 32, 64, 96, 128} 中的值，禁止使用其他 K。
+
+EF 约束：所有实验的 EXPANSION_FACTOR 固定为 12。每次 env_overrides 都必须显式设置 EXPANSION_FACTOR=12。
+
+单变量原则：每一轮只改变一个主维度。
+
+策略引导：
+Round 1 策略模式：主线推进
+原因：当前没有连续 crash，主线仍应继续推进。
+当前主线 family：topk
+当前主线参考配方：ARCHITECTURE=topk K=128 EXPANSION_FACTOR=12 OPTIMIZER=signum LR=8e-4
+本轮要求：
+1. 默认继续围绕同一个 family 推进，不要新开 family。
+2. 推荐顺序：先补 clean baseline，再调学习率，再换优化器，再给新优化器一轮学习率回调，再看 loss/preprocess，最后才动 K。
+3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+4. 每轮只回答一个问题。
+
+Agent 状态：round=0, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=0
+
+训练代理 frontier（EF=12，当前主 regime）：
+  （暂无条目）
+
+架构家族（frontier 持有者 + 最近测试）：
+
+Operator guide 关键优先级：
+## Runtime Priorities
+
+在参考下面的 idea bank 之前，先遵守这些当前阶段的运行时优先级。
+
+1. 第一优先级不是扩展搜索空间，而是消除当前反复出现的 blocker：
+   - `sanity_failed`
+   - `first_step_timeout`
+   - 变量隔离失效导致的混杂实验
+
+2. 如果一轮失败在 `sanity`，优先修复对应架构本身的前向/反向兼容性问题。
+   - 不要先改共享 trainer / runtime 路径，除非失败证据明确指向 trainer。
+   - 如果 sanity 根本没过，不要把问题归因为训练阶段的 first-step bottleneck。
+
+3. 一轮只允许一个主变量。
+   - 不要同时修改 `architecture + lr`
+   - 不要同时修改 `code + architecture + lr`
+   - 只有在运行时明确允许的例外情况下，才允许耦合修改
+
+4. 在系统稳定前，优先顺序应为：
+   - 先拿到能稳定运行并能产生有效信号的实验
+   - 再做架构比较
+   - 最后才扩大到更复杂的训练目标或部署对齐目标
+
+5. 当前不要轻易改动固定执行层的语义。
+   - 不要改变 evaluation semantics
+   - 不要改变 launcher 行为
+   - 不要引入会让历史结果不可比的大改动
+
+6. 如果最近的失败模式表明问题出在系统观测或运行时策略，不要把它误判成架构质量结论。
+
+7. 下面的内容首先是 idea bank，不是强制 recipe。
+   - 在当前 blocker 未解决前，应优先选择最小、最可解释、最容易归因的动作。
+   - 只有当基础运行链路稳定后，才扩大到更发散的搜索。
+
+---
+
+
+历史研究关键结论：
+## 1. 本次 AutoResearch 搜索目标
+
+这次 AutoResearch 的目标，不是延续旧 frontier 做局部改进，而是**从头搜索满足新架构约束、能够替代 LUTurbo 现有SAE方案的架构**。
+
+要求如下：
+
+- 优先找结构上可落地、可导出、可替换的方案
+- 旧 frontier 只能作为参考，不是新的目标答案
+- 如果新搜索开始时没有 frontier，就从 `TopK` 开始，把它当作最简单 baseline
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把“在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+---
+
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+Plan update
+  → Inspect current experiment entrypoints, architecture/config options, and any existing topk defaults
+  • Choose one mainline topk hypothesis for round 1 with single-variable change
+  • Return action JSON with env overrides and rationale
+exec
+/bin/bash -lc 'rg -n "topk|EXPANSION_FACTOR|LR=|signum|ARCHITECTURE" sparsify scripts/autoresearch_test.sh research/controller.py research/history -S' in /root/sparsify-ascend succeeded in 0ms:
+scripts/autoresearch_test.sh:24:ARCHITECTURE="${ARCHITECTURE:-topk}"
+scripts/autoresearch_test.sh:25:EXPANSION_FACTOR="${EXPANSION_FACTOR:-12}"
+scripts/autoresearch_test.sh:28:OPTIMIZER="${OPTIMIZER:-signum}"
+scripts/autoresearch_test.sh:35:LR="${LR:-8e-4}"
+scripts/autoresearch_test.sh:71:  --architecture "${ARCHITECTURE}"
+scripts/autoresearch_test.sh:72:  --expansion_factor "${EXPANSION_FACTOR}"
+research/history/patches/round_0106.patch:26:         top_acts, top_indices = self._group_topk(acts)
+research/history/patches/round_0106.patch:42:+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+research/history/patches/round_0106.patch:100:+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+research/history/patches/round_0106.patch:120:+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+research/history/patches/round_0062.patch:10:             "whitened_topk",
+research/history/patches/round_0062.patch:90:+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+research/history/patches/round_0070.patch:10:             "whitened_topk",
+research/history/patches/round_0070.patch:123:+            aux1_acts, aux1_indices = aux_stage1.topk(aux1_k, sorted=False)
+research/history/patches/round_0070.patch:126:+            aux2_acts, aux2_indices = aux_stage2.topk(aux2_k, sorted=False)
+research/history/patches/round_0059.patch:4:             "codebook_topk",
+research/history/patches/round_0059.patch:20:     if architecture == "whitened_topk":
+research/history/patches/round_0059.patch:95:+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+research/history/patches/round_0001.patch:4:             "group_topk",
+research/history/patches/round_0001.patch:5:             "factorized_topk",
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascendexec
+/bin/bash -lc "rg --files sparsify | sed -n '1,200p'" in /root/sparsify-ascend succeeded in 0ms:
+?? research/history/frontier.json
+?? research/history/state.json
+?? research/history/timeline.jsonl
+ succeeded in 0ms:
+sparsify/__main__.py
+sparsify/fused_encoder.py
+sparsify/utils.py
+sparsify/fused_decoder.py
+sparsify/data.py
+sparsify/device.py
+sparsify/trainer.py
+sparsify/tiled_sparse_coder.py
+sparsify/hadamard.py
+sparsify/__init__.py
+sparsify/sign_sgd.py
+sparsify/config.py
+sparsify/eval/pca.py
+sparsify/eval/__init__.py
+sparsify/eval/two_stage.py
+sparsify/eval/encoders.py
+sparsify/checkpoint.py
+sparsify/sparse_coder.py
+sparsify/xformers.py
+sparsify/sparsify/sparse_coder.py
+exec
+/bin/bash -lc "sed -n '1,240p' sparsify/config.py" in /root/sparsify-ascend succeeded in 0ms:
+from dataclasses import dataclass
+from pathlib import Path
+
+from simple_parsing import Serializable, list_field
+
+
+@dataclass
+class SparseCoderConfig(Serializable):
+    """Configuration for a sparse coder (SAE) architecture."""
+
+    expansion_factor: int = 32
+    """Multiple of the input dimension to use as the sparse coder dimension."""
+
+    normalize_decoder: bool = True
+    """Normalize the decoder weights to have unit norm."""
+
+    num_latents: int = 0
+    """Number of latents to use. If 0, use `expansion_factor`."""
+
+    k: int = 32
+exec
+/bin/bash -lc "sed -n '1,280p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+import json
+import math
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import NamedTuple
+
+import einops
+import torch
+import torch.nn.functional as F
+from huggingface_hub import snapshot_download
+from natsort import natsorted
+from safetensors import safe_open
+from safetensors.torch import load_model, save_model
+from torch import Tensor, nn
+
+from .config import SparseCoderConfig
+from .device import device_autocast
+from .fused_encoder import EncoderOutput, fused_encoder
+from .utils import decoder_impl
+
+exec
+/bin/bash -lc "sed -n '1,260p' sparsify/trainer.py" in /root/sparsify-ascend succeeded in 0ms:
+import logging
+import os
+import time
+from collections import defaultdict
+from contextlib import nullcontext
+from dataclasses import asdict
+from fnmatch import fnmatchcase
+from typing import Sized
+
+import torch
+import torch.distributed as dist
+from datasets import Dataset as HfDataset
+from natsort import natsorted
+from schedulefree import ScheduleFreeWrapperReference
+from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+from transformers import PreTrainedModel
+
+exec
+/bin/bash -lc "sed -n '1,220p' research/controller.py" in /root/sparsify-ascend succeeded in 0ms:
+"""
+Minimal experiment controller for SAE autoresearch.
+
+This controller does not decide experiments or run training. It provides:
+- state initialization
+- result parsing and keep/archive/promote decisions
+- synchronized history files for long-lived agent memory
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import re
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+exec
+/bin/bash -lc "sed -n '1,220p' scripts/autoresearch_test.sh" in /root/sparsify-ascend succeeded in 0ms:
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# 分布式启动参数。
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+MASTER_PORT="${MASTER_PORT:-29501}"
+
+# 输入输出路径配置。
+MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-0.6B}"
+DATASET_PATH="${DATASET_PATH:-$HOME/fineweb-edu/sample/10BT-tokenized-qwen3-2048}"
+ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_o.json}"
+WANDB_PROJECT="${WANDB_PROJECT:-qwen3-0.6B-auto-0323}"
+SAVE_DIR="${SAVE_DIR:-checkpoints/auto}"
+RUN_NAME="${RUN_NAME:-qwen3-0.6B}"
+
+# 数据集预处理与采样参数。
+MAX_EXAMPLES="${MAX_EXAMPLES:-1000000}"
+SHUFFLE_SEED="${SHUFFLE_SEED:-1127}"
+INIT_SEED="${INIT_SEED:-1127}"
+exec
+/bin/bash -lc "sed -n '260,520p' sparsify/trainer.py" in /root/sparsify-ascend succeeded in 0ms:
+                "residual_from": self.cfg.residual_from,
+            }
+            metrics_logger = MetricsLogger(
+                log_dir, asdict(self.cfg), run_meta
+            )
+
+        num_sae_params = sum(
+            p.numel() for s in self.saes.values() for p in s.parameters()
+        )
+        num_model_params = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"Number of SAE parameters: {num_sae_params:_}")
+        logger.info(f"Number of model parameters: {num_model_params:_}")
+
+        num_batches = len(self.dataset) // self.cfg.batch_size
+        if self.global_step > 0:
+            assert hasattr(self.dataset, "select"), "Dataset must implement `select`"
+            n = self.global_step * self.cfg.batch_size
+            ds = self.dataset.select(range(n, len(self.dataset)))  # type: ignore
+        else:
+            ds = self.dataset
+exec
+/bin/bash -lc "ls -R research/history | sed -n '1,200p'" in /root/sparsify-ascend succeeded in 0ms:
+research/history:
+current_status.json
+frontier.json
+logs
+memory.json.bak_corrupt_round141
+patches
+round_summaries
+state.json
+timeline.jsonl
+timeline.jsonl.bak_round141_rollback
+
+research/history/logs:
+
+research/history/patches:
+round_0001.patch
+round_0019.patch
+round_0050.patch
+round_0058.patch
+round_0059.patch
+round_0060.patch
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/state.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "agent": {
+    "round_index": 0,
+    "consecutive_crashes": 0,
+    "consecutive_no_improve": 0,
+    "rounds_since_new_family": 0,
+    "last_action_file": null,
+    "last_patch_file": null,
+    "active_session_id": null,
+    "active_session_started_at": null,
+    "active_session_rounds": 0,
+    "active_session_status": "closed",
+    "last_resume_ok_at": null,
+    "crash_resets": 0,
+    "last_meta_round": 0
+  },
+  "frontier": {}
+}
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/current_status.json" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '1,220p' research/history/frontier.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "timestamp": 1774523221,
+  "stage": "round_started",
+  "round": 1
+}
+ succeeded in 0ms:
+{}
+exec
+/bin/bash -lc 'tail -n 50 research/history/timeline.jsonl' in /root/sparsify-ascend succeeded in 0ms:
+{"event_id": "evt_1774523221638926968", "ts": 1774523221, "event": "loop_started", "rounds": 500, "budget_hours": 24.0}
+{"event_id": "evt_1774523221639059907", "ts": 1774523221, "event": "round_started", "round": 1, "session_id": null, "family_name": null, "family_stage": null, "status": null, "decision": null, "payload": {}}
+exec
+/bin/bash -lc "rg -n '\"command\"|primary_variable|family_name|env_overrides|change_type' -S research sparsify .agents | sed -n '1,200p'" in /root/sparsify-ascend succeeded in 0ms:
+.agents/skills/torch_npu/mcp.json:4:      "command": "node",
+research/AutoResearch/LESSONS.md:79:- Repair action 锁定 `family_name`, `env_overrides`, `experiment_tier`
+research/AutoResearch/LESSONS.md:81:- `primary_variable` 强制为 `"code_fix"`
+research/AutoResearch/override_registry.py:101:def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+research/AutoResearch/override_registry.py:143:def determine_parameter_behavior(change_type: str, changed_keys: set[str]) -> str:
+research/AutoResearch/override_registry.py:144:    if change_type == "edit_perf_code":
+research/AutoResearch/types.py:114:    change_type: str  # param_only | edit_sae_code | edit_perf_code | no_change
+research/AutoResearch/types.py:116:    family_name: str
+research/AutoResearch/types.py:120:    env_overrides: list[dict[str, str]]
+research/AutoResearch/types.py:124:    primary_variable: str  # architecture | optimizer | lr | k | ... | code_fix
+research/AutoResearch/types.py:136:        # Normalize env_overrides: accept both list-of-dicts and dict formats
+research/AutoResearch/types.py:137:        raw_overrides = d.get("env_overrides", [])
+research/AutoResearch/types.py:142:            command=d.get("command", "run"),
+research/AutoResearch/types.py:145:            change_type=d.get("change_type", "param_only"),
+research/AutoResearch/types.py:147:            family_name=d.get("family_name", BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+research/AutoResearch/types.py:151:            env_overrides=raw_overrides,
+research/AutoResearch/types.py:155:            primary_variable=d.get("primary_variable", "other_param"),
+research/AutoResearch/types.py:160:            "command": self.command,
+research/AutoResearch/types.py:163:            "change_type": self.change_type,
+research/AutoResearch/types.py:165:            "family_name": self.family_name,
+exec
+/bin/bash -lc "sed -n '300,360p' research/AutoResearch/policy.py" in /root/sparsify-ascendexec
+/bin/bash -lc "sed -n '197,360p' research/policy.py" in /root/sparsify-ascend succeeded in 0ms:
+# ---------------------------------------------------------------------------
+
+
+def _check_param_only_single_variable(
+    action: Action,
+    state: Any,  # StateManager
+) -> tuple[bool, str]:
+    """只对 param_only 做轻量单变量校验。"""
+    if action.change_type != "param_only":
+        return True, ""
+
+    candidate = _candidate_config(action)
+    reference = _resolve_reference_config(action, state)
+
+    changed_axes = [
+        axis
+        for axis, env_key in _CORE_AXES.items()
+        if str(candidate.get(env_key)) != str(reference.get(env_key))
+    ]
+
+ succeeded in 0ms:
+def classify_changes(env_overrides: list | dict, base_defaults: dict[str, str]) -> dict[str, Any]:
+    """Classify which dimensions env_overrides change relative to base defaults.
+
+    Returns {"architecture": bool, "optimizer": bool, "lr": bool, "k": bool,
+             "ef": bool, "other": list[str]}
+    """
+    changed: dict[str, str] = {}
+    if isinstance(env_overrides, dict):
+        for key, value in env_overrides.items():
+            if str(value) != str(base_defaults.get(key, "")):
+                changed[key] = str(value)
+    else:
+        for item in env_overrides:
+            key = item.get("key", "")
+            value = str(item.get("value", ""))
+            if value != str(base_defaults.get(key, "")):
+                changed[key] = value
+
+    return {
+        "architecture": "ARCHITECTURE" in changed,
+exec
+/bin/bash -lc "sed -n '1,220p' research/agent_action.schema.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command",
+    "hypothesis",
+    "summary",
+    "change_type",
+    "experiment_tier",
+    "expected_win",
+    "family_name",
+    "family_stage",
+    "self_review",
+    "needs_sanity",
+    "env_overrides",
+    "touched_files",
+    "notes_to_memory",
+    "next_hypotheses",
+    "primary_variable"
+  ],
+exec
+/bin/bash -lc "sed -n '360,460p' research/AutoResearch/policy.py" in /root/sparsify-ascend succeeded in 0ms:
+    action: Action,
+    state: Any,  # StateManager
+) -> dict[str, str]:
+    """给单变量校验选择一个清晰的参考配方。"""
+    family_name = (action.family_name or "").lower()
+
+    family_best = _best_frontier_entry(state.frontier, family_name=family_name)
+    if family_best is not None:
+        return _frontier_entry_to_env_config(family_best)
+
+    mainline = _resolve_mainline_snapshot(state)
+    return dict(mainline["config"])
+
+
+def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
+    """找到当前最像“主线”的 family 与配方。"""
+    best_entry = _best_frontier_entry(state.frontier)
+    if best_entry is not None:
+        config = _frontier_entry_to_env_config(best_entry)
+        family_name = str(
+exec
+/bin/bash -lc 'rg -n "BASE_ENV_DEFAULTS" research/AutoResearch/policy.py research/AutoResearch/types.py research/override_registry.py research/training.py -S' in /root/sparsify-ascend succeeded in 0ms:
+research/training.py:20:    BASE_ENV_DEFAULTS,
+research/training.py:146:        fallback_architecture=str(action.get("family_name") or BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+research/training.py:459:    config = dict(BASE_ENV_DEFAULTS)
+research/override_registry.py:7:from research.state_io import BASE_ENV_DEFAULTS
+research/override_registry.py:10:COMMON_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
+research/override_registry.py:112:    config = dict(base_config or BASE_ENV_DEFAULTS)
+research/override_registry.py:119:    config = dict(BASE_ENV_DEFAULTS)
+research/override_registry.py:142:    architecture = str(action.get("family_name") or requested.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"])).lower()
+research/override_registry.py:143:    requested_k = str(requested.get("K", BASE_ENV_DEFAULTS["K"]))
+research/override_registry.py:176:    return dict(BASE_ENV_DEFAULTS)
+research/AutoResearch/policy.py:23:from .types import Action, BASE_ENV_DEFAULTS
+research/AutoResearch/policy.py:391:    config = dict(BASE_ENV_DEFAULTS)
+research/AutoResearch/policy.py:444:    config = dict(BASE_ENV_DEFAULTS)
+research/AutoResearch/types.py:38:BASE_ENV_DEFAULTS: dict[str, str] = {
+research/AutoResearch/types.py:147:            family_name=d.get("family_name", BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+research/AutoResearch/types.py:185:        """Return BASE_ENV_DEFAULTS merged with env_overrides."""
+research/AutoResearch/types.py:186:        cfg = dict(BASE_ENV_DEFAULTS)
+exec
+/bin/bash -lc "sed -n '1,120p' research/AutoResearch/types.py" in /root/sparsify-ascend succeeded in 0ms:
+"""Data types, constants, and configuration for the autoresearch framework."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Path constants
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RESEARCH_DIR = REPO_ROOT / "research"
+HISTORY_DIR = RESEARCH_DIR / "history"
+LOG_DIR = HISTORY_DIR / "logs"
+ROUND_SUMMARIES_DIR = HISTORY_DIR / "round_summaries"
+SAVE_ROOT = REPO_ROOT / "checkpoints" / "research_agent"
+exec
+/bin/bash -lc 'rg -n "no_change" research -S' in /root/sparsify-ascend succeeded in 0ms:
+research/agent_action.schema.json:34:      "enum": ["param_only", "edit_sae_code", "edit_perf_code", "no_change"]
+research/AutoResearch/types.py:114:    change_type: str  # param_only | edit_sae_code | edit_perf_code | no_change
+research/AutoResearch/policy.py:57:    if action.change_type == "no_change":
+research/AutoResearch/policy.py:58:        return action, "不允许 no_change；每一轮都必须提出可执行的实验或修复"
+research/agent_loop.py:863:            "change_type": "no_change",
+research/agent_loop.py:1222:        is_code_edit = action.get("change_type") not in ("param_only", "no_change")
+research/agent_loop.py:1245:            is_code_edit = action.get("change_type") not in ("param_only", "no_change")
+research/compress_history.py:348:        if change_type not in ("param_only", "no_change") or touched or summary.get("patch_path"):
+research/compress_history.py:454:        if change_type in {"param_only", "no_change"} and not summary.get("touched_files"):
+research/agent_loop_state_machine.md:199:- `no_change`
+Plan update
+  ✓ Inspect current experiment entrypoints, architecture/config options, and any existing topk defaults
+  ✓ Choose one mainline topk hypothesis for round 1 with single-variable change
+  → Return action JSON with env overrides and rationale
+codex
+{"command":"run","hypothesis":"在当前 frontier 为空且主线 family 仍是 topk 的情况下，先跑一轮显式锁定的 clean baseline，能先验证训练链路稳定、拿到可解释的曲线形状与基准 FVU，再决定后续优先做 lr 微调还是优化器切换。","summary":"执行主线 topk 参考配方的 clean baseline，不开新 family，不改代码，不先动 K。用完整 env_overrides 显式锁定 ARCHITECTURE=topk、K=128、EXPANSION_FACTOR=12、OPTIMIZER=signum、LR=8e-4 及其余关键运行参数，优先消除变量隔离失效风险，并建立 round 1 的可比较基线。","change_type":"param_only","experiment_tier":"proxy","expected_win":"explore_unknown","family_name":"topk","family_stage":"mainline","self_review":"这轮不是为了直接拿更低 FVU，而是为了建立干净基线。风险是收益偏信息获取而非性能提升，但这符合当前“frontier 为空先补 clean baseline”的主线策略，也避免在没有曲线参考时过早调 lr 或换优化器。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"topk"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"8e-4"},{"key":"BATCH_SIZE","value":"1"},{"key":"GRAD_ACC_STEPS","value":"8"},{"key":"MICRO_ACC_STEPS","value":"1"},{"key":"AUXK_ALPHA","value":"0.03125"},{"key":"DEAD_FEATURE_THRESHOLD","value":"10000000"},{"key":"USE_HADAMARD","value":"0"},{"key":"COMPILE_MODEL","value":"1"}],"touched_files":[],"notes_to_memory":["Round 1 先建立 topk clean baseline，避免 frontier 为空时直接做 lr/optimizer 归因不清。","本轮显式锁定 EF=12 与主线参考 recipe，重点观察整段训练曲线形状而不只看最终 FVU。","当前仓库无已记录 frontier，且执行层默认值与主线参考配方一致，适合先做一次变量完全隔离的基线运行。"],"next_hypotheses":["如果 baseline 曲线平稳但后段仍明显下降未收敛，下一轮优先围绕 topk 只调 LR。","如果 baseline 曲线早早平台化或震荡明显，可尝试只改 LR 做更稳的学习率回调。","只有在 baseline 与一轮 LR 调整后，才考虑切换 optimizer 做同 family 主线比较。"],"primary_variable":"other_param"}
+tokens used
+38,923
