@@ -736,9 +736,18 @@ def _should_continue_training(
 
     end_record = step_records[-1]
     end_total_tokens = int(end_record.get("total_tokens", 0) or 0)
+    prev_total_tokens = (
+        int(step_records[-2].get("total_tokens", 0) or 0)
+        if len(step_records) >= 2
+        else 0
+    )
+    # Training stops between logged steps, so the last logged token count can fall
+    # slightly short of the nominal target. Treat "within one logged step" as having
+    # reached the checkpoint, otherwise 50M/100M style targets get spuriously blocked.
+    target_tolerance = max(end_total_tokens - prev_total_tokens, 0)
     if end_total_tokens >= config.continuation_max_tokens:
         return False, "max_tokens_reached"
-    if end_total_tokens < current_target_tokens:
+    if end_total_tokens + target_tolerance < current_target_tokens:
         return False, "target_not_reached"
     if end_total_tokens < config.continuation_step_tokens:
         return False, "insufficient_window"
