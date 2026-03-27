@@ -1,8 +1,9 @@
 {
-  "current_focus": "兼容 frontier 已重建；当前主线优先关注 lowrank_two_stage_soft_codebook_residual。",
+  "current_focus": "\u517c\u5bb9 frontier \u5df2\u91cd\u5efa\uff1b\u5f53\u524d\u4e3b\u7ebf\u4f18\u5148\u5173\u6ce8 lowrank_two_stage_soft_codebook_residual\u3002",
   "architecture_findings": [
-    "r30 gated no_change k? -> policy_reject (不允许 no_change；每一轮都必须提出可执行的实验或修复)",
-    "r111 lowrank_asymmetric_two_stage_soft_codebook_residual architecture k128 -> discard fvu=0.051018886268138885"
+    "r30 gated no_change k? -> policy_reject (\u4e0d\u5141\u8bb8 no_change\uff1b\u6bcf\u4e00\u8f6e\u90fd\u5fc5\u987b\u63d0\u51fa\u53ef\u6267\u884c\u7684\u5b9e\u9a8c\u6216\u4fee\u590d)",
+    "r111 lowrank_asymmetric_two_stage_soft_codebook_residual architecture k128 -> discard fvu=0.051018886268138885",
+    "r113 factorized_topk architecture k128 -> keep fvu=0.22283552587032318"
   ],
   "performance_findings": [],
   "failure_patterns": [
@@ -37,11 +38,11 @@
       "updated_at": 1774546861
     },
     "standard|factorized_topk|layers.[3].self_attn.o_proj": {
-      "tokens_per_sec": 111022.69852065724,
-      "round": 59,
+      "tokens_per_sec": 111040.04483893048,
+      "round": 113,
       "architecture": "factorized_topk",
       "k": 128,
-      "updated_at": 1774550729
+      "updated_at": 1774634288
     },
     "standard|jumprelu|layers.[3].self_attn.o_proj": {
       "tokens_per_sec": 111040.33003561647,
@@ -558,8 +559,8 @@
       "compatibility": "direct_compatible"
     },
     "factorized_topk": {
-      "status": "archived",
-      "design_hypothesis": "After the matched `topk` probe came back only slightly worse than the strengthened `gated` anchor, the next highest-value single architecture question is whether a simpler export-compatible scoring path can retain most of the quality while offering a cheaper route for online selection and coefficient computation. `factorized_topk` keeps the same static-dictionary finite weighted-sum reconstruction form as `topk/gated`, but replaces direct latent scoring with a low-rank mixing stage before top-k selection, so this round asks one clean yes/no question: under the exact current mainline recipe (`K=128`, `EF=12`, `signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`), is `factorized_topk` competitive enough in full-curve behavior to justify any later follow-up as a LUTurbo-oriented family?",
+      "status": "active",
+      "design_hypothesis": "`factorized_topk` with `EF=8` is a stronger cost-feasible probe than the rejected soft-codebook attempt because it is directly LUTurbo-compatible, keeps large `K=128`, and has substantial encoder-cost headroom (`~1.12x h*n`, well below the `1.5x` cap). In the new low-EF cost-constrained regime, its cheaper selector may deliver a better total cost/FVU tradeoff than more expressive but budget-riskier residual/codebook families.",
       "tested_configs": [
         {
           "round": 59,
@@ -568,16 +569,24 @@
           "decision": "discard",
           "val_fvu": "0.22918018698692322",
           "run_health": "normal"
+        },
+        {
+          "round": 113,
+          "stage": "prototype",
+          "k": "128",
+          "decision": "keep",
+          "val_fvu": "0.22283552587032318",
+          "run_health": "normal"
         }
       ],
       "known_issues": [],
       "next_steps": [
-        "If matched `factorized_topk` is clearly worse than the strengthened `gated` anchor, return to the `gated` mainline next round and close this probe.",
-        "If matched `factorized_topk` is roughly competitive with a healthy curve, still return to the `gated` mainline next round, but preserve one later revisit because its scoring path may align better with LUTurbo online-cost goals.",
-        "If matched `factorized_topk` unexpectedly beats the current `gated` anchor, return to the `gated` mainline next round per policy but schedule exactly one later follow-up for this family."
+        "If `factorized_topk EF=8` is feasible but too weak in FVU, probe `topk EF=6` as the simplest direct-compatible baseline at the exact budget edge.",
+        "If `factorized_topk EF=8` is competitive, test `factorized_topk EF=6` for a cheaper Pareto point.",
+        "If direct-compatible families are clearly too weak, return to `lowrank_residual EF=4` as the next extensible compatible family with comfortable cost headroom."
       ],
-      "best_fvu": 0.22918018698692322,
-      "last_round": 59,
+      "best_fvu": 0.22283552587032318,
+      "last_round": 113,
       "compatibility": "direct_compatible"
     },
     "jumprelu": {
@@ -1017,7 +1026,7 @@
     },
     "lowrank_soft_codebook_residual": {
       "status": "archived",
-      "design_hypothesis": "After the plain, gated, JumpReLU, grouped, whitened, and factorized single-stage low-rank residual families all failed to challenge the `lowrank_two_stage_residual` K128 anchor, the most informative remaining matched architecture probe is `lowrank_soft_codebook_residual`. It preserves LUTurbo-compatible static-library export, but tests a different decomposition hypothesis: a coarse static codebook projection followed by one sparse residual correction may recover some of the mainline's quality without requiring a full second sparse residual stage. If this codebook-assisted single-stage family is still clearly weaker under the exact matched `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, `EXPANSION_FACTOR=12` recipe, then the current evidence favors true two-stage residual allocation over coarse-codebook-plus-single-stage alternatives.",
+      "design_hypothesis": "`lowrank_soft_codebook_residual` at `EF=4` is the best single-step cost-feasible probe: it keeps the historically valuable `low-rank trunk + soft codebook + sparse residual` structure while bringing encoder selection cost down to about `1.16x h*n` (within the `<=1.5x` policy budget), and should beat simpler feasible baselines like `topk`/`gated` at similar or slightly lower cost.",
       "tested_configs": [
         {
           "round": 92,
@@ -1030,11 +1039,12 @@
       ],
       "known_issues": [],
       "next_steps": [
-        "If `lowrank_soft_codebook_residual` is clearly weaker than the matched `lowrank_two_stage_residual` anchor, discard it and keep future effort focused on the mainline rather than more single-stage alternatives.",
-        "If `lowrank_soft_codebook_residual` is unexpectedly competitive at matched K128, record it as a codebook-assisted comparison point but still return to the `lowrank_two_stage_residual` mainline next round per probe policy."
+        "If this is still too weak in FVU, probe `lowrank_residual` at `EF=4` to test whether the soft-codebook branch is still worth its added cost in the low-EF regime.",
+        "If this is competitive, retest the same family at `EF=3` for a cheaper point on the Pareto frontier.",
+        "If one-stage soft-codebook underperforms badly, fall back to a direct-compatible `topk` `EF=6` baseline to anchor the feasible frontier."
       ],
       "best_fvu": 0.05776164308190346,
-      "last_round": 92,
+      "last_round": 112,
       "compatibility": "extended_compatible"
     },
     "lowrank_grouped_soft_codebook_residual": {
@@ -1218,42 +1228,6 @@
   },
   "recent_rounds": [
     {
-      "round": 96,
-      "hypothesis": "`lowrank_asymmetric_two_stage_soft_codebook_residual` just established a new K128 frontier point at the matched `signum`/`LR=2.0e-3`/`EF=12` recipe, but after a fresh architecture win the first mainline question should be baseline stability rather than immediately opening the LR branch. Re-running the exact same recipe is the cleanest way to determine whether Round 95 was a robust trajectory worth tuning from or an optimistic one-off, and the decision should be based on the whole curve shape, not only the endpoint.",
-      "change_type": "param_only",
-      "expected_win": "confirm_baseline",
-      "family_name": "lowrank_asymmetric_two_stage_soft_codebook_residual",
-      "family_stage": "baseline",
-      "decision": "archive",
-      "val_fvu": "0.051018886268138885",
-      "observed_fvu": "0.051019",
-      "k": "128",
-      "architecture": "lowrank_asymmetric_two_stage_soft_codebook_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "66627.236730",
-      "baseline_ratio": "0.800009"
-    },
-    {
-      "round": 97,
-      "hypothesis": "Rounds 95 and 96 established a clean, repeatable `lowrank_asymmetric_two_stage_soft_codebook_residual` K128 baseline at `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, and `LR=2.0e-3`, so the next single mainline question is the first within-family learning-rate probe. Lowering `LR` to `1.6e-3` tests whether this asymmetric soft-codebook two-stage recipe is currently slightly underdamped and could trade a bit of early speed for better late-stage descent and a lower terminal FVU; the decision should come from the whole curve shape versus the archived baseline, not just the last point.",
-      "change_type": "param_only",
-      "expected_win": "lower_fvu",
-      "family_name": "lowrank_asymmetric_two_stage_soft_codebook_residual",
-      "family_stage": "mainline",
-      "decision": "archive",
-      "val_fvu": "0.05197510868310928",
-      "observed_fvu": "0.051975",
-      "k": "128",
-      "architecture": "lowrank_asymmetric_two_stage_soft_codebook_residual",
-      "touched_files": [],
-      "run_health": "normal",
-      "termination_reason": "completed",
-      "tokens_per_sec": "66626.792243",
-      "baseline_ratio": "0.800003"
-    },
-    {
       "round": 98,
       "hypothesis": "Round 97 showed that lowering `LR` to `1.6e-3` on the confirmed `lowrank_asymmetric_two_stage_soft_codebook_residual` K128 baseline was slightly worse, so the next single mainline question is the symmetric upward signum LR probe. Raising `LR` to `2.4e-3` tests whether this family benefits from a bit more step size for faster early and mid descent without destabilizing late training; the result should be judged from the whole curve against the archived `2.0e-3` and `1.6e-3` runs, not just the terminal FVU.",
       "change_type": "param_only",
@@ -1432,20 +1406,45 @@
       "termination_reason": "completed",
       "tokens_per_sec": "66624.680720",
       "baseline_ratio": "0.560076"
+    },
+    {
+      "round": 112,
+      "hypothesis": "`lowrank_soft_codebook_residual` at `EF=4` is the best single-step cost-feasible probe: it keeps the historically valuable `low-rank trunk + soft codebook + sparse residual` structure while bringing encoder selection cost down to about `1.16x h*n` (within the `<=1.5x` policy budget), and should beat simpler feasible baselines like `topk`/`gated` at similar or slightly lower cost.",
+      "change_type": "param_only",
+      "expected_win": "lower_cost",
+      "family_name": "lowrank_soft_codebook_residual",
+      "family_stage": "prototype",
+      "decision": "policy_reject",
+      "val_fvu": null,
+      "observed_fvu": null,
+      "k": null,
+      "architecture": "lowrank_soft_codebook_residual",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 architecture, expansion_factor",
+      "tokens_per_sec": null,
+      "baseline_ratio": null
+    },
+    {
+      "round": 113,
+      "hypothesis": "`factorized_topk` with `EF=8` is a stronger cost-feasible probe than the rejected soft-codebook attempt because it is directly LUTurbo-compatible, keeps large `K=128`, and has substantial encoder-cost headroom (`~1.12x h*n`, well below the `1.5x` cap). In the new low-EF cost-constrained regime, its cheaper selector may deliver a better total cost/FVU tradeoff than more expressive but budget-riskier residual/codebook families.",
+      "change_type": "architecture",
+      "expected_win": "lower_cost",
+      "family_name": "factorized_topk",
+      "family_stage": "prototype",
+      "decision": "keep",
+      "val_fvu": "0.22283552587032318",
+      "observed_fvu": "0.222836",
+      "k": "128",
+      "architecture": "factorized_topk",
+      "touched_files": [],
+      "run_health": "normal",
+      "termination_reason": "completed",
+      "tokens_per_sec": "111040.044839",
+      "baseline_ratio": "1.000156"
     }
   ],
   "recent_insights": [
-    "r64 codebook_topk param_only k128 -> discard fvu=0.14986932277679443",
-    "r65 two_stage_residual param_only k128 -> keep fvu=0.12784433364868164",
-    "r66 two_stage_residual param_only k128 -> archive fvu=0.12784433364868164",
-    "r70 two_stage_residual param_only k128 -> archive fvu=0.12883228063583374",
-    "r71 two_stage_residual param_only k128 -> archive fvu=0.12778159976005554",
-    "r73 two_stage_residual param_only k128 -> discard fvu=33.891746520996094",
-    "r74 two_stage_residual param_only k128 -> archive fvu=0.12798264622688293",
-    "r75 topk param_only k128 -> discard fvu=0.15162786841392517",
-    "r76 jumprelu param_only k128 -> discard fvu=0.15218761563301086",
-    "r77 codebook_topk param_only k128 -> discard fvu=0.14986932277679443",
-    "r78 lowrank_two_stage_residual param_only k128 -> keep fvu=0.05351066589355469",
     "r79 lowrank_two_stage_residual param_only k128 -> archive fvu=0.05351066589355469",
     "r80 lowrank_two_stage_residual param_only k128 -> archive fvu=0.054041787981987",
     "r81 lowrank_two_stage_residual param_only k128 -> archive fvu=0.05347852408885956",
@@ -1474,7 +1473,18 @@
     "r107 lowrank_two_stage_soft_codebook_residual param_only k128 -> archive fvu=0.04880391061306",
     "r108 lowrank_two_stage_soft_codebook_residual param_only k128 -> archive fvu=0.04880391061306",
     "r110 lowrank_two_stage_soft_codebook_residual param_only k128 -> discard fvu=3021105004544.0",
-    "r111 lowrank_asymmetric_two_stage_soft_codebook_residual architecture k128 -> discard fvu=0.051018886268138885"
+    "r111 lowrank_asymmetric_two_stage_soft_codebook_residual architecture k128 -> discard fvu=0.051018886268138885",
+    "NOTE: Compatibility: `\u6269\u5c55\u517c\u5bb9`. Reconstruction can be exported as `x_hat = sum_u beta_u u_u + sum_m pi_m c_m + sum_i alpha_i b_i`, where `u_u` are static trunk basis vectors (columns of `U`), `c_m` is a static codebook, and `b_i` is the static sparse dictionary.",
+    "NOTE: Export path to LUTurbo/Lottable: compute trunk coefficients `beta=Vx`, codebook weights `pi=softmax(router(residual))`, sparse coefficients `alpha` from top-k residual selection; final decode is a finite weighted sum over three static vector libraries.",
+    "NOTE: Cost rationale: quick table marks `lowrank_soft_codebook_residual` feasible at `EF=4` (`~1.16x h*n`), giving more headroom than `topk EF=6`/`gated EF=3` while preserving the strongest historical inheritance line among feasible families.",
+    "NOTE: Single main hypothesis this round is architecture-regime shift: a simpler one-stage soft-codebook family may become the best LUTurbo-compatible tradeoff once forced into the low-EF cost-feasible regime.",
+    "r112 lowrank_soft_codebook_residual param_only k? -> policy_reject (param_only \u4e00\u6b21\u53ea\u80fd\u6539\u4e00\u4e2a\u4e3b\u8f74\uff1b\u5f53\u524d\u540c\u65f6\u6539\u4e86 architecture, expansion_factor)",
+    "NOTE: Reconstruction formula: `x_hat = sum_i alpha_i b_i`. The factorized hidden layer only changes online scoring; the decoder remains a single static dictionary `B={b_i}`.",
+    "NOTE: LUTurbo/Lottable export path: export the static dictionary vectors `b_i`; online inference computes coefficients/support, then runs standard lookup plus weighted sum. No dynamic vector generation is introduced.",
+    "NOTE: Compatibility judgment: `\u76f4\u63a5\u517c\u5bb9`. Final reconstruction is a finite weighted sum over one static vector library.",
+    "NOTE: Selection-cost rationale: quick table marks `factorized_topk` feasible through `EF=8`, with `EF=8` estimated around `1.12x h*n`, giving safer policy margin than budget-edge alternatives.",
+    "NOTE: Round 112 policy rejection on `lowrank_soft_codebook_residual EF=4` is a negative signal for using another near-threshold extended-compatible family immediately; this round shifts only the main architecture family to a more conservative cost-feasible candidate.",
+    "r113 factorized_topk architecture k128 -> keep fvu=0.22283552587032318"
   ],
   "recent_sanity_failures": [],
   "recent_training_failures": [
@@ -1493,8 +1503,8 @@
     }
   ],
   "next_hypotheses": [
-    "If `adam` is competitive with or better than matched `signum` at `LR=2.0e-3`, give `adam` exactly one LR callback next within `lowrank_two_stage_soft_codebook_residual`.",
-    "If `adam` is clearly worse or unstable on the matched reference recipe, keep `signum` as the optimizer and move to the next single-axis mainline recipe question before touching `K`.",
-    "Do not change loss, preprocess, or `K` until the optimizer branch is resolved cleanly on an accepted baseline."
+    "If `factorized_topk EF=8` is feasible but too weak in FVU, probe `topk EF=6` as the simplest direct-compatible baseline at the exact budget edge.",
+    "If `factorized_topk EF=8` is competitive, test `factorized_topk EF=6` for a cheaper Pareto point.",
+    "If direct-compatible families are clearly too weak, return to `lowrank_residual EF=4` as the next extensible compatible family with comfortable cost headroom."
   ]
 }
