@@ -197,6 +197,62 @@ class SparseCoder(nn.Module):
         """Return optimizer parameter groups. Subclasses can override for per-component LR."""
         return [{"params": self.parameters(), "lr": base_lr}]
 
+    # ------------------------------------------------------------------
+    # Selection cost estimation (for LUTurbo deployment feasibility)
+    # ------------------------------------------------------------------
+
+    def _encoder_linear_layers(self) -> list[tuple[str, "nn.Linear"]]:
+        """Return all nn.Linear layers on the encode path. Override in subclasses."""
+        return [("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        """Return extra encode-path accesses not captured by linear layers.
+
+        Each entry: (name, num_accesses, shape_description).
+        Override in subclasses with codebook matmuls, etc.
+        """
+        return []
+
+    def selection_cost_estimate(self, n_output: int | None = None) -> dict:
+        """Estimate encoder-side memory accesses for LUTurbo deployment.
+
+        Args:
+            n_output: output dim of original weight matrix. Default 4*d_in.
+
+        Returns:
+            dict with total_accesses, original_matmul_accesses, ratio,
+            budget_ratio, feasible, breakdown.
+        """
+        if n_output is None:
+            n_output = 4 * self.d_in
+        original = self.d_in * n_output
+        budget = 1.5 * original
+
+        breakdown = []
+        total = 0
+        for name, layer in self._encoder_linear_layers():
+            acc = layer.in_features * layer.out_features
+            breakdown.append({
+                "name": name,
+                "accesses": acc,
+                "shape": f"{layer.in_features}x{layer.out_features}",
+            })
+            total += acc
+        for name, acc, shape in self._extra_encode_accesses():
+            breakdown.append({"name": name, "accesses": acc, "shape": shape})
+            total += acc
+
+        ratio = total / original if original > 0 else float("inf")
+        budget_ratio = total / budget if budget > 0 else float("inf")
+        return {
+            "total_accesses": total,
+            "original_matmul_accesses": original,
+            "ratio": round(ratio, 2),
+            "budget_ratio": round(budget_ratio, 2),
+            "feasible": budget_ratio <= 1.0,
+            "breakdown": breakdown,
+        }
+
     def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
         x = x - self.b_dec
@@ -404,6 +460,9 @@ class WhitenedTopKSparseCoder(SparseCoder):
             diagonal, device=device, dtype=dtype
         )
 
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("preconditioner_down", self.preconditioner_down), ("preconditioner_up", self.preconditioner_up)]
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         centered = x - x.mean(dim=-1, keepdim=True)
@@ -536,6 +595,9 @@ class BucketedTopKSparseCoder(SparseCoder):
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
+    def _encoder_linear_layers(self):
+        return [("low_encoder", self.low_encoder), ("high_encoder", self.high_encoder)]
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         low_acts = F.relu(F.linear(x, self.low_encoder.weight, self.low_encoder.bias))
@@ -587,6 +649,12 @@ class CodebookTopKSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("code_router", self.code_router), ("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
@@ -691,6 +759,12 @@ class ResidualVQSparseCoder(SparseCoder):
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
+    def _encoder_linear_layers(self):
+        return [("code_router", self.code_router), ("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
+
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
         code_indices = logits.argmax(dim=-1)
@@ -776,6 +850,15 @@ class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
             d_in, self.num_codes, device=device, dtype=dtype
         )
         self.second_code_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return [("code_router", self.code_router), ("second_code_router", self.second_code_router), ("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self):
+        return [
+            ("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}"),
+            ("second_codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}"),
+        ]
 
     def _select_code_from(
         self, x: Tensor, router: nn.Linear, codebook: Tensor
@@ -912,6 +995,9 @@ class GatedSparseCoder(SparseCoder):
         self.gate_encoder.weight.data.zero_()
         self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
 
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("gate_encoder", self.gate_encoder)]
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
@@ -944,6 +1030,9 @@ class RoutedSparseCoder(SparseCoder):
         # different from plain top-k at step 0.
         nn.init.kaiming_uniform_(self.gate_encoder.weight, a=5**0.5)
         self.gate_encoder.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("gate_encoder", self.gate_encoder)]
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -1012,7 +1101,7 @@ class FactorizedTopKSparseCoder(SparseCoder):
         self.d_in = d_in
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        hidden_dim = min(self.num_latents, max(d_in // 2, cfg.k * 4))
+        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
         self.factor_encoder = nn.Linear(
             d_in, hidden_dim, device=device, dtype=dtype
         )
@@ -1031,6 +1120,9 @@ class FactorizedTopKSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("encoder", self.encoder)]
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -1062,7 +1154,7 @@ class LowRankResidualSparseCoder(SparseCoder):
         # Keep a meaningfully expressive dense trunk before sparse residual
         # coding. Tying trunk rank too tightly to expansion factor made the
         # prototype collapse to a minimal rank under the strong EF=16 recipe.
-        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
+        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
         self.trunk_encoder = nn.Linear(
             d_in, trunk_rank, bias=False, device=device, dtype=dtype
         )
@@ -1080,6 +1172,9 @@ class LowRankResidualSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("encoder", self.encoder)]
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -1246,7 +1341,10 @@ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
         decoder: bool = True,
     ):
         super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=False)
-        self.stage1_k = max(1, cfg.k // 2)
+        if cfg.stage1_ratio is not None:
+            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+        else:
+            self.stage1_k = max(1, cfg.k // 2)
         self.stage2_k = max(1, cfg.k - self.stage1_k)
         self.residual_encoder = nn.Linear(
             d_in, self.num_latents, device=device, dtype=dtype
@@ -1262,6 +1360,9 @@ class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
                 self.set_decoder_norm_to_unit_norm()
         else:
             self.W_dec = None
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("encoder", self.encoder), ("residual_encoder", self.residual_encoder)]
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -1378,6 +1479,9 @@ class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCode
         nn.init.kaiming_uniform_(self.stage2_router.weight, a=5**0.5)
         self.stage1_router.bias.data.zero_()
         self.stage2_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("stage1_router", self.stage1_router), ("stage2_router", self.stage2_router)]
 
     def _route_stage(
         self,
@@ -1534,7 +1638,7 @@ class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
         self.d_in = d_in
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
+        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
         self.trunk_encoder = nn.Linear(
             d_in, trunk_rank, bias=False, device=device, dtype=dtype
         )
@@ -1569,6 +1673,9 @@ class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("low_encoder", self.low_encoder), ("high_encoder", self.high_encoder)]
 
     def _compute_bucketed_acts(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         low_acts = F.relu(
@@ -1653,6 +1760,12 @@ class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
         )
         self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
         self.code_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("code_router", self.code_router), ("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
     def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -1765,6 +1878,14 @@ class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
         else:
             self.W_dec = None
 
+    def _encoder_linear_layers(self):
+        layers = [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder)]
+        layers.append(("encoder", self.encoder))
+        for i, branch in enumerate(self.branch_encoders):
+            layers.append((f"branch_encoder_{i}", branch))
+        layers.append(("branch_mix_logits", self.branch_mix_logits))
+        return layers
+
     def _mixed_acts(self, residual: Tensor) -> Tensor:
         # Keep the inherited residual encoder on the reconstruction path so
         # DDP does not mark it unused while the routed branches specialize.
@@ -1847,7 +1968,7 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
         self.d_in = d_in
         self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        trunk_rank = min(d_in, max(cfg.k * 2, d_in // 4))
+        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
         self.trunk_encoder = nn.Linear(
             d_in, trunk_rank, bias=False, device=device, dtype=dtype
         )
@@ -1855,7 +1976,7 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
             trunk_rank, d_in, bias=False, device=device, dtype=dtype
         )
 
-        hidden_dim = min(self.num_latents, max(d_in // 2, cfg.k * 4))
+        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
         self.factor_encoder = nn.Linear(
             d_in, hidden_dim, device=device, dtype=dtype
         )
@@ -1874,6 +1995,9 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("factor_encoder", self.factor_encoder), ("encoder", self.encoder)]
 
     def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
@@ -1949,12 +2073,18 @@ class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
         decoder: bool = True,
     ):
         super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
-        self.num_codes = min(256, max(32, cfg.k * 2))
+        self.num_codes = cfg.num_codes if cfg.num_codes is not None else min(256, max(32, cfg.k * 2))
         self.codebook = nn.Parameter(
             torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
         )
         self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
         self.code_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("code_router", self.code_router), ("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -2134,6 +2264,9 @@ class LowRankGatedSoftCodebookResidualSparseCoder(
         self.gate_encoder.weight.data.zero_()
         self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
 
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("gate_encoder", self.gate_encoder)]
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         trunk = self.trunk_decoder(self.trunk_encoder(x))
@@ -2222,12 +2355,18 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
         decoder: bool = True,
     ):
         super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
-        self.num_codes = min(256, max(32, cfg.k * 2))
+        self.num_codes = cfg.num_codes if cfg.num_codes is not None else min(256, max(32, cfg.k * 2))
         self.codebook = nn.Parameter(
             torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
         )
         self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
         self.code_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("code_router", self.code_router)]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -2387,6 +2526,20 @@ class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
         self.stage2_bucket_bias = nn.Parameter(
             torch.tensor(0.0, device=device, dtype=dtype)
         )
+
+    def _encoder_linear_layers(self):
+        return [
+            ("trunk_encoder", self.trunk_encoder),
+            ("trunk_decoder", self.trunk_decoder),
+            ("code_router", self.code_router),
+            ("stage1_low_encoder", self.stage1_low_encoder),
+            ("stage1_high_encoder", self.stage1_high_encoder),
+            ("stage2_low_encoder", self.stage2_low_encoder),
+            ("stage2_high_encoder", self.stage2_high_encoder),
+        ]
+
+    def _extra_encode_accesses(self):
+        return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
     def _bucketed_stage_acts(
         self,
@@ -2552,6 +2705,9 @@ class WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder(
             diagonal, device=device, dtype=dtype
         )
 
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("preconditioner_down", self.preconditioner_down), ("preconditioner_up", self.preconditioner_up)]
+
     def _precondition_residual(self, residual: Tensor) -> Tensor:
         centered = residual - residual.mean(dim=-1, keepdim=True)
         rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
@@ -2705,6 +2861,9 @@ class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
         nn.init.kaiming_uniform_(self.stage2_router.weight, a=5**0.5)
         self.stage1_router.bias.data.zero_()
         self.stage2_router.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("stage1_router", self.stage1_router), ("stage2_router", self.stage2_router)]
 
     @staticmethod
     def _straight_through_top_acts(
@@ -2900,6 +3059,9 @@ class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
         self.gate_encoder.weight.data.zero_()
         self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
 
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("gate_encoder", self.gate_encoder)]
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         trunk = self.trunk_decoder(self.trunk_encoder(x))
@@ -3080,6 +3242,9 @@ class WhitenedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
             diagonal, device=device, dtype=dtype
         )
 
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("preconditioner_down", self.preconditioner_down), ("preconditioner_up", self.preconditioner_up)]
+
     def _precondition_residual(self, residual: Tensor) -> Tensor:
         centered = residual - residual.mean(dim=-1, keepdim=True)
         rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
@@ -3180,6 +3345,9 @@ class WhitenedLowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
         self.preconditioner_up.weight.data[:diagonal, :diagonal] = 0.05 * torch.eye(
             diagonal, device=device, dtype=dtype
         )
+
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [("gate_encoder", self.gate_encoder), ("preconditioner_down", self.preconditioner_down), ("preconditioner_up", self.preconditioner_up)]
 
     def _precondition_residual(self, residual: Tensor) -> Tensor:
         centered = residual - residual.mean(dim=-1, keepdim=True)
@@ -3370,6 +3538,9 @@ class TwoStageResidualSparseCoder(SparseCoder):
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("residual_encoder", self.residual_encoder)]
+
     def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
         return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
@@ -3494,6 +3665,14 @@ class MultiBranchGatedSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        layers = []
+        for i, (enc, gate) in enumerate(zip(self.branch_encoders, self.branch_gates)):
+            layers.append((f"branch_encoder_{i}", enc))
+            layers.append((f"branch_gate_{i}", gate))
+        layers.append(("branch_mix_logits", self.branch_mix_logits))
+        return layers
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec

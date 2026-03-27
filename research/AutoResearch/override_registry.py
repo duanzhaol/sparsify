@@ -16,7 +16,11 @@ COMMON_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
     "MATRYOSHKA_WEIGHTS",
 }
 
-ARCHITECTURE_OVERRIDE_KEYS = {
+_LOWRANK_KEYS = {"TRUNK_RANK"}
+_TWOSTAGE_KEYS = {"TRUNK_RANK", "STAGE1_RATIO"}
+_SOFT_CODEBOOK_TWOSTAGE_KEYS = {"TRUNK_RANK", "NUM_CODES", "STAGE1_RATIO"}
+
+ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "topk": set(),
     "jumprelu": {
         "JUMPRELU_INIT_THRESHOLD",
@@ -26,6 +30,29 @@ ARCHITECTURE_OVERRIDE_KEYS = {
         "GATED_TEMPERATURE",
         "GATED_INIT_LOGIT",
     },
+    "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+    "lowrank_residual": _LOWRANK_KEYS,
+    "lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+    "lowrank_grouped_residual": _LOWRANK_KEYS,
+    "lowrank_adaptive_budget_residual": _LOWRANK_KEYS,
+    "bucketed_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_multi_branch_residual": _LOWRANK_KEYS,
+    "lowrank_factorized_residual": {"TRUNK_RANK", "FACTORIZED_HIDDEN_DIM"},
+    "lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "lowrank_residual_vq": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_grouped_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_gated_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "bucketed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "whitened_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
 }
 
 STRUCTURAL_OVERRIDE_KEYS = {
@@ -36,6 +63,10 @@ STRUCTURAL_OVERRIDE_KEYS = {
     "ACTIVE_GROUPS",
     "MATRYOSHKA_KS",
     "RESIDUAL_FROM",
+    "TRUNK_RANK",
+    "NUM_CODES",
+    "STAGE1_RATIO",
+    "FACTORIZED_HIDDEN_DIM",
 }
 
 DYNAMIC_OVERRIDE_KEYS = {
@@ -72,6 +103,10 @@ CONFIG_JSON_TO_ENV = {
     "residual_from": "RESIDUAL_FROM",
     "matryoshka_ks": "MATRYOSHKA_KS",
     "matryoshka_weights": "MATRYOSHKA_WEIGHTS",
+    "trunk_rank": "TRUNK_RANK",
+    "num_codes": "NUM_CODES",
+    "stage1_ratio": "STAGE1_RATIO",
+    "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
 }
 
 

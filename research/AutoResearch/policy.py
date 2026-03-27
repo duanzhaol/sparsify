@@ -19,7 +19,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from .compatibility import is_compatible_label
+from .compatibility import compute_selection_cost, is_compatible_label
 from .git_ops import REPO_ROOT
 from .types import Action, BASE_ENV_DEFAULTS
 
@@ -77,6 +77,10 @@ def validate_action(
     )
     if not ok:
         return action, f"Incubation limit: {msg}"
+
+    ok, msg = _check_selection_cost(action)
+    if not ok:
+        return action, msg
 
     return action, None
 
@@ -142,13 +146,20 @@ def auto_archive_stale_families(families: dict[str, Any]) -> list[str]:
 def detect_stagnation(
     consecutive_no_improve: int,
     consecutive_crashes: int,
+    has_feasible_frontier: bool = True,
 ) -> dict[str, Any]:
-    """把当前轮次归入三种策略模式之一。"""
+    """把当前轮次归入四种策略模式之一。"""
     if consecutive_crashes >= CRASH_STREAK_FOR_ENGINEERING_REPAIR:
         mode = "engineering_repair"
         reason = (
             f"最近连续 {consecutive_crashes} 轮 crash，"
             "先判断是不是最近实现写坏了。"
+        )
+    elif not has_feasible_frontier:
+        mode = "cost_exploration"
+        reason = (
+            "当前 frontier 没有成本可行的点（均超过 1.5×h×n 预算）。"
+            "首要目标是找到可行配置。"
         )
     elif consecutive_no_improve >= NO_IMPROVE_STREAK_FOR_ARCH_PROBE:
         mode = "architecture_probe"
@@ -171,6 +182,7 @@ def detect_stagnation(
         "reason": reason,
         "consecutive_no_improve": consecutive_no_improve,
         "consecutive_crashes": consecutive_crashes,
+        "has_feasible_frontier": has_feasible_frontier,
     }
 
 
@@ -202,6 +214,23 @@ def build_policy_guidance(
             "3. 如果判断不是代码问题，而是训练链路本身异常，先做最小健康检查确认系统状态。",
         ])
 
+    if mode == "cost_exploration":
+        return "\n".join([
+            f"Round {round_id} 策略模式：成本探索",
+            f"原因：{reason}",
+            f"当前主线 family：{mainline['family_name']}",
+            f"当前主线参考配方：{recipe_line}",
+            "本轮要求：",
+            "1. 首要目标：找到 encoder 选择成本 ≤1.5×h×n 的配置。",
+            "2. 降低成本的最有效手段是降低 EXPANSION_FACTOR（成本近似正比于 EF）。",
+            "3. K 对选择成本几乎没有影响，不要为降低成本而降低 K。",
+            "4. 参考成本速查表选择可行的 (架构, EF) 组合。",
+            "5. 可以尝试不同架构——简单架构在低 EF 下可能是更好的权衡。",
+            "6. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
+            "",
+            "选择成本硬约束：encoder 选择成本不得超过 1.5×h×n，超过将被拦截。",
+        ])
+
     if mode == "architecture_probe":
         return "\n".join([
             f"Round {round_id} 策略模式：架构探针",
@@ -222,9 +251,13 @@ def build_policy_guidance(
         f"当前主线参考配方：{recipe_line}",
         "本轮要求：",
         "1. 默认继续围绕同一个 family 推进，不要新开 family。",
-        "2. 推荐顺序：先补 clean baseline，再调学习率，再换优化器，再给新优化器一轮学习率回调，再看 loss/preprocess，最后才动 K。",
+        "2. 推荐顺序：先确认 EF 在成本预算内（≤1.5x），再补 clean baseline，再调学习率，再换优化器，再看 loss/preprocess，最后才动 K。",
+        "   注意：K 对选择成本几乎没有影响；降低成本主要靠降低 EXPANSION_FACTOR。",
         "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
         "4. 每轮只回答一个问题。",
+        "",
+        "选择成本硬约束：encoder 选择成本不得超过 1.5×h×n，超过将被拦截。",
+        "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",
     ])
 
 
@@ -353,6 +386,43 @@ def _check_param_only_single_variable(
         )
 
     return True, ""
+
+
+def _check_selection_cost(action: Action) -> tuple[bool, str]:
+    """拦截 encoder 选择成本超过 1.5×h×n 的配置。"""
+    cfg = action.effective_config()
+    arch = cfg.get("ARCHITECTURE", "topk").lower()
+    k = int(cfg.get("K", 128))
+    ef = int(cfg.get("EXPANSION_FACTOR", 12))
+
+    extra_config: dict[str, Any] = {}
+    for env_key, cfg_key in [
+        ("TRUNK_RANK", "trunk_rank"),
+        ("NUM_CODES", "num_codes"),
+        ("STAGE1_RATIO", "stage1_ratio"),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+    ]:
+        val = cfg.get(env_key)
+        if val is not None and val != "":
+            try:
+                extra_config[cfg_key] = float(val) if "." in str(val) else int(val)
+            except (ValueError, TypeError):
+                pass
+
+    cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+    if "error" in cost:
+        return True, ""  # 计算失败时不拦截
+
+    if cost.get("feasible", True):
+        return True, ""
+
+    budget_ratio = cost.get("budget_ratio", 0)
+    ratio = cost.get("ratio", 0)
+    return False, (
+        f"选择成本超出预算：{arch} (K={k}, EF={ef}) 的 encoder 成本为 {ratio}x 原始矩阵，"
+        f"预算比率 {budget_ratio}x（需 ≤1.0x，即 ≤1.5×h×n）。"
+        f"请通过减小 K / EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES 等参数降低选择成本。"
+    )
 
 
 def _candidate_config(action: Action) -> dict[str, str]:
@@ -492,7 +562,6 @@ def _frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
     if entry.get("ef") is not None:
         config["EXPANSION_FACTOR"] = str(entry["ef"])
 
-    config["EXPANSION_FACTOR"] = "12"
     return config
 
 

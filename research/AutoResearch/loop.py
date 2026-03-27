@@ -27,6 +27,7 @@ from .git_ops import (
     snapshot_paths,
     touched_files,
 )
+from .compatibility import frontier_has_feasible_entry
 from .policy import (
     auto_archive_stale_families,
     behavioral_diff_test,
@@ -124,9 +125,12 @@ def _run_round(
     state.log_round_event(ctx, "round_started")
 
     # 1. 判定本轮策略模式，并生成给 agent 的策略说明
+    registry = state.load_compatibility_registry()
+    has_feasible = frontier_has_feasible_entry(state.frontier, registry)
     policy_state = detect_stagnation(
         state.consecutive_no_improve,
         state.consecutive_crashes,
+        has_feasible_frontier=has_feasible,
     )
 
     # Auto-archive stale families

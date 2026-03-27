@@ -78,7 +78,44 @@
 
 动作：只能作为灵感参考，不能作为主线候选。
 
-这里不把“在线选择成本大”当作兼容性判据；成本问题单独评估。
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`selection_cost + K×h + K×n + p×h×n < h×n`
+
+其中 `selection_cost` 是 encoder 端的内存访问量，即为每个 token 决定使用哪些向量和对应系数所需的计算。
+
+**AutoResearch 硬约束：selection_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。这个阈值允许一定余量（选择过程可以比原始 matmul 稍贵，因为查表端有对应的节省），但不能无限制增长。
+
+当前各架构的典型 selection_cost / (h×n) 比率：
+
+| 架构 | 比率 | 是否通过 (≤1.5x) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：选择成本不只由架构决定，还取决于 EF、K、TRUNK_RANK、NUM_CODES 等参数。降低这些参数可以把同一架构的成本降到阈值以下。
+
+降低 selection_cost 的已知方向：
+
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `K`（减少稀疏预算，间接减少两阶段架构的 encoder 量）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+每个 SparseCoder 子类现在都实现了 `selection_cost_estimate()` 方法，能精确报告其 encoder 端开销。AutoResearch prompt 中已展示此信息。
 
 ---
 
@@ -132,27 +169,23 @@
 
 ## 4. 当前 frontier 与主线结论
 
-当前 `frontier.json` 显示，真正占据 frontier 的 family 已经高度收敛：
+**注意：frontier 已从 (K, EF) 离散格子改为 (selection_cost, FVU) 2D Pareto front。**
 
-| K / EF | 当前最优架构 | FVU |
-|---|---|---:|
-| 1 / 12 | `lowrank_two_stage_soft_codebook_residual` | 0.1651 |
-| 2 / 12 | `lowrank_soft_codebook_residual` | 0.1615 |
-| 4 / 12 | `lowrank_soft_codebook_residual` | 0.1418 |
-| 5-7 / 12 | `lowrank_two_stage_soft_codebook_residual` | 0.1376-0.1278 |
-| 8 / 12 | `routed_lowrank_two_stage_soft_codebook_residual` | 0.1209 |
-| 9-12 / 12 | `lowrank_two_stage_soft_codebook_residual` | 0.1203-0.1121 |
-| 16 / 12 | `routed_lowrank_two_stage_soft_codebook_residual` | 0.1027 |
-| 24 / 12 | `lowrank_two_stage_soft_codebook_residual` | 0.0922 |
-| 32 / 12 | `lowrank_two_stage_soft_codebook_residual` | 0.0839 |
-| 64-128 / 12 | `routed_lowrank_two_stage_soft_codebook_residual` | 0.0701-0.0565 |
-| 16-128 / 16 | `bucketed_lowrank_two_stage_soft_codebook_residual` | 0.1015-0.0451 |
+K 和 EF 不再是固定约束，而是可自由调整的参数。frontier 中每个点代表一个 (selection_cost, FVU) 的非支配权衡。selection_cost 是 encoder 端的总访存量。
+
+以下是旧格式下的历史最优，供新一轮搜索参考：
+
+| 架构 | 历史最好 FVU | 备注 |
+|---|---:|---|
+| `lowrank_two_stage_soft_codebook_residual` | 0.0826 | EF=12 主线 |
+| `routed_lowrank_two_stage_soft_codebook_residual` | 0.0565 | EF=12 高 K 主线 |
+| `bucketed_lowrank_two_stage_soft_codebook_residual` | 0.0451 | EF=16 主线 |
 
 可以直接得出三个结论：
 
 1. 旧的 `lowrank_two_stage_residual` 已经不是 frontier 主人，只是早期关键过渡节点。
-2. 真正吃下 EF=12 的，是 soft-codebook 两阶段家族。
-3. EF=16 的现主线是 `bucketed_lowrank_two_stage_soft_codebook_residual`，而不是 optimizer、Hadamard、loss shaping 本身。
+2. soft-codebook 两阶段家族是最强主线。
+3. `bucketed_lowrank_two_stage_soft_codebook_residual` 在大参数预算下最强。
 
 ---
 
@@ -173,7 +206,7 @@
 | `routed` | 1 | `r54 K24/EF12 0.2878` | 用 router 扰动 support 排名 | 直接兼容 | 裸 routed 不成立；routing 只有接到强 soft-codebook/two-stage 主干上才有意义。 |
 | `jumprelu` | 2 | `r167 K32/EF16 0.2467` | 可学习阈值平滑激活 | 直接兼容 | 历史上始终偏弱；若重试，必须有明确阈值控制或 deployment 截断方案，不要再直接裸试。 |
 | `group_topk` | 1 | `r48 K24/EF12 0.2737` | 先组内竞争，再全局取 top-k | 直接兼容 | 组约束在裸模型上太强；如果要重用，只应作为强 coarse branch 后的 residual selector。 |
-| `factorized_topk` | 1 | `r47 K24/EF12 0.3714` | 稀疏前加低秩 bottleneck scorer | 直接兼容 | scorer factorization 明显伤害表达；除非它只是 selector head，否则不值得单独重开。 |
+| `factorized_topk` | 1 | `r47 K24/EF12 0.3714` | 稀疏前加低秩 bottleneck scorer | 直接兼容 | 在 EF=12 时 scorer factorization 明显伤害表达（FVU=0.3714）。但在成本约束（≤1.5x）下，factorized_topk 是少数能在 EF≤10 保持可行的架构之一，在低 EF regime 下值得重新评估。 |
 | `bucketed_topk` | 1 | `r55 K24/EF12 0.2725` | 根据范数在两套 scorer 间混合 | 直接兼容 | bucketing 本身不是答案；后面真正有效的是把 bucketing 放到强 soft-codebook 两阶段 backbone 上。 |
 | `batch_topk` | 2 | `r166 K32/EF16 0.2637` | 在 batch 级别分配总预算 | 不兼容 | 当前定义依赖 batch 共同决策，不适合作为 LUTurbo/Lottable 主线。若重构，必须改成单样本可导出的变长 K 方案。 |
 | `adaptive_budget_topk` | 1 | `r108 K24/EF12 0.3593` | 按样本难度动态分配 quota，但仍基于 batch 总预算 | 不兼容 | 和 `batch_topk` 同类问题；若保留思想，只能改成单样本 capped variable-K，而不是 batch-coupled 预算。 |
@@ -314,8 +347,17 @@ history 里有几个常见误判来源：
 3. 只看最后 F，不看曲线形状。  
    历史后段已经出现明显模式：某些 recipe 最终 F 差一点，但曲线形状显示训练仍在改善或者只是 LR 偏大/偏小。
 
-4. code-fix 和 scientific result 混在一起。  
-   `routed_*` 家族至少出现过“先修实现，再重新比较”的情况，不能把第一次失败直接当作结构负结论。
+4. code-fix 和 scientific result 混在一起。
+   `routed_*` 家族至少出现过”先修实现，再重新比较”的情况，不能把第一次失败直接当作结构负结论。
+
+### 7.4 新成本约束下的 regime shift
+
+以上 §7.1-7.3 的结论均在 EF=12 或 EF=16 下得出。当前 AutoResearch 已引入选择成本硬约束（≤1.5×h×n），所有 EF=12 配置均超出预算。这意味着：
+
+1. 之前在 EF=12/16 下的 FVU 排名不直接适用于低 EF regime
+2. “简单”架构（topk、factorized_topk）在低 EF 下可能是最佳 cost-FVU 权衡
+3. 复杂架构（bucketed_lowrank_two_stage_*）在 EF≤2 才能满足成本约束，复杂度优势未必能在如此低的 EF 下体现
+4. 应将”低 EF 下的 FVU”作为新的独立搜索维度
 
 ---
 

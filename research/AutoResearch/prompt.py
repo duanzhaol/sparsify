@@ -4,7 +4,7 @@ All prompt assembly lives here. Each prompt section is a standalone function
 returning a plain string (empty if nothing to contribute). Three compose
 functions assemble sections in the correct 4-layer order.
 
-Layer 1: Hard Constraints (role, rules, K/EF/single-variable)
+Layer 1: Hard Constraints (role, rules, single-variable)
 Layer 2: Current Decision State (policy, frontier, recent rounds, hints)
 Layer 3: Rolling Memory (filtered families, failures, hypotheses)
 Layer 4: Reference Digests (operator guide summary, prior research summary)
@@ -18,8 +18,11 @@ from typing import Any
 
 from .compatibility import (
     compatibility_hard_rules,
+    compute_selection_cost,
+    compute_selection_cost_table,
     extract_compatibility_digest,
     extract_full_prior_document,
+    format_cost_summary,
     is_compatible_label,
     summarize_registry_counts,
 )
@@ -44,9 +47,13 @@ MODULE_CONTRACT = """\
 
 PROXY_OBJECTIVE = """\
 训练侧代理目标：
-- 维护并改善 FVU 与 K 的 Pareto frontier
+- 维护并改善 (selection_cost, FVU) 的 2D Pareto frontier
+- 用尽可能少的 encoder 选择访存量达到尽可能低的 FVU
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
-- 更小的 K 只有在兼容性和潜在补偿行为仍然可接受时才真正有价值"""
+- K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
+- 注意：K 对大多数架构的选择成本没有影响（成本由 encoder 矩阵大小决定）
+- 降低成本的主要手段是降低 EXPANSION_FACTOR（成本近似正比于 EF）
+- 不同架构在相同 EF 下的成本差异很大（见成本速查表）"""
 
 EXECUTION_LAYER = """\
 执行层是固定的：
@@ -64,26 +71,19 @@ EDIT_RULES = """\
 - 不要返回 command="stop"
 - 最终必须返回一个符合 action schema 的 JSON 对象"""
 
-K_WHITELIST = "K 约束：K 只能取 {4, 8, 16, 24, 32, 64, 96, 128} 中的值，禁止使用其他 K。"
-
-EF_CONSTRAINT = "EF 约束：所有实验的 EXPANSION_FACTOR 固定为 12。每次 env_overrides 都必须显式设置 EXPANSION_FACTOR=12。"
-
 SINGLE_VARIABLE_PRINCIPLE = "单变量原则：每一轮只改变一个主维度。"
 
 HARD_CONSTRAINT_REMINDER = (
-    "提醒：K 只能取 {4,8,16,24,32,64,96,128}；EF 永远为 12；"
-    "每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
+    "提醒：每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
+    "Frontier 基于 (selection_cost, FVU) 2D Pareto front。"
 )
 
 ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
     "/root/.codex/skills/sae-architecture-integration/SKILL.md"
 )
 
-# Hint prefixes that are now in constants — filtered from tactical hints
-_HARD_CONSTRAINT_HINT_PREFIXES = (
-    "K values are restricted",
-    "EXPANSION_FACTOR is now fixed",
-)
+# Hint prefixes to filter from tactical hints (legacy constraints no longer active)
+_HARD_CONSTRAINT_HINT_PREFIXES: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -99,8 +99,6 @@ def section_hard_constraints() -> str:
         PROXY_OBJECTIVE,
         EXECUTION_LAYER,
         EDIT_RULES,
-        K_WHITELIST,
-        EF_CONSTRAINT,
         SINGLE_VARIABLE_PRINCIPLE,
         compatibility_hard_rules(),
     ])
@@ -135,33 +133,169 @@ def section_frontier(
     frontier: dict[str, Any],
     registry: dict[str, str],
     limit: int = 10,
+    cost_cache: dict[str, dict] | None = None,
 ) -> str:
-    """按 K 排序的训练代理 frontier，并区分 EF=12 主 regime 与其他历史参考。"""
-    main: list[tuple[int, str]] = []
+    """按 selection_cost 排序的 2D Pareto frontier (selection_cost, FVU)。"""
+    if cost_cache is None:
+        cost_cache = {}
+    entries: list[tuple[float, str]] = []
 
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
             continue
-        k = int(entry.get("k", 0))
-        ef = int(entry.get("ef", 0))
         fvu = entry.get("fvu", "?")
         arch = entry.get("architecture", "?")
         cfg = entry.get("config", {})
         family_name = str(cfg.get("family_name") or arch).lower()
+        k = entry.get("k", "?")
+        ef = entry.get("ef", "?")
         lr = cfg.get("lr", "?")
         opt = cfg.get("optimizer", "?")
 
-        if ef == 12 and is_compatible_label(registry.get(family_name)):
-            main.append((k, f"  k={k:>3d}  fvu={fvu:<12}  arch={arch}  lr={lr} opt={opt}"))
+        if not is_compatible_label(registry.get(family_name)):
+            continue
 
-    main.sort()
+        # Use stored selection_cost or compute it
+        sel_cost = entry.get("selection_cost")
+        if sel_cost is None:
+            cost_key = f"{arch}|{k}|{ef}"
+            if cost_key not in cost_cache:
+                cost_cache[cost_key] = compute_selection_cost(
+                    str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
+                )
+            cost = cost_cache[cost_key]
+            if "error" not in cost:
+                sel_cost = cost["total_accesses"]
+                ratio = cost.get("ratio", "?")
+            else:
+                sel_cost = 0
+                ratio = "?"
+        else:
+            d_in = 1024
+            n_out = 4 * d_in
+            original = d_in * n_out
+            ratio = round(sel_cost / original, 2) if original > 0 else "?"
 
-    parts = ["训练代理 frontier（EF=12，当前主 regime）："]
-    if main:
-        for _, line in main[:limit]:
+        feasible = isinstance(ratio, (int, float)) and ratio <= 1.5
+        tag = " [FEASIBLE]" if feasible else " [OVER BUDGET]"
+        entries.append((
+            float(sel_cost),
+            f"  cost={ratio}x  fvu={fvu:<12}  arch={arch}  K={k} EF={ef}  lr={lr} opt={opt}{tag}",
+            feasible,
+        ))
+
+    entries.sort()
+
+    parts = ["训练代理 frontier（2D Pareto: selection_cost vs FVU）："]
+    if entries:
+        feasible_count = sum(1 for _, _, f in entries[:limit] if f)
+        for _, line, _ in entries[:limit]:
             parts.append(line)
+        if feasible_count == 0:
+            parts.append("  !! 当前 frontier 所有点均超出成本预算（>1.5x）。首要任务：找到成本可行的配置。")
     else:
         parts.append("  （暂无条目）")
+
+    return "\n".join(parts)
+
+
+def section_selection_cost_status(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+) -> str:
+    """Show encoder-side selection cost for the best frontier architecture."""
+    best_entry: dict[str, Any] | None = None
+    best_fvu = float("inf")
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+        if not is_compatible_label(registry.get(family_name)):
+            continue
+        fvu = float(entry.get("fvu", float("inf")))
+        if fvu < best_fvu:
+            best_fvu = fvu
+            best_entry = entry
+
+    if best_entry is None:
+        return ""
+
+    arch = best_entry.get("architecture", "?")
+    k = int(best_entry.get("k", 128))
+    ef = int(best_entry.get("ef", 12))
+    cfg = best_entry.get("config", {})
+    extra_config = _extract_cost_params(cfg)
+    cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+
+    if "error" in cost:
+        return ""
+
+    parts = ["选择成本状态："]
+    parts.append(f"  当前最优 {arch} (K={k}, EF={ef}):")
+    parts.append(
+        f"    encoder 成本: {cost['ratio']}x 原始矩阵 | "
+        f"预算比率: {cost['budget_ratio']}x (需 ≤1.0x, 即 ≤1.5×h×n)"
+    )
+
+    breakdown_strs = []
+    for item in cost.get("breakdown", []):
+        acc = item["accesses"]
+        if acc >= 1_000_000:
+            breakdown_strs.append(f"{item['name']} {acc / 1_000_000:.1f}M")
+        elif acc >= 1_000:
+            breakdown_strs.append(f"{item['name']} {acc / 1_000:.0f}K")
+        else:
+            breakdown_strs.append(f"{item['name']} {acc}")
+    parts.append(f"    分解: {' + '.join(breakdown_strs)}")
+    parts.append(
+        "  降低成本可调参数: TRUNK_RANK, NUM_CODES, STAGE1_RATIO, FACTORIZED_HIDDEN_DIM"
+    )
+
+    return "\n".join(parts)
+
+
+def section_cost_feasibility_table(registry: dict[str, str]) -> str:
+    """成本可行性速查表：让 agent 知道各 (架构, EF) 组合是否在预算内。"""
+    table = compute_selection_cost_table()
+    if not table:
+        return ""
+
+    from .compatibility import _COST_TABLE_ARCHITECTURES, _COST_TABLE_EF_VALUES
+
+    # Filter to compatible architectures only
+    archs = [a for a in _COST_TABLE_ARCHITECTURES if is_compatible_label(registry.get(a))]
+    if not archs:
+        archs = _COST_TABLE_ARCHITECTURES  # fallback: show all if registry empty
+    efs = _COST_TABLE_EF_VALUES
+
+    # Build header
+    max_name = max(len(a) for a in archs)
+    header = f"{'架构':<{max_name}}  " + "  ".join(f"EF={ef:<3d}" for ef in efs)
+
+    rows: list[str] = []
+    for arch in archs:
+        cells: list[str] = []
+        for ef in efs:
+            cost = table.get((arch, ef))
+            if cost and "error" not in cost:
+                ratio = cost.get("ratio", 0)
+                feasible = cost.get("feasible", False)
+                mark = "+" if feasible else "-"
+                cells.append(f"{ratio}x{mark}")
+            else:
+                cells.append("?    ")
+        row = f"{arch:<{max_name}}  " + "  ".join(f"{c:<7s}" for c in cells)
+        rows.append(row)
+
+    parts = [
+        "成本可行性速查表（ratio ≤ 1.5x 且标 + = 可行, 标 - = 超预算）：",
+        f"  {header}",
+    ]
+    for row in rows:
+        parts.append(f"  {row}")
+    parts.append("  注意：K 对选择成本几乎没有影响（成本由 encoder 矩阵决定，不依赖 K）。")
 
     return "\n".join(parts)
 
@@ -185,7 +319,7 @@ def section_recent_rounds(
         ).lower()
         if family_name and not is_compatible_label(registry.get(family_name)):
             continue
-        compatible_lines.append(f"  {_normalize_ef_text(_trim_round_summary(summary))}")
+        compatible_lines.append(f"  {_trim_round_summary(summary)}")
     if not compatible_lines:
         return "最近几轮（兼容架构）：\n  （最近没有兼容 family 的新结果）"
     return f"最近几轮（兼容架构，{len(compatible_lines)}）：\n" + "\n".join(compatible_lines)
@@ -318,12 +452,11 @@ def section_operator_guide_digest(guide_text: str, max_chars: int = 3000) -> str
 
     if extracted:
         text = "\n".join(extracted)
-        text = _normalize_ef_text(text)
         if len(text) > max_chars:
             text = text[:max_chars - 20] + "\n[truncated]"
         return f"Operator guide 关键优先级：\n{text}"
 
-    truncated = _normalize_ef_text(guide_text[:max_chars - 20]) + "\n[truncated]"
+    truncated = guide_text[:max_chars - 20] + "\n[truncated]"
     return f"Operator guide 摘要：\n{truncated}"
 
 
@@ -332,14 +465,14 @@ def section_prior_research_digest(prior_text: str) -> str:
     if not prior_text:
         return ""
     digest = extract_compatibility_digest(prior_text) or prior_text
-    return f"历史研究关键结论：\n{_normalize_ef_text(digest)}"
+    return f"历史研究关键结论：\n{digest}"
 
 
 def section_prior_research_full(prior_text: str) -> str:
     """Fresh session must receive the full prior document."""
     if not prior_text:
         return ""
-    return f"完整历史研究文档：\n{_normalize_ef_text(extract_full_prior_document(prior_text))}"
+    return f"完整历史研究文档：\n{extract_full_prior_document(prior_text)}"
 
 
 def section_architecture_checklist(
@@ -381,6 +514,8 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_frontier(state.frontier, registry))
+    sections.append(section_selection_cost_status(state.frontier, registry))
+    sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         state.recent_round_summaries(limit=5),
         registry,
@@ -427,6 +562,8 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_frontier(state.frontier, registry, limit=8))
+    sections.append(section_selection_cost_status(state.frontier, registry))
+    sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         state.recent_round_summaries(limit=4),
         registry,
@@ -441,7 +578,7 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     if hypotheses:
         lines = ["当前开放假设："]
         for h in hypotheses:
-            lines.append(f"  - {_truncate(_normalize_ef_text(h), 100)}")
+            lines.append(f"  - {_truncate(h, 100)}")
         sections.append("\n".join(lines))
 
     checklist = _load_architecture_checklist()
@@ -579,25 +716,31 @@ def _trim_round_summary(summary: dict[str, Any]) -> str:
     return f"r{round_id} {family_name} {change_type} -> {decision}{fvu_part}{dur_part}{hyp_part}"
 
 
+def _extract_cost_params(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract architecture-specific params for cost estimation from config."""
+    extra: dict[str, Any] = {}
+    for key, cfg_key in [
+        ("trunk_rank", "trunk_rank"),
+        ("num_codes", "num_codes"),
+        ("stage1_ratio", "stage1_ratio"),
+        ("factorized_hidden_dim", "factorized_hidden_dim"),
+        ("TRUNK_RANK", "trunk_rank"),
+        ("NUM_CODES", "num_codes"),
+        ("STAGE1_RATIO", "stage1_ratio"),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+    ]:
+        val = config.get(key)
+        if val is not None and val != "":
+            try:
+                extra[cfg_key] = float(val) if "." in str(val) else int(val)
+            except (ValueError, TypeError):
+                pass
+    return extra
+
+
 def _truncate(s: str, limit: int) -> str:
     if not isinstance(s, str):
         return str(s)[:limit]
     return s if len(s) <= limit else s[:limit - 3] + "..."
 
 
-def _normalize_ef_text(s: str) -> str:
-    if not isinstance(s, str):
-        return str(s)
-    replacements = [
-        ("EF=16", "EF=12"),
-        ("EF = 16", "EF = 12"),
-        ("EF 16", "EF 12"),
-        ("EXPANSION_FACTOR=16", "EXPANSION_FACTOR=12"),
-        ("EXPANSION_FACTOR = 16", "EXPANSION_FACTOR = 12"),
-        ("固定到 EF=16", "固定到 EF=12"),
-        ("current `K=32, EF=16` backbone", "current `K=32, EF=12` backbone"),
-    ]
-    out = s
-    for old, new in replacements:
-        out = out.replace(old, new)
-    return out

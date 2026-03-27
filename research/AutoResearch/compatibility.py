@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Iterable
+import subprocess
+from typing import Any, Iterable
+
+from .git_ops import REPO_ROOT
 
 DIRECT_COMPATIBLE = "direct_compatible"
 EXTENDED_COMPATIBLE = "extended_compatible"
@@ -84,7 +88,179 @@ def compatibility_hard_rules() -> str:
         "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
         "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
         "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        "5. 选择成本硬约束：encoder 选择成本不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
+        "   超过此阈值的配置将被 policy 拦截。降低选择成本的手段包括：",
+        "   减小 EXPANSION_FACTOR / K / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
     ])
+
+
+def compute_selection_cost(
+    architecture: str,
+    k: int = 128,
+    ef: int = 12,
+    d_in: int = 1024,
+    n_output: int | None = None,
+    extra_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute encoder-side selection cost by instantiating the model.
+
+    Uses subprocess to avoid import-time GPU issues, similar to
+    ``policy.behavioral_diff_test()``.
+    """
+    cfg_parts = [
+        f"architecture='{architecture}'",
+        f"k={k}",
+        f"expansion_factor={ef}",
+    ]
+    if extra_config:
+        for key, value in extra_config.items():
+            if value is not None:
+                cfg_parts.append(f"{key}={value!r}")
+
+    n_output_arg = f"{n_output}" if n_output is not None else "None"
+    code = f"""\
+import sys, json; sys.path.insert(0, '.')
+from sparsify.sparse_coder import _get_sae_class
+from sparsify.config import SparseCoderConfig
+cfg = SparseCoderConfig({', '.join(cfg_parts)})
+cls = _get_sae_class('{architecture}')
+m = cls({d_in}, cfg, device='cpu')
+print("COST:" + json.dumps(m.selection_cost_estimate({n_output_arg})))
+"""
+    try:
+        result = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.startswith("COST:"):
+                return json.loads(line[5:])
+        return {"error": "parse_failed", "stderr": result.stderr[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_COST_TABLE_ARCHITECTURES = [
+    "topk", "gated", "factorized_topk",
+    "lowrank_residual", "lowrank_soft_codebook_residual",
+    "lowrank_two_stage_soft_codebook_residual",
+]
+_COST_TABLE_EF_VALUES = [2, 3, 4, 6, 8, 12]
+
+
+def compute_selection_cost_table(
+    architectures: list[str] | None = None,
+    ef_values: list[int] | None = None,
+    k: int = 32,
+    d_in: int = 1024,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Batch-compute selection costs for (architecture, EF) combinations.
+
+    Uses a single subprocess to avoid N separate invocations.
+    Returns {(arch, ef): cost_dict} where cost_dict has keys:
+    ratio, feasible, total_accesses, etc.
+    """
+    archs = architectures or _COST_TABLE_ARCHITECTURES
+    efs = ef_values or _COST_TABLE_EF_VALUES
+
+    combos = [(arch, ef) for arch in archs for ef in efs]
+    if not combos:
+        return {}
+
+    # Build a single subprocess that computes all costs
+    lines = [
+        "import sys, json; sys.path.insert(0, '.')",
+        "from sparsify.sparse_coder import _get_sae_class",
+        "from sparsify.config import SparseCoderConfig",
+    ]
+    for arch, ef in combos:
+        lines.append(f"try:")
+        lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
+        lines.append(f"    _cls = _get_sae_class('{arch}')")
+        lines.append(f"    _m = _cls({d_in}, _cfg, device='cpu')")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate(None)))")
+        lines.append(f"except Exception as _e:")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps({{'error': str(_e)}}))")
+
+    code = "\n".join(lines)
+    results: dict[tuple[str, int], dict[str, Any]] = {}
+    try:
+        proc = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        for line in (proc.stdout + proc.stderr).splitlines():
+            if not line.startswith("COST:"):
+                continue
+            parts = line[5:].split("|", 2)
+            if len(parts) == 3:
+                arch_name, ef_str, payload = parts
+                try:
+                    results[(arch_name, int(ef_str))] = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+
+    return results
+
+
+def frontier_has_feasible_entry(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    d_in: int = 1024,
+) -> bool:
+    """Check if frontier has at least one feasible entry within cost budget.
+
+    Feasible means: selection_cost / (d_in * 4*d_in) <= 1.5
+    """
+    budget = 1.5 * d_in * 4 * d_in  # 1.5 × h × n
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        family_name = str(
+            cfg.get("family_name") or entry.get("architecture") or ""
+        ).lower()
+        if not is_compatible_label(registry.get(family_name)):
+            continue
+
+        sel_cost = entry.get("selection_cost")
+        if sel_cost is not None:
+            if float(sel_cost) <= budget:
+                return True
+        else:
+            # No stored cost — compute from entry fields
+            cost = compute_selection_cost(
+                str(entry.get("architecture") or cfg.get("architecture") or "topk"),
+                k=int(entry.get("k") or cfg.get("k") or 128),
+                ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
+                d_in=d_in,
+            )
+            if "error" not in cost and cost.get("feasible", False):
+                return True
+
+    return False
+
+
+def format_cost_summary(cost: dict[str, Any]) -> str:
+    """Format a cost dict as a compact one-liner."""
+    if "error" in cost:
+        return f"cost=error({cost['error']})"
+    ratio = cost.get("ratio", "?")
+    budget = cost.get("budget_ratio", "?")
+    feasible = "feasible" if cost.get("feasible") else "infeasible"
+    return f"cost={ratio}x baseline (budget={budget}x, {feasible})"
 
 
 def extract_full_prior_document(prior_text: str) -> str:

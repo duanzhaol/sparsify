@@ -174,20 +174,44 @@ def rebuild_runtime_state(
             if result.get("run_health") == "perf_regression":
                 performance_findings.append(_outcome_line(summary))
 
-            key = frontier_key(int(result["k"]), int(result.get("expansion_factor") or 12))
-            existing = frontier.get(key)
-            if existing is None or fvu < float(existing.get("fvu", float("inf"))):
-                config = _effective_config(summary)
-                frontier[key] = {
-                    "k": int(result["k"]),
-                    "ef": int(result.get("expansion_factor") or 12),
-                    "fvu": fvu,
-                    "architecture": str(result.get("architecture") or config.get("architecture") or family_name).lower(),
-                    "commit": result.get("head_commit") or "",
-                    "config": config,
-                    "checkpoint": result.get("checkpoint"),
-                    "peak_memory_gb": result.get("peak_memory_gb"),
-                }
+            round_id = summary.get("round", "unknown")
+            key = frontier_key(round_id)
+            config = _effective_config(summary)
+            arch = str(result.get("architecture") or config.get("architecture") or family_name).lower()
+            k_val = int(result["k"])
+            ef_val = int(result.get("expansion_factor") or 12)
+            new_entry = {
+                "k": k_val,
+                "ef": ef_val,
+                "fvu": fvu,
+                "architecture": arch,
+                "commit": result.get("head_commit") or "",
+                "config": config,
+                "checkpoint": result.get("checkpoint"),
+                "peak_memory_gb": result.get("peak_memory_gb"),
+            }
+            # Compute selection_cost
+            from .controller import _estimate_cost_from_entry
+            new_entry["selection_cost"] = _estimate_cost_from_entry(new_entry)
+            frontier[key] = new_entry
+
+    # Pareto cleanup: remove dominated points
+    from .controller import _pareto_dominates, _entry_to_point
+    keys_to_remove = []
+    frontier_items = list(frontier.items())
+    for i, (ki, ei) in enumerate(frontier_items):
+        if not isinstance(ei, dict):
+            continue
+        pi = _entry_to_point(ei)
+        for j, (kj, ej) in enumerate(frontier_items):
+            if i == j or not isinstance(ej, dict):
+                continue
+            pj = _entry_to_point(ej)
+            if _pareto_dominates(pj, pi):
+                keys_to_remove.append(ki)
+                break
+    for k in keys_to_remove:
+        frontier.pop(k, None)
 
     for entry in frontier.values():
         family_name = str(entry.get("config", {}).get("family_name") or entry.get("architecture") or "").lower()

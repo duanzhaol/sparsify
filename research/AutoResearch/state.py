@@ -250,21 +250,34 @@ class StateManager:
     # -----------------------------------------------------------------------
 
     def frontier_digest(self, limit: int = 8) -> list[str]:
-        """Return frontier as compact one-liner strings, sorted by FVU."""
+        """Return frontier as compact one-liner strings, sorted by selection_cost."""
         points: list[tuple[float, str]] = []
-        for key, entry in self.frontier.items():
+        for _key, entry in self.frontier.items():
             if not isinstance(entry, dict):
                 continue
             fvu = entry.get("fvu", 999)
-            k = entry.get("k", key.split("_")[0] if "_" in key else key)
-            ef = entry.get("ef", key.split("_")[1] if "_" in key else "?")
+            sel_cost = entry.get("selection_cost")
+            k = entry.get("k", "?")
+            ef = entry.get("ef", "?")
             arch = entry.get("architecture", "?")
             cfg = entry.get("config", {})
             lr = cfg.get("lr", "?")
             opt = cfg.get("optimizer", "?")
             commit = str(entry.get("commit", ""))[:7]
-            line = f"k={k} ef={ef} fvu={fvu} arch={arch} lr={lr} opt={opt} @{commit}"
-            points.append((float(fvu), line))
+
+            if sel_cost is not None:
+                d_in = 1024
+                n_out = 4 * d_in
+                original = d_in * n_out
+                ratio = round(sel_cost / original, 2) if original > 0 else "?"
+                cost_str = f"cost={ratio}x"
+                sort_key = float(sel_cost)
+            else:
+                cost_str = "cost=?"
+                sort_key = float("inf")
+
+            line = f"{cost_str} fvu={fvu} arch={arch} K={k} EF={ef} lr={lr} opt={opt} @{commit}"
+            points.append((sort_key, line))
         points.sort()
         return [line for _, line in points[:limit]]
 
@@ -434,24 +447,56 @@ class StateManager:
                 "full_frontier", self._state.get("proxy_frontier", {})
             )
 
-        # Migrate old K-only keys ("128") to K_EF keys ("128_32")
+        # Migrate legacy frontier keys to new format
         frontier = self._state.get("frontier", {})
-        old_keys = [k for k in frontier if k.isdigit()]
-        for old_key in old_keys:
-            entry = frontier.pop(old_key)
-            if not isinstance(entry, dict):
-                continue
-            k = int(entry.get("k", old_key))
-            cfg = entry.get("config", {})
-            ef = int(cfg.get("expansion_factor", cfg.get("EXPANSION_FACTOR", 12)))
-            entry["k"] = k
-            entry["ef"] = ef
-            from .controller import frontier_key
-            frontier[frontier_key(k, ef)] = entry
+        self._migrate_frontier_keys(frontier)
 
         self._memory = _load_json(self.history_dir / "memory.json", dict(_DEFAULT_MEMORY))
         for k, v in _DEFAULT_MEMORY.items():
             self._memory.setdefault(k, v)
+
+    def _migrate_frontier_keys(self, frontier: dict[str, Any]) -> None:
+        """Migrate legacy frontier key formats to new round-based keys.
+
+        Handles two legacy formats:
+        1. K-only keys: "128" → "legacy_128"
+        2. K_EF keys: "128_12" → "legacy_128_12"
+
+        Also computes and stores selection_cost for entries that lack it.
+        """
+        from .controller import _estimate_cost_from_entry
+
+        legacy_keys = [
+            k for k in frontier
+            if not k.startswith("r") and not k.startswith("legacy_")
+        ]
+        for old_key in legacy_keys:
+            entry = frontier.pop(old_key)
+            if not isinstance(entry, dict):
+                continue
+
+            # Ensure k and ef are stored in entry
+            if "k" not in entry:
+                if old_key.isdigit():
+                    entry["k"] = int(old_key)
+                elif "_" in old_key:
+                    parts = old_key.split("_")
+                    entry["k"] = int(parts[0])
+            if "ef" not in entry:
+                if "_" in old_key:
+                    parts = old_key.split("_")
+                    if len(parts) >= 2:
+                        entry["ef"] = int(parts[1])
+                else:
+                    cfg = entry.get("config", {})
+                    entry["ef"] = int(cfg.get("expansion_factor", cfg.get("EXPANSION_FACTOR", 12)))
+
+            # Compute selection_cost if missing
+            if "selection_cost" not in entry:
+                entry["selection_cost"] = _estimate_cost_from_entry(entry)
+
+            new_key = f"legacy_{old_key}"
+            frontier[new_key] = entry
 
     def _save_state(self) -> None:
         _save_json(self.history_dir / "state.json", self._state)

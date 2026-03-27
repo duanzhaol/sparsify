@@ -112,7 +112,7 @@ class Action:
     hypothesis: str
     summary: str
     change_type: str  # param_only | edit_sae_code | edit_perf_code | no_change
-    expected_win: str  # lower_fvu | smaller_k | lower_cost | explore_unknown
+    expected_win: str  # lower_fvu | lower_cost | explore_unknown
     family_name: str
     family_stage: str  # mainline | prototype | stabilize | promote_to_mainline
     self_review: str

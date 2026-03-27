@@ -223,12 +223,12 @@ def run_training(
         if parsed.get("status") in (None, "crash"):
             parsed["status"] = "ok"
 
-    decision = decide(state.frontier, parsed)
+    decision = decide(state.frontier, parsed, config=config_json)
 
     # Update frontier if improved
     from .git_ops import current_git_commit
     commit = current_git_commit()
-    update_frontier(state.frontier, parsed, decision, config_json, commit)
+    update_frontier(state.frontier, parsed, decision, config_json, commit, round_id=round_id)
 
     # Determine health
     run_health = "normal"
@@ -519,8 +519,10 @@ def _resolve_base_config(
         if not isinstance(entry, dict):
             continue
         cfg = entry.get("config", {})
-        arch = str(cfg.get("architecture", "")).lower()
-        if arch == family:
+        entry_family = str(
+            cfg.get("family_name") or cfg.get("architecture") or ""
+        ).lower()
+        if entry_family == family:
             fvu = float(entry.get("fvu", float("inf")))
             if fvu < best_fvu:
                 best_fvu = fvu

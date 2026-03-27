@@ -39,6 +39,19 @@ class SparseCoderConfig(Serializable):
     group_topk_size: int = 4
     """Number of latents per local competition group for group-topk encoders."""
 
+    # Architecture-specific structural parameters (None = auto-computed)
+    trunk_rank: int | None = None
+    """Rank of the dense low-rank trunk. None = auto: min(d_in, max(k*2, d_in//4))."""
+
+    num_codes: int | None = None
+    """Number of soft/hard codebook entries. None = auto: min(256, max(32, k*2))."""
+
+    stage1_ratio: float | None = None
+    """Fraction of K budget for stage 1 in two-stage architectures. None = 0.5."""
+
+    factorized_hidden_dim: int | None = None
+    """Hidden dimension for factorized encoders. None = auto."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig

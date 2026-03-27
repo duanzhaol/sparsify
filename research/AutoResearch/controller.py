@@ -2,6 +2,9 @@
 
 Replaces the old controller.py CLI.  Called as Python functions, not
 as a subprocess.  No proxy/full tier distinction — single frontier.
+
+The frontier is a 2D Pareto front over (selection_cost, FVU).
+Lower selection_cost and lower FVU are both better.
 """
 
 from __future__ import annotations
@@ -9,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
+
+from .compatibility import compute_selection_cost
 
 
 # ---------------------------------------------------------------------------
@@ -68,64 +73,70 @@ def parse_log(log_path: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Decision logic
+# Decision logic — 2D Pareto front: (selection_cost, FVU)
 # ---------------------------------------------------------------------------
 
 FVU_TOL = 0.001
+COST_REL_TOL = 0.05  # 5% relative tolerance for selection_cost near-duplicate
+D_IN_DEFAULT = 1024   # default d_in for cost estimation (fallback)
+
+# Known hookpoint → d_in mapping for quick lookup
+_HOOKPOINT_DIN: dict[str, int] = {
+    # Qwen3-0.6B / Pythia-160m: o_proj output dim = 1024
+    "layers.[3].self_attn.o_proj": 1024,
+}
 
 
-def frontier_key(k: int, ef: int) -> str:
-    """Canonical frontier key: ``'{k}_{ef}'``."""
-    return f"{k}_{ef}"
+def frontier_key(round_id: int | str) -> str:
+    """Canonical frontier key based on round id."""
+    return f"r{round_id}"
 
 
 def decide(
     frontier: dict[str, Any],
     parsed: dict[str, Any],
+    config: dict[str, Any] | None = None,
 ) -> str:
-    """Compare a training result against the frontier.
+    """Compare a training result against the 2D Pareto frontier.
 
-    The frontier is three-dimensional: **(K, EF, FVU)**.
-    Lower K, lower EF, and lower FVU are all better.
+    The frontier is two-dimensional: **(selection_cost, FVU)**.
+    Lower selection_cost and lower FVU are both better.
 
     Returns one of: "keep", "crash", "archive", "discard".
-    - keep:    result improves the frontier (same slot or Pareto non-dominated)
+    - keep:    result is Pareto non-dominated (expands or improves frontier)
     - crash:   training failed, no usable metric
-    - archive: result is within FVU_TOL of current best at same (K, EF)
-    - discard: result is dominated by existing frontier points
+    - archive: result is near-duplicate of an existing frontier point
+    - discard: result is Pareto-dominated by existing frontier points
     """
     status = parsed.get("status")
     fvu = parsed.get("val_fvu")
-    k = parsed.get("k")
-    ef = parsed.get("expansion_factor")
 
-    if status != "ok" or fvu is None or k is None:
+    if status != "ok" or fvu is None:
         return "crash"
 
-    if ef is None:
-        ef = 12  # fallback default
+    sel_cost = _compute_candidate_cost(parsed, config)
+    candidate = {"selection_cost": sel_cost, "fvu": fvu}
 
-    key = frontier_key(int(k), int(ef))
-    current = frontier.get(key)
+    points = _frontier_points(frontier)
+    if not points:
+        return "keep"
 
-    # Same-slot comparison takes priority over Pareto check
-    if current is not None:
-        cur_fvu = float(current.get("fvu", float("inf")))
-        if fvu < cur_fvu - FVU_TOL:
-            return "keep"  # strict improvement at same (K, EF)
-        if abs(fvu - cur_fvu) <= FVU_TOL:
-            return "archive"  # within tolerance, not an improvement
-        return "discard"  # worse than current at same slot
+    # Check for near-duplicate (both dimensions within tolerance)
+    for pt in points:
+        cost_close = (
+            abs(pt["selection_cost"] - sel_cost) / max(sel_cost, 1) <= COST_REL_TOL
+        )
+        fvu_close = abs(pt["fvu"] - fvu) <= FVU_TOL
+        if cost_close and fvu_close:
+            if fvu < pt["fvu"] - FVU_TOL:
+                return "keep"  # same cost region but strictly better FVU
+            return "archive"
 
-    # New (K, EF) slot: check Pareto non-dominated across frontier
-    candidate = {"k": int(k), "ef": int(ef), "fvu": fvu}
-    current_points = _frontier_points(frontier)
-    if not current_points or not any(
-        _pareto_dominates(pt, candidate) for pt in current_points
-    ):
-        return "keep"  # non-dominated, adds to frontier
+    # Pareto dominance check
+    if any(_pareto_dominates(pt, candidate) for pt in points):
+        return "discard"
 
-    return "discard"
+    return "keep"
 
 
 def update_frontier(
@@ -134,23 +145,25 @@ def update_frontier(
     decision: str,
     config: dict[str, Any],
     commit: str,
+    round_id: int | str | None = None,
 ) -> None:
-    """If decision is 'keep', update the frontier in-place."""
+    """If decision is 'keep', add to frontier and remove dominated points."""
     if decision != "keep":
         return
-    k = parsed.get("k")
     fvu = parsed.get("val_fvu")
-    ef = parsed.get("expansion_factor")
-    if k is None or fvu is None:
+    if fvu is None:
         return
-    if ef is None:
-        ef = 12
 
-    key = frontier_key(int(k), int(ef))
+    k = parsed.get("k")
+    ef = parsed.get("expansion_factor")
+    sel_cost = _compute_candidate_cost(parsed, config)
+
+    key = frontier_key(round_id or "unknown")
     frontier[key] = {
-        "k": int(k),
-        "ef": int(ef),
+        "selection_cost": sel_cost,
         "fvu": fvu,
+        "k": int(k) if k is not None else None,
+        "ef": int(ef) if ef is not None else None,
         "architecture": parsed.get("architecture"),
         "commit": commit,
         "config": config,
@@ -158,14 +171,24 @@ def update_frontier(
         "peak_memory_gb": parsed.get("peak_memory_gb"),
     }
 
+    # Remove points dominated by the new entry
+    new_pt = {"selection_cost": sel_cost, "fvu": fvu}
+    to_remove = [
+        fk
+        for fk, entry in frontier.items()
+        if fk != key and isinstance(entry, dict) and _pareto_dominates(new_pt, _entry_to_point(entry))
+    ]
+    for fk in to_remove:
+        del frontier[fk]
+
 
 # ---------------------------------------------------------------------------
-# Pareto helpers
+# Pareto helpers — 2D (selection_cost, FVU)
 # ---------------------------------------------------------------------------
 
 
 def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
-    """Compute the non-dominated Pareto frontier from a (K,EF)→point dict."""
+    """Compute the non-dominated 2D Pareto frontier."""
     points = _frontier_points(frontier)
     pareto: list[dict[str, Any]] = []
     for candidate in points:
@@ -175,40 +198,127 @@ def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if not dominated:
             pareto.append(candidate)
-    pareto.sort(key=lambda x: (x["k"], x["ef"], x["fvu"]))
+    pareto.sort(key=lambda x: x["selection_cost"])
     return pareto
 
 
 def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract {selection_cost, fvu} from all frontier entries."""
     points: list[dict[str, Any]] = []
-    for key, entry in frontier.items():
+    for _key, entry in frontier.items():
         if not isinstance(entry, dict):
             continue
         try:
-            # New format stores k and ef explicitly in entry
-            k = int(entry.get("k", key.split("_")[0] if "_" in key else key))
-            ef = int(entry.get("ef", key.split("_")[1] if "_" in key else 12))
-            points.append({
-                "k": k,
-                "ef": ef,
-                "fvu": float(entry["fvu"]),
-            })
+            points.append(_entry_to_point(entry))
         except (TypeError, ValueError, KeyError, IndexError):
             continue
     return points
 
 
-def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """Return True if point a dominates point b.
+def _entry_to_point(entry: dict[str, Any]) -> dict[str, Any]:
+    """Convert a frontier entry to a {selection_cost, fvu} point."""
+    fvu = float(entry["fvu"])
+    # Prefer stored selection_cost; fall back to estimation
+    sel_cost = entry.get("selection_cost")
+    if sel_cost is None:
+        sel_cost = _estimate_cost_from_entry(entry)
+    return {"selection_cost": float(sel_cost), "fvu": fvu}
 
-    Three dimensions: lower K, lower EF, lower FVU are all better.
-    a dominates b if a is at least as good in all dimensions and strictly
+
+def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Return True if point a dominates point b in 2D (selection_cost, FVU).
+
+    a dominates b if a is at least as good in both dimensions and strictly
     better in at least one.
     """
+    cost_ok = a["selection_cost"] <= b["selection_cost"]
     fvu_ok = a["fvu"] <= b["fvu"] + FVU_TOL
-    k_ok = a["k"] <= b["k"]
-    ef_ok = a["ef"] <= b["ef"]
     strictly_better = (
-        (a["fvu"] < b["fvu"] - FVU_TOL) or (a["k"] < b["k"]) or (a["ef"] < b["ef"])
+        (a["selection_cost"] < b["selection_cost"])
+        or (a["fvu"] < b["fvu"] - FVU_TOL)
     )
-    return fvu_ok and k_ok and ef_ok and strictly_better
+    return cost_ok and fvu_ok and strictly_better
+
+
+# ---------------------------------------------------------------------------
+# Cost computation helpers
+# ---------------------------------------------------------------------------
+
+
+def _compute_candidate_cost(
+    parsed: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> float:
+    """Compute selection_cost for a candidate result."""
+    cfg = config or {}
+    arch = parsed.get("architecture") or cfg.get("architecture", "topk")
+    k = int(parsed.get("k") or cfg.get("k") or 128)
+    ef = int(parsed.get("expansion_factor") or cfg.get("expansion_factor") or 12)
+    d_in = _resolve_d_in(cfg)
+
+    extra_config = _extract_extra_config(cfg)
+    cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
+    if "error" not in cost:
+        return float(cost["total_accesses"])
+
+    # Fallback: rough estimate as d_in * N where N = d_in * ef
+    return float(d_in * d_in * ef)
+
+
+def _extract_extra_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract architecture-specific params from config for cost estimation."""
+    extra: dict[str, Any] = {}
+    for env_key, cfg_key in [
+        ("trunk_rank", "trunk_rank"),
+        ("num_codes", "num_codes"),
+        ("stage1_ratio", "stage1_ratio"),
+        ("factorized_hidden_dim", "factorized_hidden_dim"),
+        ("TRUNK_RANK", "trunk_rank"),
+        ("NUM_CODES", "num_codes"),
+        ("STAGE1_RATIO", "stage1_ratio"),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+    ]:
+        val = config.get(env_key)
+        if val is not None and val != "":
+            try:
+                extra[cfg_key] = float(val) if "." in str(val) else int(val)
+            except (ValueError, TypeError):
+                pass
+    return extra
+
+
+def _estimate_cost_from_entry(entry: dict[str, Any]) -> float:
+    """Estimate selection_cost from a legacy frontier entry without stored cost."""
+    cfg = entry.get("config", {})
+    arch = str(
+        entry.get("architecture")
+        or cfg.get("architecture")
+        or cfg.get("family_name")
+        or "topk"
+    ).lower()
+    k = int(entry.get("k") or cfg.get("k") or 128)
+    ef = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
+    d_in = _resolve_d_in(cfg)
+
+    extra_config = _extract_extra_config(cfg)
+    cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
+    if "error" not in cost:
+        return float(cost["total_accesses"])
+
+    return float(d_in * d_in * ef)
+
+
+def _resolve_d_in(config: dict[str, Any]) -> int:
+    """Resolve d_in from config, falling back to D_IN_DEFAULT."""
+    # Explicit d_in in config takes priority
+    d_in = config.get("d_in") or config.get("D_IN")
+    if d_in is not None:
+        try:
+            return int(d_in)
+        except (ValueError, TypeError):
+            pass
+    # Try hookpoint lookup
+    hookpoints = str(config.get("hookpoints") or config.get("HOOKPOINTS") or "")
+    if hookpoints in _HOOKPOINT_DIN:
+        return _HOOKPOINT_DIN[hookpoints]
+    return D_IN_DEFAULT
