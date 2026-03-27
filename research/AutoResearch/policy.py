@@ -36,6 +36,13 @@ _CORE_AXES = {
     "expansion_factor": "EXPANSION_FACTOR",
 }
 
+# Map ENV-style names to internal axis names (for primary_variable normalization)
+_PRIMARY_VARIABLE_ALIASES: dict[str, str] = {
+    env_key.lower(): axis for axis, env_key in _CORE_AXES.items()
+}
+# Also accept the env-key casing directly
+_PRIMARY_VARIABLE_ALIASES.update({env_key: axis for axis, env_key in _CORE_AXES.items()})
+
 
 # ---------------------------------------------------------------------------
 # Top-level validation
@@ -365,8 +372,11 @@ def _check_param_only_single_variable(
             f"当前同时改了 {', '.join(changed_axes)}"
         )
 
+    # Normalize primary_variable: accept both "expansion_factor" and "EXPANSION_FACTOR"
+    pv = _PRIMARY_VARIABLE_ALIASES.get(action.primary_variable, action.primary_variable)
+
     if not changed_axes:
-        if action.primary_variable in _CORE_AXES:
+        if pv in _CORE_AXES:
             return False, (
                 f"primary_variable={action.primary_variable}，"
                 "但和参考配方相比没有看到这个主轴发生变化"
@@ -374,14 +384,14 @@ def _check_param_only_single_variable(
         return True, ""
 
     changed_axis = changed_axes[0]
-    if action.primary_variable == "other_param":
+    if pv == "other_param":
         return False, (
             f"当前实际改动主轴是 {changed_axis}，"
             "primary_variable 不应写 other_param"
         )
-    if action.primary_variable != changed_axis:
+    if pv != changed_axis:
         return False, (
-            f"primary_variable={action.primary_variable}，"
+            f"primary_variable={action.primary_variable}（归一化为 {pv}），"
             f"但实际改动主轴是 {changed_axis}"
         )
 
@@ -389,7 +399,15 @@ def _check_param_only_single_variable(
 
 
 def _check_selection_cost(action: Action) -> tuple[bool, str]:
-    """拦截 encoder 选择成本超过 1.5×h×n 的配置。"""
+    """拦截 encoder 选择成本超过 1.5×h×n 的配置。
+
+    对 edit_sae_code 类型的 action 跳过 pre-check：代码修改可能正是为了降低成本，
+    用修改前的实现去估算成本会错误地拦截合理的降成本提案。
+    成本会在代码修改 + sanity check 之后重新评估。
+    """
+    if action.change_type == "edit_sae_code":
+        return True, ""
+
     cfg = action.effective_config()
     arch = cfg.get("ARCHITECTURE", "topk").lower()
     k = int(cfg.get("K", 128))
@@ -439,19 +457,32 @@ def _resolve_reference_config(
     action: Action,
     state: Any,  # StateManager
 ) -> dict[str, str]:
-    """给单变量校验选择一个清晰的参考配方。"""
-    family_name = (action.family_name or "").lower()
-    registry = state.load_compatibility_registry()
+    """给单变量校验选择一个清晰的参考配方。
 
+    规则：
+    1. 如果 action 的 family 就是当前主线 family → 用主线 snapshot（和 prompt 展示一致）
+    2. 如果 action 的 family 不同 → 尝试从 frontier 找同 family best entry
+    3. 都找不到 → fallback 到主线 snapshot
+    """
+    mainline = _resolve_mainline_snapshot(state)
+    action_family = (action.family_name or "").lower()
+    mainline_family = mainline["family_name"]
+
+    # If same family as mainline, use mainline config (matches what agent sees)
+    if action_family == mainline_family or not action_family:
+        return dict(mainline["config"])
+
+    # Different family: try to find its best frontier entry as reference
+    registry = state.load_compatibility_registry()
     family_best = _best_frontier_entry(
         state.frontier,
-        family_name=family_name,
+        family_name=action_family,
         registry=registry,
     )
     if family_best is not None:
         return _frontier_entry_to_env_config(family_best)
 
-    mainline = _resolve_mainline_snapshot(state)
+    # Fallback to mainline
     return dict(mainline["config"])
 
 

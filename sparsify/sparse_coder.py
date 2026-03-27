@@ -2361,8 +2361,47 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
         )
         self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
         self.code_router.bias.data.zero_()
+        self.factorized_hidden_dim = cfg.factorized_hidden_dim
+        if self.factorized_hidden_dim is not None:
+            self.encoder.weight.requires_grad_(False)
+            self.encoder.bias.requires_grad_(False)
+            self.residual_encoder.weight.requires_grad_(False)
+            self.residual_encoder.bias.requires_grad_(False)
+
+            self.stage1_factor_encoder = nn.Linear(
+                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+            )
+            self.stage1_factor_projector = nn.Linear(
+                self.factorized_hidden_dim,
+                self.num_latents,
+                device=device,
+                dtype=dtype,
+            )
+            self.stage2_factor_encoder = nn.Linear(
+                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+            )
+            self.stage2_factor_projector = nn.Linear(
+                self.factorized_hidden_dim,
+                self.num_latents,
+                device=device,
+                dtype=dtype,
+            )
+            self.stage1_factor_encoder.bias.data.zero_()
+            self.stage1_factor_projector.bias.data.zero_()
+            self.stage2_factor_encoder.bias.data.zero_()
+            self.stage2_factor_projector.bias.data.zero_()
 
     def _encoder_linear_layers(self):
+        if self.factorized_hidden_dim is not None:
+            return [
+                ("trunk_encoder", self.trunk_encoder),
+                ("trunk_decoder", self.trunk_decoder),
+                ("code_router", self.code_router),
+                ("stage1_factor_encoder", self.stage1_factor_encoder),
+                ("stage1_factor_projector", self.stage1_factor_projector),
+                ("stage2_factor_encoder", self.stage2_factor_encoder),
+                ("stage2_factor_projector", self.stage2_factor_projector),
+            ]
         return super()._encoder_linear_layers() + [("code_router", self.code_router)]
 
     def _extra_encode_accesses(self):
@@ -2374,6 +2413,24 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
         coarse = routing @ self.codebook
         return coarse, logits
 
+    def _encode_stage(
+        self,
+        residual: Tensor,
+        dense_encoder: nn.Linear,
+        factor_encoder: nn.Linear | None,
+        factor_projector: nn.Linear | None,
+        k: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        if factor_encoder is None or factor_projector is None:
+            return fused_encoder(
+                residual, dense_encoder.weight, dense_encoder.bias, k
+            )
+
+        hidden = F.relu(F.linear(residual, factor_encoder.weight, factor_encoder.bias))
+        acts = F.relu(F.linear(hidden, factor_projector.weight, factor_projector.bias))
+        top_acts, top_indices = torch.topk(acts, k, dim=-1, sorted=False)
+        return top_acts, top_indices, acts
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         trunk = self.trunk_decoder(self.trunk_encoder(x))
@@ -2381,16 +2438,21 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
         coarse, _ = self._project_codebook(residual)
         code_residual = residual - coarse
 
-        stage1_acts, stage1_indices, stage1_pre = fused_encoder(
-            code_residual, self.encoder.weight, self.encoder.bias, self.stage1_k
+        stage1_acts, stage1_indices, stage1_pre = self._encode_stage(
+            code_residual,
+            self.encoder,
+            getattr(self, "stage1_factor_encoder", None),
+            getattr(self, "stage1_factor_projector", None),
+            self.stage1_k,
         )
         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
 
         stage2_input = code_residual - stage1_out
-        stage2_acts, stage2_indices, stage2_pre = fused_encoder(
+        stage2_acts, stage2_indices, stage2_pre = self._encode_stage(
             stage2_input,
-            self.residual_encoder.weight,
-            self.residual_encoder.bias,
+            self.residual_encoder,
+            getattr(self, "stage2_factor_encoder", None),
+            getattr(self, "stage2_factor_projector", None),
             self.stage2_k,
         )
 
@@ -2409,16 +2471,21 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
         coarse, _ = self._project_codebook(residual)
         code_residual = residual - coarse
 
-        stage1_acts, stage1_indices, stage1_pre = fused_encoder(
-            code_residual, self.encoder.weight, self.encoder.bias, self.stage1_k
+        stage1_acts, stage1_indices, stage1_pre = self._encode_stage(
+            code_residual,
+            self.encoder,
+            getattr(self, "stage1_factor_encoder", None),
+            getattr(self, "stage1_factor_projector", None),
+            self.stage1_k,
         )
         stage1_out = self.decode_residual(stage1_acts, stage1_indices)
 
         stage2_input = code_residual - stage1_out
-        stage2_acts, stage2_indices, stage2_pre = fused_encoder(
+        stage2_acts, stage2_indices, stage2_pre = self._encode_stage(
             stage2_input,
-            self.residual_encoder.weight,
-            self.residual_encoder.bias,
+            self.residual_encoder,
+            getattr(self, "stage2_factor_encoder", None),
+            getattr(self, "stage2_factor_projector", None),
             self.stage2_k,
         )
         stage2_out = self.decode_residual(stage2_acts, stage2_indices)
