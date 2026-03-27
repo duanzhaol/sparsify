@@ -19,6 +19,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
+from .compatibility import is_compatible_label
 from .git_ops import REPO_ROOT
 from .types import Action, BASE_ENV_DEFAULTS
 
@@ -56,6 +57,14 @@ def validate_action(
 
     if action.change_type == "no_change":
         return action, "不允许 no_change；每一轮都必须提出可执行的实验或修复"
+
+    family_name = action.family_name or action.effective_config().get("ARCHITECTURE")
+    compat_label = state.family_compatibility_label(family_name)
+    if compat_label == "incompatible":
+        return action, (
+            f"family '{family_name}' 在 prior_research_history.md 中被标记为不兼容，"
+            "不能继续推进或占据 frontier"
+        )
 
     ok, msg = _check_param_only_single_variable(action, state)
     if not ok:
@@ -362,8 +371,13 @@ def _resolve_reference_config(
 ) -> dict[str, str]:
     """给单变量校验选择一个清晰的参考配方。"""
     family_name = (action.family_name or "").lower()
+    registry = state.load_compatibility_registry()
 
-    family_best = _best_frontier_entry(state.frontier, family_name=family_name)
+    family_best = _best_frontier_entry(
+        state.frontier,
+        family_name=family_name,
+        registry=registry,
+    )
     if family_best is not None:
         return _frontier_entry_to_env_config(family_best)
 
@@ -373,7 +387,8 @@ def _resolve_reference_config(
 
 def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
     """找到当前最像“主线”的 family 与配方。"""
-    best_entry = _best_frontier_entry(state.frontier)
+    registry = state.load_compatibility_registry()
+    best_entry = _best_frontier_entry(state.frontier, registry=registry)
     if best_entry is not None:
         config = _frontier_entry_to_env_config(best_entry)
         family_name = str(
@@ -387,7 +402,7 @@ def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
             "source": "frontier_best",
         }
 
-    active_family_name = _latest_active_family_name(state.families)
+    active_family_name = _latest_active_family_name(state.families, registry)
     config = dict(BASE_ENV_DEFAULTS)
     config["EXPANSION_FACTOR"] = "12"
     if active_family_name:
@@ -408,6 +423,7 @@ def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
 def _best_frontier_entry(
     frontier: dict[str, Any],
     family_name: str | None = None,
+    registry: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """按 FVU 选择最佳 frontier entry；可选按 family 过滤。"""
     best_entry: dict[str, Any] | None = None
@@ -418,14 +434,18 @@ def _best_frontier_entry(
         if not isinstance(entry, dict):
             continue
 
+        entry_family = str(
+            entry.get("config", {}).get("family_name")
+            or entry.get("architecture")
+            or ""
+        ).lower()
+
         if target_family:
-            entry_family = str(
-                entry.get("config", {}).get("family_name")
-                or entry.get("architecture")
-                or ""
-            ).lower()
             if entry_family != target_family:
                 continue
+
+        if registry is not None and not is_compatible_label(registry.get(entry_family)):
+            continue
 
         try:
             fvu = float(entry.get("fvu", float("inf")))
@@ -476,12 +496,17 @@ def _frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
     return config
 
 
-def _latest_active_family_name(families: dict[str, Any]) -> str | None:
+def _latest_active_family_name(
+    families: dict[str, Any],
+    registry: dict[str, str] | None = None,
+) -> str | None:
     """在没有 frontier 时，用最近活跃 family 作为主线参考。"""
     best_name: str | None = None
     best_round = -1
 
     for name, family in families.items():
+        if registry is not None and not is_compatible_label(registry.get(str(name).lower())):
+            continue
         if family.get("status") != "active":
             continue
         last_round = int(family.get("last_round") or -1)

@@ -16,6 +16,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .compatibility import (
+    compatibility_hard_rules,
+    extract_compatibility_digest,
+    extract_full_prior_document,
+    is_compatible_label,
+    summarize_registry_counts,
+)
 
 # ---------------------------------------------------------------------------
 # Constants — Hard constraints baked into prompt template
@@ -95,6 +102,7 @@ def section_hard_constraints() -> str:
         K_WHITELIST,
         EF_CONSTRAINT,
         SINGLE_VARIABLE_PRINCIPLE,
+        compatibility_hard_rules(),
     ])
 
 
@@ -123,7 +131,11 @@ def section_agent_state(
     )
 
 
-def section_frontier(frontier: dict[str, Any], limit: int = 10) -> str:
+def section_frontier(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    limit: int = 10,
+) -> str:
     """按 K 排序的训练代理 frontier，并区分 EF=12 主 regime 与其他历史参考。"""
     main: list[tuple[int, str]] = []
 
@@ -135,10 +147,11 @@ def section_frontier(frontier: dict[str, Any], limit: int = 10) -> str:
         fvu = entry.get("fvu", "?")
         arch = entry.get("architecture", "?")
         cfg = entry.get("config", {})
+        family_name = str(cfg.get("family_name") or arch).lower()
         lr = cfg.get("lr", "?")
         opt = cfg.get("optimizer", "?")
 
-        if ef == 12:
+        if ef == 12 and is_compatible_label(registry.get(family_name)):
             main.append((k, f"  k={k:>3d}  fvu={fvu:<12}  arch={arch}  lr={lr} opt={opt}"))
 
     main.sort()
@@ -153,20 +166,38 @@ def section_frontier(frontier: dict[str, Any], limit: int = 10) -> str:
     return "\n".join(parts)
 
 
-def section_recent_rounds(round_summaries: list[str]) -> str:
-    """最近几轮摘要，每轮一行。"""
+def section_recent_rounds(
+    round_summaries: list[dict[str, Any]],
+    registry: dict[str, str],
+) -> str:
+    """最近几轮兼容架构摘要，每轮一行。"""
     if not round_summaries:
         return ""
-    return f"最近几轮（{len(round_summaries)}）：\n" + "\n".join(
-        f"  {_normalize_ef_text(s)}" for s in round_summaries
-    )
+    compatible_lines: list[str] = []
+    for summary in round_summaries:
+        if not isinstance(summary, dict):
+            continue
+        family_name = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or ""
+        ).lower()
+        if family_name and not is_compatible_label(registry.get(family_name)):
+            continue
+        compatible_lines.append(f"  {_normalize_ef_text(_trim_round_summary(summary))}")
+    if not compatible_lines:
+        return "最近几轮（兼容架构）：\n  （最近没有兼容 family 的新结果）"
+    return f"最近几轮（兼容架构，{len(compatible_lines)}）：\n" + "\n".join(compatible_lines)
 
 
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
     """只保留战术性 hint，过滤掉已经固化到模板里的 K/EF 硬约束。"""
     tactical = []
     for hint in hints:
-        text = hint.get("text", "")
+        text = str(hint.get("text") or hint.get("message") or "").strip()
+        if not text:
+            continue
         if any(text.startswith(p) for p in _HARD_CONSTRAINT_HINT_PREFIXES):
             continue
         tactical.append(text)
@@ -179,6 +210,12 @@ def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def section_compatibility_status(registry: dict[str, str]) -> str:
+    if not registry:
+        return ""
+    return summarize_registry_counts(registry)
+
+
 # ---------------------------------------------------------------------------
 # Layer 3: Rolling Memory
 # ---------------------------------------------------------------------------
@@ -187,6 +224,7 @@ def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
 def section_memory_brief(
     memory: dict[str, Any],
     frontier: dict[str, Any],
+    registry: dict[str, str],
     recent_round_limit: int = 10,
 ) -> str:
     """精简记忆：只保留 frontier 家族、最近测试家族与近期失败。"""
@@ -198,13 +236,13 @@ def section_memory_brief(
         if isinstance(entry, dict):
             cfg = entry.get("config", {})
             fn = cfg.get("family_name", entry.get("architecture", ""))
-            if fn:
+            if fn and is_compatible_label(registry.get(fn.lower())):
                 frontier_families.add(fn.lower())
 
     recent_families: set[str] = set()
     for rr in memory.get("recent_rounds", [])[-recent_round_limit:]:
         fn = rr.get("family_name", "")
-        if fn:
+        if fn and is_compatible_label(registry.get(fn.lower())):
             recent_families.add(fn.lower())
 
     show = frontier_families | recent_families
@@ -241,6 +279,15 @@ def section_memory_brief(
                         f"  r{f.get('round','?')} {f.get('family_name','?')} "
                         f"{f.get('error_type','')}: {_truncate(str(f.get('error_summary','')), 80)}"
                     )
+
+    filtered_count = sum(
+        1
+        for name in memory.get("architecture_families", {})
+        if not is_compatible_label(registry.get(str(name).lower()))
+    )
+    if filtered_count:
+        parts.append("")
+        parts.append(f"已从运行时决策上下文中过滤 {filtered_count} 个不兼容 family。")
 
     return "\n".join(parts)
 
@@ -280,35 +327,19 @@ def section_operator_guide_digest(guide_text: str, max_chars: int = 3000) -> str
     return f"Operator guide 摘要：\n{truncated}"
 
 
-def section_prior_research_digest(prior_text: str, max_chars: int = 2000) -> str:
-    """从 prior_research_history.md 中提取 1/2 关键段落。"""
+def section_prior_research_digest(prior_text: str) -> str:
+    """兼容性摘要：不再只截取 ##1/##2。"""
     if not prior_text:
         return ""
+    digest = extract_compatibility_digest(prior_text) or prior_text
+    return f"历史研究关键结论：\n{_normalize_ef_text(digest)}"
 
-    lines = prior_text.split("\n")
-    extracted: list[str] = []
-    in_section = False
-    section_depth = 0
 
-    for line in lines:
-        if line.startswith("## 1.") or line.startswith("## 2."):
-            in_section = True
-            section_depth = 2
-        elif in_section and line.startswith("## ") and section_depth == 2:
-            in_section = False
-
-        if in_section:
-            extracted.append(line)
-
-    if extracted:
-        text = "\n".join(extracted)
-        text = _normalize_ef_text(text)
-        if len(text) > max_chars:
-            text = text[:max_chars - 20] + "\n[truncated]"
-        return f"历史研究关键结论：\n{text}"
-
-    truncated = _normalize_ef_text(prior_text[:max_chars - 20]) + "\n[truncated]"
-    return f"历史研究摘要：\n{truncated}"
+def section_prior_research_full(prior_text: str) -> str:
+    """Fresh session must receive the full prior document."""
+    if not prior_text:
+        return ""
+    return f"完整历史研究文档：\n{_normalize_ef_text(extract_full_prior_document(prior_text))}"
 
 
 def section_architecture_checklist(
@@ -337,29 +368,36 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
     """四层结构的完整 proposal prompt。"""
     sections: list[str] = []
 
+    registry = state.load_compatibility_registry()
+
     # Layer 1
     sections.append(section_hard_constraints())
 
     # Layer 2
     sections.append(section_policy_guidance(policy_guidance))
+    sections.append(section_compatibility_status(registry))
     sections.append(section_agent_state(
         state.round_index, state.consecutive_crashes,
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
-    sections.append(section_frontier(state.frontier))
+    sections.append(section_frontier(state.frontier, registry))
     sections.append(section_recent_rounds(
-        state.recent_round_summaries_trimmed(limit=5),
+        state.recent_round_summaries(limit=5),
+        registry,
     ))
     sections.append(section_tactical_hints(state.get_pending_hints()[:8]))
 
     # Layer 3
-    sections.append(section_memory_brief(state.memory, state.frontier))
+    sections.append(section_memory_brief(state.memory, state.frontier, registry))
 
     # Layer 4
     sections.append(section_operator_guide_digest(
         state.load_operator_guide_excerpt(),
     ))
     sections.append(section_prior_research_digest(
+        state.load_prior_research(),
+    ))
+    sections.append(section_prior_research_full(
         state.load_prior_research(),
     ))
 
@@ -375,20 +413,28 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     """用于 session resume 的轻量增量 prompt。"""
     sections: list[str] = []
 
+    registry = state.load_compatibility_registry()
+
     sections.append(f"继续 LUTurbo 研究会话。当前轮次：Round {round_id}。")
     sections.append("返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。")
     sections.append(HARD_CONSTRAINT_REMINDER)
+    sections.append(compatibility_hard_rules())
 
     sections.append(section_policy_guidance(policy_guidance))
+    sections.append(section_compatibility_status(registry))
     sections.append(section_agent_state(
         state.round_index, state.consecutive_crashes,
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
-    sections.append(section_frontier(state.frontier, limit=8))
+    sections.append(section_frontier(state.frontier, registry, limit=8))
     sections.append(section_recent_rounds(
-        state.recent_round_summaries_trimmed(limit=2),
+        state.recent_round_summaries(limit=4),
+        registry,
     ))
     sections.append(section_tactical_hints(state.get_pending_hints()[:4]))
+    sections.append(section_prior_research_digest(
+        state.load_prior_research(),
+    ))
 
     # Open hypotheses
     hypotheses = state.memory.get("next_hypotheses", [])[:5]
@@ -515,6 +561,22 @@ def summarize_results(rows: list[dict[str, str]]) -> list[str]:
         desc_part = f" | {desc[:60]}" if desc else ""
         lines.append(f"{eid} {arch} k{k} {dec}{fvu_part}{desc_part}")
     return lines
+
+
+def _trim_round_summary(summary: dict[str, Any]) -> str:
+    action = summary.get("action", {})
+    result = summary.get("result", {})
+    round_id = summary.get("round", "?")
+    family_name = summary.get("family_name", "?")
+    change_type = action.get("change_type", "?")
+    decision = result.get("decision", "?")
+    fvu = result.get("val_fvu")
+    duration = summary.get("duration_sec")
+    hypothesis = _truncate(str(action.get("hypothesis") or ""), 80)
+    fvu_part = f" fvu={fvu}" if fvu not in (None, "") else ""
+    dur_part = f" {duration}s" if duration not in (None, "") else ""
+    hyp_part = f" | {hypothesis}" if hypothesis else ""
+    return f"r{round_id} {family_name} {change_type} -> {decision}{fvu_part}{dur_part}{hyp_part}"
 
 
 def _truncate(s: str, limit: int) -> str:

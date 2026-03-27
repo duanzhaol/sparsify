@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .compatibility import parse_compatibility_registry
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -396,6 +397,15 @@ class StateManager:
         if not PRIOR_RESEARCH_PATH.exists():
             return ""
         return PRIOR_RESEARCH_PATH.read_text().strip()
+
+    def load_compatibility_registry(self) -> dict[str, str]:
+        """Parse compatibility labels from prior_research_history.md."""
+        return parse_compatibility_registry(self.load_prior_research())
+
+    def family_compatibility_label(self, family_name: str | None) -> str:
+        if not family_name:
+            return "unknown"
+        return self.load_compatibility_registry().get(str(family_name).lower(), "unknown")
 
     # -----------------------------------------------------------------------
     # Directory initialization
