@@ -213,15 +213,24 @@ class SparseCoder(nn.Module):
         """
         return []
 
+    def _deployment_lookup_accesses(self, n_output: int) -> list[tuple[str, int, str]]:
+        """Return deployment-side memory accesses for LUTurbo lookup phase.
+
+        These represent the cost of producing W @ x_hat via lookup tables:
+        for each static vector library, count × n_output accesses.
+        Override in subclasses that add trunk / codebook / extra libraries.
+        """
+        return [("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}")]
+
     def selection_cost_estimate(self, n_output: int | None = None) -> dict:
-        """Estimate encoder-side memory accesses for LUTurbo deployment.
+        """Estimate encoder-side and deployment-side memory accesses.
 
         Args:
             n_output: output dim of original weight matrix. Default 4*d_in.
 
         Returns:
-            dict with total_accesses, original_matmul_accesses, ratio,
-            budget_ratio, feasible, breakdown.
+            dict with encoder cost (total_accesses, ratio, etc.) and
+            deployment cost (deployment_accesses, deployment_ratio, etc.).
         """
         if n_output is None:
             n_output = 4 * self.d_in
@@ -244,6 +253,15 @@ class SparseCoder(nn.Module):
 
         ratio = total / original if original > 0 else float("inf")
         budget_ratio = total / budget if budget > 0 else float("inf")
+
+        # Deployment-side lookup cost
+        deploy_breakdown = []
+        deploy_total = 0
+        for name, acc, shape in self._deployment_lookup_accesses(n_output):
+            deploy_breakdown.append({"name": name, "accesses": acc, "shape": shape})
+            deploy_total += acc
+        deploy_ratio = deploy_total / original if original > 0 else float("inf")
+
         return {
             "total_accesses": total,
             "original_matmul_accesses": original,
@@ -251,6 +269,9 @@ class SparseCoder(nn.Module):
             "budget_ratio": round(budget_ratio, 2),
             "feasible": budget_ratio <= 1.0,
             "breakdown": breakdown,
+            "deployment_accesses": deploy_total,
+            "deployment_ratio": round(deploy_ratio, 2),
+            "deployment_breakdown": deploy_breakdown,
         }
 
     def encode(self, x: Tensor) -> EncoderOutput:
@@ -656,6 +677,10 @@ class CodebookTopKSparseCoder(SparseCoder):
     def _extra_encode_accesses(self):
         return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
         code_indices = logits.argmax(dim=-1)
@@ -765,6 +790,10 @@ class ResidualVQSparseCoder(SparseCoder):
     def _extra_encode_accesses(self):
         return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
         code_indices = logits.argmax(dim=-1)
@@ -859,6 +888,10 @@ class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
             ("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}"),
             ("second_codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}"),
         ]
+
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return base + [("codebook2_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")]
 
     def _select_code_from(
         self, x: Tensor, router: nn.Linear, codebook: Tensor
@@ -1175,6 +1208,11 @@ class LowRankResidualSparseCoder(SparseCoder):
 
     def _encoder_linear_layers(self):
         return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("encoder", self.encoder)]
+
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        r = self.trunk_encoder.out_features
+        return [("trunk_deploy", r * n_output, f"r={r}×n={n_output}")] + base
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -1767,6 +1805,10 @@ class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
     def _extra_encode_accesses(self):
         return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
 
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+
     def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
         code_indices = logits.argmax(dim=-1)
@@ -1999,6 +2041,11 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
     def _encoder_linear_layers(self):
         return [("trunk_encoder", self.trunk_encoder), ("trunk_decoder", self.trunk_decoder), ("factor_encoder", self.factor_encoder), ("encoder", self.encoder)]
 
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        r = self.trunk_encoder.out_features
+        return [("trunk_deploy", r * n_output, f"r={r}×n={n_output}")] + base
+
     def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
         return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
@@ -2085,6 +2132,10 @@ class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
 
     def _extra_encode_accesses(self):
         return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
+
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -2406,6 +2457,10 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
 
     def _extra_encode_accesses(self):
         return [("codebook_matmul", self.num_codes * self.d_in, f"{self.num_codes}x{self.d_in}")]
+
+    def _deployment_lookup_accesses(self, n_output):
+        base = super()._deployment_lookup_accesses(n_output)
+        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)

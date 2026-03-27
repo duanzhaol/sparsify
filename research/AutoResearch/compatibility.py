@@ -89,9 +89,10 @@ def compatibility_hard_rules() -> str:
         "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
         "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
         "5. 选择成本硬约束：encoder 选择成本不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
-        "   超过此阈值的配置将被 policy 拦截。降低选择成本的手段包括：",
-        "   减小 EXPANSION_FACTOR / K / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "   超过此阈值的配置将被 policy 拦截。降低 encoder 选择成本的手段包括：",
+        "   减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
         "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
+        "   注意：K 不影响 encoder 选择成本，但影响部署查表成本（K×n 访存）。",
     ])
 
 

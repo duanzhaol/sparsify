@@ -156,7 +156,8 @@ def update_frontier(
 
     k = parsed.get("k")
     ef = parsed.get("expansion_factor")
-    sel_cost = _compute_candidate_cost(parsed, config)
+    full_cost = _compute_candidate_cost_full(parsed, config)
+    sel_cost = float(full_cost["total_accesses"])
 
     key = frontier_key(round_id or "unknown")
     frontier[key] = {
@@ -169,6 +170,8 @@ def update_frontier(
         "config": config,
         "checkpoint": parsed.get("checkpoint"),
         "peak_memory_gb": parsed.get("peak_memory_gb"),
+        "deployment_accesses": full_cost.get("deployment_accesses"),
+        "deployment_ratio": full_cost.get("deployment_ratio"),
     }
 
     # Remove points dominated by the new entry
@@ -245,11 +248,11 @@ def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _compute_candidate_cost(
+def _compute_candidate_cost_full(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
-) -> float:
-    """Compute selection_cost for a candidate result."""
+) -> dict[str, Any]:
+    """Compute full cost dict (encoder + deployment) for a candidate result."""
     cfg = config or {}
     arch = parsed.get("architecture") or cfg.get("architecture", "topk")
     k = int(parsed.get("k") or cfg.get("k") or 128)
@@ -259,10 +262,20 @@ def _compute_candidate_cost(
     extra_config = _extract_extra_config(cfg)
     cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
     if "error" not in cost:
-        return float(cost["total_accesses"])
+        return cost
 
-    # Fallback: rough estimate as d_in * N where N = d_in * ef
-    return float(d_in * d_in * ef)
+    # Fallback: rough estimate
+    fallback = float(d_in * d_in * ef)
+    return {"total_accesses": fallback, "error": "fallback"}
+
+
+def _compute_candidate_cost(
+    parsed: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> float:
+    """Compute selection_cost for a candidate result."""
+    cost = _compute_candidate_cost_full(parsed, config)
+    return float(cost["total_accesses"])
 
 
 def _extract_extra_config(config: dict[str, Any]) -> dict[str, Any]:

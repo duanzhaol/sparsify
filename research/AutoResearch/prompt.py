@@ -51,8 +51,9 @@ PROXY_OBJECTIVE = """\
 - 用尽可能少的 encoder 选择访存量达到尽可能低的 FVU
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
-- 注意：K 对大多数架构的选择成本没有影响（成本由 encoder 矩阵大小决定）
-- 降低成本的主要手段是降低 EXPANSION_FACTOR（成本近似正比于 EF）
+- 成本有两个独立维度：encoder 选择成本（由 EF 主导）和部署查表成本（由 K、trunk_rank、NUM_CODES 主导）
+- K 不影响 encoder 选择成本，但每增加 K 就多 K×n 次查表访存（K=128 约 +12% 原始 matmul）
+- 降低 encoder 选择成本主要靠降低 EXPANSION_FACTOR
 - 不同架构在相同 EF 下的成本差异很大（见成本速查表）"""
 
 EXECUTION_LAYER = """\
@@ -157,16 +158,23 @@ def section_frontier(
 
         # Use stored selection_cost or compute it
         sel_cost = entry.get("selection_cost")
+        deploy_ratio = entry.get("deployment_ratio")
+        extra_config = _extract_cost_params(cfg)
+        extra_key = "|".join(f"{ck}={cv}" for ck, cv in sorted(extra_config.items())) if extra_config else ""
+        cost_key = f"{arch}|{k}|{ef}|{extra_key}"
+
         if sel_cost is None:
-            cost_key = f"{arch}|{k}|{ef}"
             if cost_key not in cost_cache:
                 cost_cache[cost_key] = compute_selection_cost(
                     str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
+                    extra_config=extra_config or None,
                 )
             cost = cost_cache[cost_key]
             if "error" not in cost:
                 sel_cost = cost["total_accesses"]
                 ratio = cost.get("ratio", "?")
+                if deploy_ratio is None:
+                    deploy_ratio = cost.get("deployment_ratio", "?")
             else:
                 sel_cost = 0
                 ratio = "?"
@@ -175,12 +183,24 @@ def section_frontier(
             n_out = 4 * d_in
             original = d_in * n_out
             ratio = round(sel_cost / original, 2) if original > 0 else "?"
+            # Compute deployment_ratio if not stored
+            if deploy_ratio is None and cost_key not in cost_cache:
+                cost_cache[cost_key] = compute_selection_cost(
+                    str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
+                    extra_config=extra_config or None,
+                )
+            if deploy_ratio is None:
+                cached = cost_cache.get(cost_key)
+                if cached and "error" not in cached:
+                    deploy_ratio = cached.get("deployment_ratio", "?")
+                else:
+                    deploy_ratio = "?"
 
         feasible = isinstance(ratio, (int, float)) and ratio <= 1.5
         tag = " [FEASIBLE]" if feasible else " [OVER BUDGET]"
         entries.append((
             float(sel_cost),
-            f"  cost={ratio}x  fvu={fvu:<12}  arch={arch}  K={k} EF={ef}  lr={lr} opt={opt}{tag}",
+            f"  sel={ratio}x  deploy={deploy_ratio}x  fvu={fvu:<12}  arch={arch}  K={k} EF={ef}  lr={lr} opt={opt}{tag}",
             feasible,
         ))
 
@@ -249,6 +269,20 @@ def section_selection_cost_status(
         else:
             breakdown_strs.append(f"{item['name']} {acc}")
     parts.append(f"    分解: {' + '.join(breakdown_strs)}")
+
+    deploy_strs = []
+    for item in cost.get("deployment_breakdown", []):
+        acc = item["accesses"]
+        if acc >= 1_000_000:
+            deploy_strs.append(f"{item['name']} {acc / 1_000_000:.1f}M")
+        elif acc >= 1_000:
+            deploy_strs.append(f"{item['name']} {acc / 1_000:.0f}K")
+        else:
+            deploy_strs.append(f"{item['name']} {acc}")
+    if deploy_strs:
+        deploy_ratio = cost.get("deployment_ratio", "?")
+        parts.append(f"    部署查表成本: {' + '.join(deploy_strs)} = {deploy_ratio}x 原始矩阵")
+
     parts.append(
         "  降低成本可调参数: TRUNK_RANK, NUM_CODES, STAGE1_RATIO, FACTORIZED_HIDDEN_DIM"
     )
@@ -290,12 +324,12 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
         rows.append(row)
 
     parts = [
-        "成本可行性速查表（ratio ≤ 1.5x 且标 + = 可行, 标 - = 超预算）：",
+        "encoder 选择成本可行性速查表（ratio ≤ 1.5x 且标 + = 可行, 标 - = 超预算）：",
         f"  {header}",
     ]
     for row in rows:
         parts.append(f"  {row}")
-    parts.append("  注意：K 对选择成本几乎没有影响（成本由 encoder 矩阵决定，不依赖 K）。")
+    parts.append("  注意：以上为 encoder 选择成本（不依赖 K）。部署时还需查表成本 K×n（K=32 约 +3%，K=128 约 +12%）。")
 
     return "\n".join(parts)
 
