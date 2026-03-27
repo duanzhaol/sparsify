@@ -1,0 +1,175 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_two_stage_soft_codebook_residual"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"}],"expected_win":"confirm_baseline","experiment_tier":"full","family_name":"lowrank_two_stage_soft_codebook_residual","family_stage":"mainline","hypothesis":"最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) b_j。low-rank trunk、soft codebook、两阶段 residual 都是静态向量库上的有限加权和，因此可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路；该 family 属于扩展兼容。Round 114 在成本可行的 EF=2 regime 下把 signum 学习率从 2.4e-3 提到 3.0e-3 后，将 frontier 从 FVU 0.05914 改进到 0.05811，且总时长从前两次 EF=2 运行的 445s/307s 降到 290s，没有出现明显运行代价恶化。本轮只回答一个问题：这个更优的低成本主线点是否可复现，因此应在完全相同的 `ARCHITECTURE=lowrank_two_stage_soft_codebook_residual, K=128, EXPANSION_FACTOR=2, OPTIMIZER=signum, LR=3.0e-3` 配方上补一次 clean baseline。","needs_sanity":false,"next_hypotheses":["如果 `LR=3.0e-3` 复现出接近 `FVU≈0.0581` 的终点且曲线继续健康下降，则将其定为 EF=2 主线 signum 锚点，再考虑是否继续做单变量 LR 微调。","如果复现明显回退到接近 `0.0591` 或曲线形状变差，则把 `LR=3.0e-3` 视为不稳定候选，回退到 `LR=2.4e-3` 作为稳态锚点。","在这个复现问题解决前，不切换 optimizer，不改 K，也不改任何额外成本轴。"],"notes_to_memory":["兼容性判断：`lowrank_two_stage_soft_codebook_residual` 为扩展兼容；导出形式仍是 trunk 库 + codebook 库 + residual 字典库的有限加权和。","EF=2 已满足选择成本硬约束，当前 frontier 可行点为 cost≈1.25x、FVU≈0.05811。","本轮严格遵守单变量原则；虽然 env_overrides 不变，但主问题是 `clean_baseline` 复现，而不是继续同时改变 LR 或其他轴。重点继续检查曲线形状、`tokens_per_sec`、总耗时和 `final_total_tokens`。"],"primary_variable":"clean_baseline","self_review":"这符合当前主线顺序。EF 已确认可行，clean baseline 已对 `LR=2.4e-3` 做过，Round 114 又给出了更优的 `LR=3.0e-3` 候选，因此现在最小且可归因的动作是复现该新候选，而不是继续上探学习率或过早切换优化器。没有引入第二个变量，结论最干净。","summary":"复现当前更优的低成本主线配方 `lowrank_two_stage_soft_codebook_residual / EF=2 / K=128 / signum / LR=3.0e-3`，确认它是否是稳定的新 frontier 点，而不是一次性波动。","touched_files":[]}
+
+--- STDERR ---
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d30aa-2de3-7763-b72c-02970c0fabe2
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 115。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。Frontier 基于 (selection_cost, FVU) 2D Pareto front。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+5. 选择成本硬约束：encoder 选择成本不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。降低选择成本的手段包括：
+   减小 EXPANSION_FACTOR / K / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 115 策略模式：主线推进
+原因：当前没有连续 crash，主线仍应继续推进。
+当前主线 family：lowrank_two_stage_soft_codebook_residual
+当前主线参考配方：ARCHITECTURE=lowrank_two_stage_soft_codebook_residual K=128 EXPANSION_FACTOR=2 OPTIMIZER=signum LR=3.0e-3
+本轮要求：
+1. 默认继续围绕同一个 family 推进，不要新开 family。
+2. 推荐顺序：先确认 EF 在成本预算内（≤1.5x），再补 clean baseline，再调学习率，再换优化器，再看 loss/preprocess，最后才动 K。
+   注意：K 对选择成本几乎没有影响；降低成本主要靠降低 EXPANSION_FACTOR。
+3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+4. 每轮只回答一个问题。
+
+选择成本硬约束：encoder 选择成本不得超过 1.5×h×n，超过将被拦截。
+降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=114, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=2
+
+训练代理 frontier（2D Pareto: selection_cost vs FVU）：
+  cost=1.25x  fvu=0.058106470853090286  arch=lowrank_two_stage_soft_codebook_residual  K=128 EF=2  lr=3.0e-3 opt=signum [FEASIBLE]
+  cost=6.25x  fvu=0.04880391061306  arch=lowrank_two_stage_soft_codebook_residual  K=128 EF=12  lr=2.4e-3 opt=signum [OVER BUDGET]
+
+选择成本状态：
+  当前最优 lowrank_two_stage_soft_codebook_residual (K=128, EF=12):
+    encoder 成本: 6.25x 原始矩阵 | 预算比率: 4.17x (需 ≤1.0x, 即 ≤1.5×h×n)
+    分解: trunk_encoder 262K + trunk_decoder 262K + encoder 12.6M + residual_encoder 12.6M + code_router 262K + codebook_matmul 262K
+  降低成本可调参数: TRUNK_RANK, NUM_CODES, STAGE1_RATIO, FACTORIZED_HIDDEN_DIM
+
+成本可行性速查表（ratio ≤ 1.5x 且标 + = 可行, 标 - = 超预算）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：K 对选择成本几乎没有影响（成本由 encoder 矩阵决定，不依赖 K）。
+
+最近几轮（兼容架构，4）：
+  r111 lowrank_asymmetric_two_stage_soft_codebook_residual architecture -> discard fvu=0.051018886268138885 667s | After five consecutive non-improving mainline rounds, the single highest-valu...
+  r112 lowrank_two_stage_soft_codebook_residual param_only -> keep fvu=0.05914120748639107 445s | 最终重构公式为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) ...
+  r113 lowrank_two_stage_soft_codebook_residual param_only -> archive fvu=0.05914120748639107 307s | 最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2...
+  r114 lowrank_two_stage_soft_codebook_residual param_only -> keep fvu=0.058106470853090286 290s | 最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2...
+
+操作提示：
+  1. 最近多轮训练耗时明显上升。做决策时必须同时关注效果和运行代价，不要只看最终 FVU。每轮都要检查 tokens_per_sec、总耗时、final_total_tokens，以及性能下降
+  是来自训练更长、吞吐变慢，还是某个 recipe（如 hadamard）本身更贵。若新 recipe 只带来很小 FVU 改善但显著拖慢训练，应明确把它视为负面信号，并优先验证是否值得继续。
+
+历史研究关键结论：
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`selection_cost + K×h + K×n + p×h×n < h×n`
+
+其中 `selection_cost` 是 encoder 端的内存访问量，即为每个 token 决定使用哪些向量和对应系数所需的计算。
+
+**AutoResearch 硬约束：selection_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。这个阈值允许一定余量（选择过程可以比原始 matmul 稍贵，因为查表端有对应的节省），但不能无限制增长。
+
+当前各架构的典型 selection_cost / (h×n) 比率：
+
+| 架构 | 比率 | 是否通过 (≤1.5x) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：选择成本不只由架构决定，还取决于 EF、K、TRUNK_RANK、NUM_CODES 等参数。降低这些参数可以把同一架构的成本降到阈值以下。
+
+降低 selection_cost 的已知方向：
+
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `K`（减少稀疏预算，间接减少两阶段架构的 encoder 量）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+每个 SparseCoder 子类现在都实现了 `selection_cost_estimate()` 方法，能精确报告其 encoder 端开销。AutoResearch prompt 中已展示此信息。
+
+---
+
+当前开放假设：
+  - 如果 `LR=3.0e-3` 改善终点或明显加快早中期下降且运行代价未恶化，则将其作为新的 signum 主线学习率候选并考虑一次复现确认。
+  - 如果 `LR=3.0e-3` 出现震荡、退化或吞吐/总时长明显变差，则关闭向上 LR 分支，保留 `LR=2.4e-3` 作为 EF=2 主线锚点。
+  - 在 LR 轴结论明确前，不切换 optimizer、不改 K，也不改其他成本相关结构参数。
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_two_stage_soft_codebook_residual"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"}],"expected_win":"confirm_baseline","experiment_tier":"full","family_name":"lowrank_two_stage_soft_codebook_residual","family_stage":"mainline","hypothesis":"最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) b_j。low-rank trunk、soft codebook、两阶段 residual 都是静态向量库上的有限加权和，因此可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路；该 family 属于扩展兼容。Round 114 在成本可行的 EF=2 regime 下把 signum 学习率从 2.4e-3 提到 3.0e-3 后，将 frontier 从 FVU 0.05914 改进到 0.05811，且总时长从前两次 EF=2 运行的 445s/307s 降到 290s，没有出现明显运行代价恶化。本轮只回答一个问题：这个更优的低成本主线点是否可复现，因此应在完全相同的 `ARCHITECTURE=lowrank_two_stage_soft_codebook_residual, K=128, EXPANSION_FACTOR=2, OPTIMIZER=signum, LR=3.0e-3` 配方上补一次 clean baseline。","needs_sanity":false,"next_hypotheses":["如果 `LR=3.0e-3` 复现出接近 `FVU≈0.0581` 的终点且曲线继续健康下降，则将其定为 EF=2 主线 signum 锚点，再考虑是否继续做单变量 LR 微调。","如果复现明显回退到接近 `0.0591` 或曲线形状变差，则把 `LR=3.0e-3` 视为不稳定候选，回退到 `LR=2.4e-3` 作为稳态锚点。","在这个复现问题解决前，不切换 optimizer，不改 K，也不改任何额外成本轴。"],"notes_to_memory":["兼容性判断：`lowrank_two_stage_soft_codebook_residual` 为扩展兼容；导出形式仍是 trunk 库 + codebook 库 + residual 字典库的有限加权和。","EF=2 已满足选择成本硬约束，当前 frontier 可行点为 cost≈1.25x、FVU≈0.05811。","本轮严格遵守单变量原则；虽然 env_overrides 不变，但主问题是 `clean_baseline` 复现，而不是继续同时改变 LR 或其他轴。重点继续检查曲线形状、`tokens_per_sec`、总耗时和 `final_total_tokens`。"],"primary_variable":"clean_baseline","self_review":"这符合当前主线顺序。EF 已确认可行，clean baseline 已对 `LR=2.4e-3` 做过，Round 114 又给出了更优的 `LR=3.0e-3` 候选，因此现在最小且可归因的动作是复现该新候选，而不是继续上探学习率或过早切换优化器。没有引入第二个变量，结论最干净。","summary":"复现当前更优的低成本主线配方 `lowrank_two_stage_soft_codebook_residual / EF=2 / K=128 / signum / LR=3.0e-3`，确认它是否是稳定的新 frontier 点，而不是一次性波动。","touched_files":[]}
+tokens used
+94,869
