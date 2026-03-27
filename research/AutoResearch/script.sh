@@ -1,0 +1,1 @@
+python -m research.AutoResearch --rounds 500 --budget-hours 24 --session-mode resume-session --reset-failure-counters --initial-max-tokens 50000000 --continuation-step-tokens 10000000 --continuation-max-tokens 100000000 --continuation-min-fvu-drop 0.002
