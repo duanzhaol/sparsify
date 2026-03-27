@@ -10,7 +10,7 @@
 - mainline: 默认模式，围绕当前主线 family 推进
 - architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
 
-这里刻意不做“恢复到默认主线”的强制回退。
+这里刻意不做"恢复到默认主线"的强制回退。
 如果新架构写坏了，应该通过 repair loop 修代码，而不是用 policy 逃避问题。
 """
 
@@ -472,12 +472,13 @@ def _resolve_reference_config(
     if action_family == mainline_family or not action_family:
         return dict(mainline["config"])
 
-    # Different family: try to find its best frontier entry as reference
+    # Different family: try to find its best feasible frontier entry as reference
     registry = state.load_compatibility_registry()
     family_best = _best_frontier_entry(
         state.frontier,
         family_name=action_family,
         registry=registry,
+        prefer_feasible=True,
     )
     if family_best is not None:
         return _frontier_entry_to_env_config(family_best)
@@ -487,9 +488,15 @@ def _resolve_reference_config(
 
 
 def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
-    """找到当前最像“主线”的 family 与配方。"""
+    """找到当前最像主线的 family 与配方。
+
+    优先选成本可行的 frontier entry，这样 reference config 反映的是
+    agent 应该在其上继续改进的基准，而不是不可行的历史最优。
+    """
     registry = state.load_compatibility_registry()
-    best_entry = _best_frontier_entry(state.frontier, registry=registry)
+    best_entry = _best_frontier_entry(
+        state.frontier, registry=registry, prefer_feasible=True,
+    )
     if best_entry is not None:
         config = _frontier_entry_to_env_config(best_entry)
         family_name = str(
@@ -525,12 +532,32 @@ def _best_frontier_entry(
     frontier: dict[str, Any],
     family_name: str | None = None,
     registry: dict[str, str] | None = None,
+    prefer_feasible: bool = False,
+    d_in: int = 1024,
 ) -> dict[str, Any] | None:
-    """按 FVU 选择最佳 frontier entry；可选按 family 过滤。"""
-    best_entry: dict[str, Any] | None = None
-    best_fvu = float("inf")
+    """按 FVU 选择最佳 frontier entry；可选按 family 过滤。
+
+    当 prefer_feasible=True 时，优先从成本可行的条目中选择；
+    仅当没有可行条目时才 fallback 到全部条目。
+    """
+    budget = 1.5 * d_in * 4 * d_in  # 1.5 × h × n
+
+    def _pick_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+        best, best_fvu = None, float("inf")
+        for e in entries:
+            try:
+                fvu = float(e.get("fvu", float("inf")))
+            except (TypeError, ValueError):
+                continue
+            if fvu < best_fvu:
+                best_fvu = fvu
+                best = e
+        return best
 
     target_family = (family_name or "").lower()
+    feasible: list[dict[str, Any]] = []
+    all_candidates: list[dict[str, Any]] = []
+
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
@@ -548,16 +575,16 @@ def _best_frontier_entry(
         if registry is not None and not is_compatible_label(registry.get(entry_family)):
             continue
 
-        try:
-            fvu = float(entry.get("fvu", float("inf")))
-        except (TypeError, ValueError):
-            continue
+        all_candidates.append(entry)
 
-        if fvu < best_fvu:
-            best_fvu = fvu
-            best_entry = entry
+        if prefer_feasible:
+            sel_cost = entry.get("selection_cost")
+            if sel_cost is not None and float(sel_cost) <= budget:
+                feasible.append(entry)
 
-    return best_entry
+    if prefer_feasible and feasible:
+        return _pick_best(feasible)
+    return _pick_best(all_candidates)
 
 
 def _frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
