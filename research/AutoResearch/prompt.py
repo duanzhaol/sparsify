@@ -60,16 +60,18 @@ PROXY_OBJECTIVE = """\
 - 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
 - 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
 - 用尽可能低的 total_cost 达到尽可能低的 FVU
-- 当前阶段优先补足低成本区域，尤其是 total_cost < 0.5x；但在新位置冷启动时，允许少量 0.5x-1.0x anchor 用于建立局部认知
+- 当前 target 上，plain `EF=1` selector family 已经提供了一批成本锚点；它们现在主要用于对照和校准，而不是默认继续作为唯一主线
+- 当前阶段的主要任务不是继续细扫旧 family 的 K/LR 邻域，而是验证新的结构族是否能形成新的 Pareto 段
+- 允许在 `0.3x-0.8x total_cost` 带内建立结构性 anchor；不要求所有轮次都继续压最低成本，只要求问题清晰、结构信息增量高
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
 - encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
 - 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
-- 可探索的方向包括：更低 EF / K、factorized scorer、低秩 trunk、codebook、分阶段 residual、轻量多专家/多子库方案等
-- 当前如果对已实现 family 的结果持续不满意，应优先把一部分探索预算转向“尚未充分验证但结构上有潜力”的方向，而不是只在旧 family 上继续局部微调
-- 在这些高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由是重点候选之一，因为它有机会在增大总容量的同时维持较小的单 token 激活路径
+- 接下来大部分探索预算应投向结构新意更高的方向，而不是继续在 `topk / jumprelu / factorized_topk` 上做重复的局部扫点
+- 当前优先探索的方向是：轻量 expert 子库 / MoE-like 路由、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+- 如果已实现 family 不覆盖这些方向，应优先做最小可运行原型，而不是退回旧 family 的局部微调
 - 上述方向只是候选搜索空间，不是默认结论；不要因为旧经验预先排斥任何兼容 family
 - 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
@@ -169,10 +171,20 @@ def section_target_profile() -> str:
 
 def section_high_priority_directions() -> str:
     return "\n".join([
+        "当前研究阶段：结构扩展优先。",
+        "  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。",
+        "  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。",
+        "",
         "当前高优先级未充分验证方向：",
-        "  1. 轻量 expert 子库 / MoE-like 路由。",
-        "     只有在 router 足够轻、ACTIVE_EXPERTS 很小、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。",
-        "  2. 如果已实现 family 持续不能给出满意结果，不要只继续微调旧 family；应优先抽出一部分轮次去补这些未充分验证方向。",
+        "  1. `expert_topk` / 轻量 MoE-like 子库路由。",
+        "     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。",
+        "  2. `lowrank + expert`。",
+        "     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。",
+        "  3. `lowrank + expert + residual`。",
+        "     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。",
+        "  4. `two-stage residual expert`。",
+        "     先 coarse library，再用局部 expert residual 做第二段修正。",
+        "  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。",
     ])
 
 
