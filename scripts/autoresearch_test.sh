@@ -9,10 +9,10 @@ MASTER_PORT="${MASTER_PORT:-29501}"
 # 输入输出路径配置。
 MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-0.6B}"
 DATASET_PATH="${DATASET_PATH:-$HOME/fineweb-edu/sample/10BT-tokenized-qwen3-2048}"
-ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_o.json}"
-WANDB_PROJECT="${WANDB_PROJECT:-qwen3-0.6B-auto-0323}"
-SAVE_DIR="${SAVE_DIR:-checkpoints/auto}"
-RUN_NAME="${RUN_NAME:-qwen3-0.6B}"
+ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json}"
+WANDB_PROJECT="${WANDB_PROJECT:-qwen3-0.6B-auto-qproj}"
+SAVE_DIR="${SAVE_DIR:-checkpoints/auto_qproj}"
+RUN_NAME="${RUN_NAME:-qwen3-0.6B-qproj}"
 
 # 数据集预处理与采样参数。
 MAX_EXAMPLES="${MAX_EXAMPLES:-1000000}"
@@ -22,9 +22,9 @@ DATA_PREPROCESSING_NUM_PROC="${DATA_PREPROCESSING_NUM_PROC:-120}"
 
 # SAE 架构与目标 hook 配置。
 ARCHITECTURE="${ARCHITECTURE:-topk}"
-EXPANSION_FACTOR="${EXPANSION_FACTOR:-12}"
+EXPANSION_FACTOR="${EXPANSION_FACTOR:-1}"
 K="${K:-128}"
-HOOKPOINTS="${HOOKPOINTS:-layers.[3].self_attn.o_proj}"
+HOOKPOINTS="${HOOKPOINTS:-layers.[3].self_attn.q_proj}"
 OPTIMIZER="${OPTIMIZER:-signum}"
 USE_HADAMARD="${USE_HADAMARD:-0}"
 

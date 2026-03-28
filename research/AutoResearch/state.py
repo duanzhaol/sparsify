@@ -14,6 +14,7 @@ from typing import Any
 
 from .compatibility import parse_compatibility_registry
 from .config_resolution import resolve_action_configs, summary_invalid_reason
+from .target_profile import default_target_profile, profile_matches, resolve_target_profile
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -256,19 +257,23 @@ class StateManager:
     def frontier_digest(self, limit: int = 8) -> list[str]:
         """Return frontier as compact one-liner strings, sorted by total_cost."""
         points: list[tuple[float, str]] = []
-        d_in = 1024
-        original = d_in * 4 * d_in
+        current_target = default_target_profile()
         for _key, entry in self.frontier.items():
             if not isinstance(entry, dict):
+                continue
+            cfg = dict(entry.get("config", {}) or {})
+            if entry.get("target_profile") is not None and "target_profile" not in cfg:
+                cfg["target_profile"] = entry["target_profile"]
+            if not profile_matches(cfg, current_target):
                 continue
             fvu = entry.get("fvu", 999)
             k = entry.get("k", "?")
             ef = entry.get("ef", "?")
             arch = entry.get("architecture", "?")
-            cfg = entry.get("config", {})
             lr = cfg.get("lr", "?")
             opt = cfg.get("optimizer", "?")
             commit = str(entry.get("commit", ""))[:7]
+            original = resolve_target_profile(cfg).original_matmul_accesses
 
             # Determine total_cost for sorting
             tc = entry.get("total_cost")
@@ -465,6 +470,7 @@ class StateManager:
         # Migrate legacy frontier keys to new format
         frontier = self._state.get("frontier", {})
         self._migrate_frontier_keys(frontier)
+        self._backfill_frontier_target_profiles(frontier)
         from .controller import compact_frontier
         compacted_frontier = compact_frontier(frontier)
         if compacted_frontier != frontier:
@@ -623,7 +629,11 @@ class StateManager:
                 k_val = int(entry.get("k") or cfg.get("k") or 128)
                 ef_val = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
                 cost = compute_selection_cost(
-                    arch, k=k_val, ef=ef_val,
+                    arch,
+                    k=k_val,
+                    ef=ef_val,
+                    d_in=resolve_target_profile(cfg).d_in,
+                    n_output=resolve_target_profile(cfg).n_output,
                     extra_config=_extract_extra_config(cfg),
                 )
                 if "error" not in cost:
@@ -631,12 +641,25 @@ class StateManager:
                     entry.setdefault("deployment_accesses", float(cost.get("deployment_accesses", 0)))
                     entry.setdefault("deployment_ratio", cost.get("deployment_ratio"))
                     entry["total_cost"] = float(cost.get("combined_accesses", 0))
+                    entry.setdefault("target_profile", resolve_target_profile(cfg).to_dict())
+                    entry.setdefault("cost_model_label", resolve_target_profile(cfg).cost_model_label)
                 else:
                     entry["total_cost"] = _estimate_total_cost_from_entry(entry)
                 entry["metric_version"] = "total_cost_v1"
 
             new_key = f"legacy_{old_key}"
             frontier[new_key] = entry
+
+    def _backfill_frontier_target_profiles(self, frontier: dict[str, Any]) -> None:
+        for entry in frontier.values():
+            if not isinstance(entry, dict):
+                continue
+            cfg = dict(entry.get("config", {}) or {})
+            if entry.get("target_profile") is not None and "target_profile" not in cfg:
+                cfg["target_profile"] = entry["target_profile"]
+            target_profile = resolve_target_profile(cfg)
+            entry.setdefault("target_profile", target_profile.to_dict())
+            entry.setdefault("cost_model_label", target_profile.cost_model_label)
 
     def _save_state(self) -> None:
         _save_json(self.history_dir / "state.json", self._state)
@@ -866,6 +889,16 @@ class StateManager:
             "reference_source": ctx.reference_source,
             "runtime_config_json": ctx.runtime_config_json,
             "runtime_env_config": ctx.runtime_env_config,
+            "target_profile": (
+                ctx.runtime_config_json.get("target_profile")
+                if isinstance(ctx.runtime_config_json, dict)
+                else None
+            ),
+            "cost_model_label": (
+                ctx.runtime_config_json.get("cost_model_label")
+                if isinstance(ctx.runtime_config_json, dict)
+                else None
+            ),
             "touched_files": touched_files,
             "patch_path": str(patch_path) if patch_path is not None else None,
         }

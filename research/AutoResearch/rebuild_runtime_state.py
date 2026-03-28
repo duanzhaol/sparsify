@@ -20,6 +20,7 @@ from .compatibility import (
 )
 from .config_resolution import config_from_round_summary, summary_invalid_reason
 from .controller import compact_frontier, frontier_key, _extract_extra_config
+from .target_profile import resolve_target_profile
 from .types import BASE_ENV_DEFAULTS, HISTORY_DIR
 
 
@@ -202,8 +203,13 @@ def rebuild_runtime_state(
             }
             # Compute cost breakdown (selection + deployment + total)
             from .compatibility import compute_selection_cost
+            target_profile = resolve_target_profile(config)
             cost = compute_selection_cost(
-                arch, k=k_val, ef=ef_val,
+                arch,
+                k=k_val,
+                ef=ef_val,
+                d_in=target_profile.d_in,
+                n_output=target_profile.n_output,
                 extra_config=_extract_extra_config(config),
             )
             if "error" not in cost:
@@ -214,6 +220,8 @@ def rebuild_runtime_state(
             else:
                 from .controller import _estimate_total_cost_from_entry
                 new_entry["total_cost"] = _estimate_total_cost_from_entry(new_entry)
+            new_entry["target_profile"] = target_profile.to_dict()
+            new_entry["cost_model_label"] = target_profile.cost_model_label
             new_entry["metric_version"] = "total_cost_v1"
             frontier[key] = new_entry
 
@@ -285,6 +293,11 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
         action = summary.get("action", {})
         config["family_name"] = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
         config["family_stage"] = summary.get("family_stage") or action.get("family_stage") or "mainline"
+        target_profile = resolve_target_profile(config)
+        config["target_profile"] = target_profile.to_dict()
+        config["cost_model_label"] = target_profile.cost_model_label
+        config["d_in"] = target_profile.d_in
+        config["n_output"] = target_profile.n_output
         return config
 
     config = {
@@ -341,6 +354,11 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
         config["k"] = int(result["k"])
     if result.get("expansion_factor") not in (None, "", "None"):
         config["expansion_factor"] = int(result["expansion_factor"])
+    target_profile = resolve_target_profile(config)
+    config["target_profile"] = target_profile.to_dict()
+    config["cost_model_label"] = target_profile.cost_model_label
+    config["d_in"] = target_profile.d_in
+    config["n_output"] = target_profile.n_output
     return config
 
 

@@ -29,9 +29,11 @@ from .compatibility import (
 from .config_resolution import (
     config_from_round_summary,
     render_env_config,
+    structured_config_from_round_summary,
     summary_config_source,
     summary_is_usable_reference,
 )
+from .target_profile import default_target_profile, profile_matches, resolve_target_profile
 
 # ---------------------------------------------------------------------------
 # Constants — Hard constraints baked into prompt template
@@ -55,17 +57,21 @@ PROXY_OBJECTIVE = """\
 训练侧代理目标：
 - 维护并改善 (total_cost, FVU) 的 2D Pareto frontier
 - total_cost = encoder 选择成本 + 部署查表成本，两者加和后与 FVU 做 Pareto 权衡
+- 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
 - 用尽可能低的 total_cost 达到尽可能低的 FVU
-- 当前阶段重点探索区域：total_cost < 0.5x；首要任务是在这个区域内尽量降低 FVU
-- 0.5x-1.0x 区间可作为质量锚点或过渡对照，但不应继续作为默认主战场
-- >1.0x 区间只保留少量高质量参考点，不应继续主导搜索注意力
+- 当前阶段优先补足低成本区域，尤其是 total_cost < 0.5x；但在新位置冷启动时，允许少量 0.5x-1.0x anchor 用于建立局部认知
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
+- 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
 - encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
 - 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
-- 可优先尝试天然低成本方向：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案
-- 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得优先尝试"""
+- 可探索的方向包括：更低 EF / K、factorized scorer、低秩 trunk、codebook、分阶段 residual、轻量多专家/多子库方案等
+- 当前如果对已实现 family 的结果持续不满意，应优先把一部分探索预算转向“尚未充分验证但结构上有潜力”的方向，而不是只在旧 family 上继续局部微调
+- 在这些高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由是重点候选之一，因为它有机会在增大总容量的同时维持较小的单 token 激活路径
+- 上述方向只是候选搜索空间，不是默认结论；不要因为旧经验预先排斥任何兼容 family
+- 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
 EXECUTION_LAYER = """\
 执行层是固定的：
@@ -82,18 +88,20 @@ EDIT_RULES = """\
 - 纯参数实验必须使用 env_overrides
 - 每一轮只允许一个主假设
 - 不要声明 primary_variable；系统会根据 reference_round 的完整配置自动判断本轮到底改了哪个参数
-- 如果 change_type=param_only，必须显式给出 reference_round，表示“我是相对哪一轮的完整配置只改一个 env 参数”
+- 如果 change_type=param_only，默认必须显式给出 reference_round；只有当前 target profile 还没有任何可用 reference_round 时，才允许显式返回 `reference_round=null`，相对 `target_profile_baseline` 冷启动，并且仍然只能改 1 个 env 参数
 - 新增 tunable 参数后的第一轮，必须先验证该参数真的进入了训练配置：至少检查 round*.config.json 和 checkpoint config.json 中该字段存在且取值正确
 - 不要返回 command="stop"
 - 最终必须返回一个符合 action schema 的 JSON 对象"""
 
 SINGLE_VARIABLE_PRINCIPLE = (
     "单变量原则：每一轮只改变一个 env 参数。"
-    "param_only 必须锚定一个 reference_round；env_overrides 是对该轮完整配置的 patch。"
+    "有 reference_round 时，env_overrides 是对该轮完整配置的 patch。"
+    "若当前 target 仍是冷启动且暂无 reference_round，则允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。"
 )
 
 HARD_CONSTRAINT_REMINDER = (
-    "提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 应显式给出 reference_round。"
+    "提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。"
+    "只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。"
     "默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。"
     "Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。"
 )
@@ -149,6 +157,54 @@ def section_agent_state(
     )
 
 
+def section_target_profile() -> str:
+    profile = default_target_profile()
+    return "\n".join([
+        "当前 target profile：",
+        f"  training_hookpoint={profile.training_hookpoint}",
+        f"  cost_proxy={profile.cost_model_label}",
+        f"  original_matmul={profile.d_in}x{profile.n_output} ({profile.original_matmul_accesses} accesses)",
+    ])
+
+
+def section_high_priority_directions() -> str:
+    return "\n".join([
+        "当前高优先级未充分验证方向：",
+        "  1. 轻量 expert 子库 / MoE-like 路由。",
+        "     只有在 router 足够轻、ACTIVE_EXPERTS 很小、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。",
+        "  2. 如果已实现 family 持续不能给出满意结果，不要只继续微调旧 family；应优先抽出一部分轮次去补这些未充分验证方向。",
+    ])
+
+
+def _entry_config_with_target(entry: dict[str, Any]) -> dict[str, Any]:
+    cfg = dict(entry.get("config", {}) or {})
+    if entry.get("target_profile") is not None and "target_profile" not in cfg:
+        cfg["target_profile"] = entry["target_profile"]
+    return cfg
+
+
+def _summary_matches_current_target(summary: dict[str, Any]) -> bool:
+    cfg = structured_config_from_round_summary(summary)
+    return cfg is not None and profile_matches(cfg, default_target_profile())
+
+
+def _current_target_summaries(round_summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        summary for summary in round_summaries
+        if isinstance(summary, dict) and _summary_matches_current_target(summary)
+    ]
+
+
+def _summary_round_ids(round_summaries: list[dict[str, Any]]) -> set[int]:
+    round_ids: set[int] = set()
+    for summary in round_summaries:
+        try:
+            round_ids.add(int(summary.get("round")))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return round_ids
+
+
 def section_frontier(
     frontier: dict[str, Any],
     registry: dict[str, str],
@@ -158,16 +214,22 @@ def section_frontier(
     """按 total_cost 排序的 2D Pareto frontier (total_cost, FVU)。"""
     if cost_cache is None:
         cost_cache = {}
+    current_target = default_target_profile()
     entries: list[tuple[float, str]] = []
+    saw_any_entry = False
     low_cost_count = 0
     low_cost_best_fvu = float("inf")
 
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
             continue
+        saw_any_entry = True
         fvu = entry.get("fvu", "?")
         arch = entry.get("architecture", "?")
-        cfg = entry.get("config", {})
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
+        target_profile = resolve_target_profile(cfg)
         family_name = str(cfg.get("family_name") or arch).lower()
         k = entry.get("k", "?")
         ef = entry.get("ef", "?")
@@ -185,20 +247,26 @@ def section_frontier(
 
         extra_config = _extract_cost_params(cfg)
         extra_key = "|".join(f"{ck}={cv}" for ck, cv in sorted(extra_config.items())) if extra_config else ""
-        cost_key = f"{arch}|{k}|{ef}|{extra_key}"
+        cost_key = (
+            f"{target_profile.profile_id}|{target_profile.d_in}|{target_profile.n_output}|"
+            f"{arch}|{k}|{ef}|{extra_key}"
+        )
 
         def _ensure_cost_cache() -> dict:
             if cost_key not in cost_cache:
                 cost_cache[cost_key] = compute_selection_cost(
-                    str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
+                    str(arch),
+                    k=int(k) if k != "?" else 128,
+                    ef=int(ef) if ef != "?" else 12,
+                    d_in=target_profile.d_in,
+                    n_output=target_profile.n_output,
                     extra_config=extra_config or None,
                 )
             return cost_cache[cost_key]
 
         if total_cost_val is not None:
             # Have stored total_cost
-            d_in = 1024
-            original = d_in * 4 * d_in
+            original = target_profile.original_matmul_accesses
             sel_cost = entry.get("selection_cost")
             sel_ratio = round(sel_cost / original, 2) if sel_cost and original > 0 else "?"
             combined_ratio = round(float(total_cost_val) / original, 2) if original > 0 else "?"
@@ -243,14 +311,17 @@ def section_frontier(
         if feasible_count == 0:
             parts.append("  !! 当前 frontier 所有点均超出总成本预算（>1.5x）。首要任务：找到成本可行的配置。")
         if low_cost_count == 0:
-            parts.append("  !! <0.5x 低开销区域暂无 frontier 点，建议定向探索简单/更小/更稀疏的结构。")
+            parts.append("  !! <0.5x 低开销区域暂无 frontier 点，建议补充不同 family / K / EF / 结构参数的低成本样本。")
         elif low_cost_count <= 2:
             if low_cost_best_fvu < float('inf'):
                 parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，当前最佳 FVU={low_cost_best_fvu:.4f}，仍明显欠覆盖。")
             else:
                 parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，仍可进一步探索。")
     else:
-        parts.append("  （暂无条目）")
+        if saw_any_entry:
+            parts.append("  （当前 target profile 下暂无 frontier 点；旧 target 历史已隔离）")
+        else:
+            parts.append("  （暂无条目）")
 
     return "\n".join(parts)
 
@@ -267,14 +338,16 @@ def section_selection_cost_status(
     best_low_cost: dict[str, Any] | None = None
     best_low_cost_fvu = float("inf")
 
-    d_in = 1024
-    budget = 1.5 * d_in * 4 * d_in
-    low_cost_budget = 0.5 * d_in * 4 * d_in
+    current_target = default_target_profile()
+    budget = 1.5 * current_target.original_matmul_accesses
+    low_cost_budget = 0.5 * current_target.original_matmul_accesses
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
-        cfg = entry.get("config", {})
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
         if not is_compatible_label(registry.get(family_name)):
             continue
@@ -306,9 +379,17 @@ def section_selection_cost_status(
         arch = entry.get("architecture", "?")
         k = int(entry.get("k", 128))
         ef = int(entry.get("ef", 12))
-        cfg = entry.get("config", {})
+        cfg = _entry_config_with_target(entry)
+        target_profile = resolve_target_profile(cfg)
         extra_config = _extract_cost_params(cfg)
-        cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+        cost = compute_selection_cost(
+            arch,
+            k=k,
+            ef=ef,
+            d_in=target_profile.d_in,
+            n_output=target_profile.n_output,
+            extra_config=extra_config or None,
+        )
         return cost if "error" not in cost else None
 
     def _format_entry(entry: dict, cost: dict, label: str) -> None:
@@ -341,7 +422,9 @@ def section_selection_cost_status(
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
-        cfg = entry.get("config", {})
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
         if not is_compatible_label(registry.get(family_name)):
             continue
@@ -365,7 +448,9 @@ def section_selection_cost_status(
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
-        cfg = entry.get("config", {})
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
         if not is_compatible_label(registry.get(family_name)):
             continue
@@ -411,7 +496,11 @@ def section_selection_cost_status(
 
 def section_cost_feasibility_table(registry: dict[str, str]) -> str:
     """成本可行性速查表：让 agent 知道各 (架构, EF) 组合是否在预算内。"""
-    table = compute_selection_cost_table()
+    current_target = default_target_profile()
+    table = compute_selection_cost_table(
+        d_in=current_target.d_in,
+        n_output=current_target.n_output,
+    )
     if not table:
         return ""
 
@@ -443,6 +532,10 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
         rows.append(row)
 
     parts = [
+        (
+            f"当前成本 profile：hookpoint={current_target.training_hookpoint} | "
+            f"proxy={current_target.d_in}x{current_target.n_output}"
+        ),
         "Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：",
         f"  {header}",
     ]
@@ -460,12 +553,16 @@ def section_recent_rounds(
 ) -> str:
     """最近几轮兼容架构摘要，每轮一行。"""
     if not round_summaries:
-        return ""
+        return "最近几轮（兼容架构）：\n  （当前 target 还没有历史结果）"
+    saw_other_target = False
     compatible_lines: list[str] = []
     for summary in round_summaries:
         if not isinstance(summary, dict):
             continue
         if not summary_is_usable_reference(summary):
+            continue
+        if not _summary_matches_current_target(summary):
+            saw_other_target = True
             continue
         family_name = str(
             summary.get("family_name")
@@ -477,6 +574,8 @@ def section_recent_rounds(
             continue
         compatible_lines.append(f"  {_trim_round_summary(summary)}")
     if not compatible_lines:
+        if saw_other_target:
+            return "最近几轮（兼容架构）：\n  （当前 target 下尚无新结果；旧 target 历史已隔离）"
         return "最近几轮（兼容架构）：\n  （最近没有兼容 family 的新结果）"
     return f"最近几轮（兼容架构，{len(compatible_lines)}）：\n" + "\n".join(compatible_lines)
 
@@ -487,11 +586,22 @@ def section_reference_configs(
     limit: int = 2,
 ) -> str:
     """Show recent runnable full env configs that can serve as reference_round anchors."""
+    if not round_summaries:
+        return (
+            "最近可用 reference_round 的完整配置：\n"
+            "  （当前 target profile 尚无历史结果）\n"
+            "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
+        )
+
     usable: list[dict[str, Any]] = []
+    saw_other_target = False
     for summary in round_summaries:
         if not isinstance(summary, dict):
             continue
         if not summary_is_usable_reference(summary):
+            continue
+        if not _summary_matches_current_target(summary):
+            saw_other_target = True
             continue
         usable.append(summary)
 
@@ -547,6 +657,12 @@ def section_reference_configs(
         if block:
             blocks.append(block)
     if not blocks:
+        if saw_other_target:
+            return (
+                "最近可用 reference_round 的完整配置：\n"
+                "  （当前 target profile 尚无可用 reference_round；旧 target 结果已隔离）\n"
+                "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
+            )
         return ""
     return "最近可用 reference_round 的完整配置：\n" + "\n\n".join(blocks)
 
@@ -554,9 +670,13 @@ def section_reference_configs(
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
     """只保留战术性 hint，过滤掉已经固化到模板里的 K/EF 硬约束。"""
     tactical = []
+    current_profile = default_target_profile()
     for hint in hints:
         text = str(hint.get("text") or hint.get("message") or "").strip()
         if not text:
+            continue
+        target_id = hint.get("target_profile_id")
+        if target_id not in (None, "", current_profile.profile_id):
             continue
         if any(text.startswith(p) for p in _HARD_CONSTRAINT_HINT_PREFIXES):
             continue
@@ -585,50 +705,79 @@ def section_memory_brief(
     memory: dict[str, Any],
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]],
     recent_round_limit: int = 10,
 ) -> str:
     """精简记忆：只保留 frontier 家族、最近测试家族与近期失败。"""
     families = memory.get("architecture_families", {})
+    current_target = default_target_profile()
+    target_summaries = _current_target_summaries(round_summaries)
+    target_round_ids = _summary_round_ids(target_summaries)
+    saw_other_target = bool(round_summaries) and not target_summaries
 
     # Which families to show
     frontier_families: set[str] = set()
     for entry in frontier.values():
         if isinstance(entry, dict):
-            cfg = entry.get("config", {})
+            cfg = _entry_config_with_target(entry)
+            if not profile_matches(cfg, current_target):
+                continue
             fn = cfg.get("family_name", entry.get("architecture", ""))
             if fn and is_compatible_label(registry.get(fn.lower())):
                 frontier_families.add(fn.lower())
 
     recent_families: set[str] = set()
-    for rr in memory.get("recent_rounds", [])[-recent_round_limit:]:
-        fn = rr.get("family_name", "")
+    for summary in target_summaries[-recent_round_limit:]:
+        fn = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or ""
+        ).lower()
         if fn and is_compatible_label(registry.get(fn.lower())):
-            recent_families.add(fn.lower())
+            recent_families.add(fn)
 
     show = frontier_families | recent_families
 
     parts: list[str] = ["架构家族（frontier 持有者 + 最近测试）："]
+    if not show:
+        if saw_other_target:
+            parts.append("  （当前 target profile 尚无局部记忆；旧 target 历史已隔离）")
+        else:
+            parts.append("  （暂无局部记忆）")
     for name in sorted(show):
         fam = families.get(name)
         if fam is None:
             continue
-        status = fam.get("status", "?")
-        best = fam.get("best_fvu")
-        lr = fam.get("last_round", "?")
-        history = fam.get("tested_configs", [])[-3:]
+        target_history = [
+            tc
+            for tc in fam.get("tested_configs", [])
+            if isinstance(tc, dict)
+            and target_round_ids
+            and _safe_round_id(tc.get("round")) in target_round_ids
+        ]
+        best = _best_fvu_from_history(target_history)
+        lr = target_history[-1].get("round", "?") if target_history else "?"
+        history = target_history[-3:]
         hist_str = "; ".join(
             f"r{tc.get('round','?')} k{tc.get('k','?')} {tc.get('decision','?')}"
             for tc in history
         )
         best_str = f" best_fvu={best}" if best is not None else ""
-        parts.append(f"  {name} [{status}]{best_str} last_r={lr}: {hist_str}")
+        hist_part = f": {hist_str}" if hist_str else ""
+        parts.append(f"  {name}{best_str} last_r={lr}{hist_part}")
 
     # Recent training failures
     for label, key, n in [
         ("Recent training failures", "recent_training_failures", 4),
         ("Recent sanity failures", "recent_sanity_failures", 3),
     ]:
-        fails = memory.get(key, [])[-n:]
+        fails = [
+            entry for entry in memory.get(key, [])
+            if isinstance(entry, dict)
+            and target_round_ids
+            and _safe_round_id(entry.get("round")) in target_round_ids
+        ][-n:]
         if fails:
             parts.append("")
             label_cn = "近期训练失败" if key == "recent_training_failures" else "近期 sanity 失败"
@@ -687,18 +836,20 @@ def section_operator_guide_digest(guide_text: str, max_chars: int = 3000) -> str
 
 
 def section_prior_research_digest(prior_text: str) -> str:
-    """兼容性摘要：不再只截取 ##1/##2。"""
+    """Inject a concise background brief as weak prior, not hard conclusion."""
     if not prior_text:
         return ""
-    digest = extract_compatibility_digest(prior_text) or prior_text
-    return f"历史研究关键结论：\n{digest}"
+    digest = prior_text.strip()
+    if len(digest) > 3500:
+        digest = digest[:3480] + "\n[truncated]"
+    return f"当前背景文档（弱先验，不是结论）：\n{digest}"
 
 
 def section_prior_research_full(prior_text: str) -> str:
     """Fresh session must receive the full prior document."""
     if not prior_text:
         return ""
-    return f"完整历史研究文档：\n{extract_full_prior_document(prior_text)}"
+    return f"完整背景文档（弱先验，不是结论）：\n{extract_full_prior_document(prior_text)}"
 
 
 def section_architecture_checklist(
@@ -728,6 +879,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
     sections: list[str] = []
 
     registry = state.load_compatibility_registry()
+    recent_summaries = state.recent_round_summaries(limit=20)
 
     # Layer 1
     sections.append(section_hard_constraints())
@@ -739,29 +891,28 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         state.round_index, state.consecutive_crashes,
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
+    sections.append(section_target_profile())
+    sections.append(section_high_priority_directions())
     sections.append(section_frontier(state.frontier, registry))
     sections.append(section_selection_cost_status(state.frontier, registry))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
-        state.recent_round_summaries(limit=5),
+        recent_summaries[-5:],
         registry,
     ))
     sections.append(section_reference_configs(
-        state.recent_round_summaries(limit=20),
+        recent_summaries,
         registry,
         limit=4,
     ))
     sections.append(section_tactical_hints(state.get_pending_hints()[:8]))
 
     # Layer 3
-    sections.append(section_memory_brief(state.memory, state.frontier, registry))
+    sections.append(section_memory_brief(state.memory, state.frontier, registry, recent_summaries))
 
     # Layer 4
     sections.append(section_operator_guide_digest(
         state.load_operator_guide_excerpt(),
-    ))
-    sections.append(section_prior_research_digest(
-        state.load_prior_research(),
     ))
     sections.append(section_prior_research_full(
         state.load_prior_research(),
@@ -769,7 +920,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
 
     checklist = _load_architecture_checklist()
     if checklist:
-        raw = state.recent_round_summaries(limit=2)
+        raw = recent_summaries[-2:]
         sections.append(section_architecture_checklist(checklist, state.memory, raw))
 
     return "\n\n".join(s for s in sections if s)
@@ -780,6 +931,8 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     sections: list[str] = []
 
     registry = state.load_compatibility_registry()
+    recent_summaries = state.recent_round_summaries(limit=20)
+    target_recent_summaries = _current_target_summaries(recent_summaries)
 
     sections.append(f"继续 LUTurbo 研究会话。当前轮次：Round {round_id}。")
     sections.append("返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。")
@@ -792,15 +945,17 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.round_index, state.consecutive_crashes,
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
+    sections.append(section_target_profile())
+    sections.append(section_high_priority_directions())
     sections.append(section_frontier(state.frontier, registry, limit=8))
     sections.append(section_selection_cost_status(state.frontier, registry))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
-        state.recent_round_summaries(limit=4),
+        recent_summaries[-4:],
         registry,
     ))
     sections.append(section_reference_configs(
-        state.recent_round_summaries(limit=20),
+        recent_summaries,
         registry,
         limit=4,
     ))
@@ -809,17 +964,9 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.load_prior_research(),
     ))
 
-    # Open hypotheses
-    hypotheses = state.memory.get("next_hypotheses", [])[:5]
-    if hypotheses:
-        lines = ["当前开放假设："]
-        for h in hypotheses:
-            lines.append(f"  - {_truncate(h, 100)}")
-        sections.append("\n".join(lines))
-
     checklist = _load_architecture_checklist()
     if checklist:
-        raw = state.recent_round_summaries(limit=2)
+        raw = recent_summaries[-2:]
         sections.append(section_architecture_checklist(checklist, state.memory, raw))
 
     return "\n\n".join(s for s in sections if s)
@@ -978,3 +1125,22 @@ def _truncate(s: str, limit: int) -> str:
     if not isinstance(s, str):
         return str(s)[:limit]
     return s if len(s) <= limit else s[:limit - 3] + "..."
+
+
+def _safe_round_id(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_fvu_from_history(history: list[dict[str, Any]]) -> float | None:
+    best: float | None = None
+    for item in history:
+        try:
+            fvu = float(item.get("val_fvu"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if best is None or fvu < best:
+            best = fvu
+    return best

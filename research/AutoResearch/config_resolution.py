@@ -19,6 +19,7 @@ from .override_registry import (
     config_from_overrides,
     env_config_from_runtime_config,
 )
+from .target_profile import budget_accesses, default_target_profile, profile_matches
 from .types import Action, BASE_ENV_DEFAULTS
 
 
@@ -171,7 +172,13 @@ def _normalize_hookpoint(raw: str) -> str:
     return re.sub(r"layers\.(\d+)\.", r"layers.[\1].", str(raw))
 
 
-def config_from_round_summary(summary: dict[str, Any]) -> dict[str, str] | None:
+def structured_config_from_round_summary(summary: dict[str, Any]) -> dict[str, str] | None:
+    """Return only trustworthy persisted configs from a round summary.
+
+    This intentionally excludes the legacy action/env-overrides fallback,
+    which may inherit today's BASE_ENV_DEFAULTS and therefore cannot be used
+    for target-profile attribution.
+    """
     if not summary:
         return None
 
@@ -184,7 +191,14 @@ def config_from_round_summary(summary: dict[str, Any]) -> dict[str, str] | None:
     if isinstance(runtime_cfg, dict) and runtime_cfg:
         return env_config_from_runtime_config(runtime_cfg)
 
-    checkpoint_cfg = _config_from_checkpoint_summary(summary)
+    return _config_from_checkpoint_summary(summary)
+
+
+def config_from_round_summary(summary: dict[str, Any]) -> dict[str, str] | None:
+    if not summary:
+        return None
+
+    checkpoint_cfg = structured_config_from_round_summary(summary)
     if checkpoint_cfg is not None:
         return checkpoint_cfg
 
@@ -271,9 +285,8 @@ def best_frontier_entry(
     family_name: str | None = None,
     registry: dict[str, str] | None = None,
     prefer_feasible: bool = False,
-    d_in: int = 1024,
 ) -> dict[str, Any] | None:
-    budget = 1.5 * d_in * 4 * d_in
+    current_profile = default_target_profile()
 
     def _pick_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
         best, best_fvu = None, float("inf")
@@ -303,6 +316,11 @@ def best_frontier_entry(
             continue
         if registry is not None and not is_compatible_label(registry.get(entry_family)):
             continue
+        entry_cfg = dict(entry.get("config", {}) or {})
+        if entry.get("target_profile") is not None and "target_profile" not in entry_cfg:
+            entry_cfg["target_profile"] = entry["target_profile"]
+        if not profile_matches(entry_cfg, current_profile):
+            continue
         all_candidates.append(entry)
         if prefer_feasible:
             total_cost = entry.get("total_cost")
@@ -310,7 +328,7 @@ def best_frontier_entry(
                 sel = entry.get("selection_cost")
                 deploy = entry.get("deployment_accesses", 0) or 0
                 total_cost = float(sel) + float(deploy) if sel is not None else None
-            if total_cost is not None and float(total_cost) <= budget:
+            if total_cost is not None and float(total_cost) <= budget_accesses(entry_cfg):
                 feasible.append(entry)
 
     if prefer_feasible and feasible:
@@ -356,21 +374,11 @@ def resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
             "source": "frontier_best",
         }
 
-    active_family_name = latest_active_family_name(state.families, registry)
     config = dict(BASE_ENV_DEFAULTS)
-    config["EXPANSION_FACTOR"] = "12"
-    if active_family_name:
-        config["ARCHITECTURE"] = active_family_name
-        return {
-            "family_name": active_family_name,
-            "config": config,
-            "source": "latest_active_family",
-        }
-
     return {
-        "family_name": "topk",
+        "family_name": config["ARCHITECTURE"],
         "config": config,
-        "source": "topk_baseline",
+        "source": "target_profile_baseline",
     }
 
 
@@ -379,6 +387,7 @@ def latest_successful_family_config(
     family_name: str,
 ) -> dict[str, str] | None:
     target = (family_name or "").lower()
+    current_profile = default_target_profile()
     if not target:
         return None
     for summary in reversed(state.recent_round_summaries(limit=50)):
@@ -394,8 +403,8 @@ def latest_successful_family_config(
             continue
         if not summary_is_usable_reference(summary):
             continue
-        cfg = config_from_round_summary(summary)
-        if cfg is not None:
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is not None and profile_matches(cfg, current_profile):
             return cfg
     return None
 
@@ -404,9 +413,10 @@ def resolve_reference_env_config(
     action: Action,
     state: Any,
 ) -> tuple[dict[str, str], str]:
+    current_profile = default_target_profile()
     if action.reference_round is not None:
-        explicit = config_from_round_summary(state.load_round_summary(action.reference_round))
-        if explicit is not None:
+        explicit = structured_config_from_round_summary(state.load_round_summary(action.reference_round))
+        if explicit is not None and profile_matches(explicit, current_profile):
             return explicit, f"reference_round:r{action.reference_round}"
 
     mainline = resolve_mainline_snapshot(state)

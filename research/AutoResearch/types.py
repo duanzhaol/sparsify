@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .target_profile import default_target_profile
+
 # ---------------------------------------------------------------------------
 # Path constants
 # ---------------------------------------------------------------------------
@@ -37,9 +39,9 @@ SCHEMA_PATH = RESEARCH_DIR / "agent_action.schema.json"
 
 BASE_ENV_DEFAULTS: dict[str, str] = {
     "ARCHITECTURE": "topk",
-    "EXPANSION_FACTOR": "12",
+    "EXPANSION_FACTOR": "1",
     "K": "128",
-    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "HOOKPOINTS": default_target_profile().training_hookpoint,
     "OPTIMIZER": "signum",
     "LR": "8e-4",
     "BATCH_SIZE": "1",
@@ -128,7 +130,7 @@ class Action:
         """Construct from raw agent JSON. Validates required keys."""
         required = _load_schema_required()
         # experiment_tier removed in single-tier mode
-        required = [k for k in required if k != "experiment_tier"]
+        required = [k for k in required if k not in {"experiment_tier", "reference_round"}]
         missing = [k for k in required if k not in d]
         if missing:
             raise ValueError(f"Action missing required keys: {', '.join(missing)}")
@@ -175,9 +177,8 @@ class Action:
             "touched_files": self.touched_files,
             "notes_to_memory": self.notes_to_memory,
             "next_hypotheses": self.next_hypotheses,
+            "reference_round": self.reference_round,
         }
-        if self.reference_round is not None:
-            data["reference_round"] = self.reference_round
         return data
 
     @property

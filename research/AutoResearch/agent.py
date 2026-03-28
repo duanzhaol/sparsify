@@ -13,9 +13,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config_resolution import summary_is_usable_reference
+from .config_resolution import structured_config_from_round_summary, summary_is_usable_reference
 from .git_ops import REPO_ROOT
 from .prompt import compose_proposal, compose_resume, compose_repair
+from .target_profile import default_target_profile, profile_matches
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -359,6 +360,7 @@ def _extract_session_id(output: str) -> str | None:
 def _infer_reference_round(state: Any, family_name: str) -> int | None:
     """Choose the latest successful round in the same family as param-only anchor."""
     target = (family_name or "").lower()
+    current_profile = default_target_profile()
     if not target:
         return None
 
@@ -375,6 +377,9 @@ def _infer_reference_round(state: Any, family_name: str) -> int | None:
         if summary_family != target:
             continue
         if not summary_is_usable_reference(summary):
+            continue
+        summary_cfg = structured_config_from_round_summary(summary)
+        if not profile_matches(summary_cfg, current_profile):
             continue
         decision = str(summary.get("result", {}).get("decision") or "")
         try:

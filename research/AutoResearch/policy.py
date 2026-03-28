@@ -22,12 +22,15 @@ from typing import Any
 
 from .compatibility import compute_selection_cost, is_compatible_label
 from .config_resolution import (
+    structured_config_from_round_summary,
     render_env_config,
     resolve_action_configs,
     resolve_mainline_snapshot,
+    summary_is_usable_reference,
     summary_invalid_reason,
 )
 from .git_ops import REPO_ROOT
+from .target_profile import default_target_profile, profile_matches, resolve_target_profile
 from .types import Action
 
 MAX_INCUBATING_FAMILIES = 10
@@ -208,14 +211,17 @@ def build_policy_guidance(
     recipe_block = render_env_config(mainline["config"])
     mode = policy_state["mode"]
     reason = policy_state["reason"]
+    role_label = "当前参考 family" if mainline["source"] == "target_profile_baseline" else "当前主线 family"
+    recipe_label = "当前参考配方" if mainline["source"] == "target_profile_baseline" else "当前主线参考配方"
+    config_label = "当前参考完整配置" if mainline["source"] == "target_profile_baseline" else "当前主线完整配置"
 
     if mode == "engineering_repair":
         return "\n".join([
             f"Round {round_id} 策略模式：工程修复",
             f"原因：{reason}",
-            f"当前主线 family：{mainline['family_name']}",
-            f"当前主线参考配方：{recipe_line}",
-            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
+            f"{role_label}：{mainline['family_name']}",
+            f"{recipe_label}：{recipe_line}",
+            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 优先继续修最近失败实现，不要新开 architecture family。",
             "2. 不要同时换 optimizer、lr、loss、preprocess 等训练 recipe。",
@@ -226,16 +232,17 @@ def build_policy_guidance(
         return "\n".join([
             f"Round {round_id} 策略模式：成本探索",
             f"原因：{reason}",
-            f"当前主线 family：{mainline['family_name']}",
-            f"当前主线参考配方：{recipe_line}",
-            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
+            f"{role_label}：{mainline['family_name']}",
+            f"{recipe_label}：{recipe_line}",
+            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 首要目标：找到 total_cost (encoder + deployment) ≤1.5×h×n 的配置。",
             "2. 降低 encoder 成本最有效的手段是降低 EXPANSION_FACTOR。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。",
             "3. 选 K 时需权衡 FVU 改善与部署查表开销（K×n），K 过大会推高 total_cost。",
             "4. 参考成本速查表选择可行的 (架构, EF) 组合。",
-            "5. 可以尝试不同架构——简单架构在低 EF 下可能是更好的权衡。",
-            "6. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
+            "5. 可以尝试不同架构；不要因为旧位置结论预先排斥简单结构、低秩结构或更复杂结构。",
+            "6. 如果已实现 family 长时间都不给满意结果，可以优先抽少量轮次去实现或接线高优先级未验证方向，例如轻量 expert 子库 / MoE-like 路由。",
+            "7. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -244,16 +251,17 @@ def build_policy_guidance(
         return "\n".join([
             f"Round {round_id} 策略模式：低开销探索",
             f"原因：{reason}",
-            f"当前参考 family：{mainline['family_name']}",
-            f"当前参考配方：{recipe_line}",
-            f"当前参考完整配置（source={mainline['source']}）：\n{recipe_block}",
+            f"{role_label}：{mainline['family_name']}",
+            f"{recipe_label}：{recipe_line}",
+            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。",
             "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
-            "3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。",
-            "4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。",
-            "5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。",
-            "6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。",
+            "3. 优先补充低开销样本，但不要把某个 family 预设为唯一主线；简单结构、低秩结构、分阶段结构都可以给出新信息。",
+            "4. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。",
+            "5. 在高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由应被优先考虑，而不是一直停留在旧 family 的局部打磨。",
+            "6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
+            "7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让它重新主导搜索注意力。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -262,9 +270,9 @@ def build_policy_guidance(
         return "\n".join([
             f"Round {round_id} 策略模式：架构探针",
             f"原因：{reason}",
-            f"当前主线 family：{mainline['family_name']}",
-            f"当前主线参考配方：{recipe_line}",
-            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
+            f"{role_label}：{mainline['family_name']}",
+            f"{recipe_label}：{recipe_line}",
+            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 只允许做 1 个 matched architecture probe。",
             "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
@@ -275,15 +283,15 @@ def build_policy_guidance(
     return "\n".join([
         f"Round {round_id} 策略模式：主线推进",
         f"原因：{reason}",
-        f"当前主线 family：{mainline['family_name']}",
-        f"当前主线参考配方：{recipe_line}",
-        f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
+        f"{role_label}：{mainline['family_name']}",
+        f"{recipe_label}：{recipe_line}",
+        f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
         "本轮要求：",
-        "1. 只有在已经进入某个低成本 family 后，才默认围绕该 family 做局部推进。",
-        "2. 推荐顺序：先确认 total_cost 落在目标区间，再做必要的 clean baseline，然后调学习率，再换优化器，再看 loss/preprocess。",
+        "1. 只有在当前 target 已经出现可解释的本地 baseline 后，才默认围绕某个 family 做局部推进。",
+        "2. 优先保持归因清晰：先确认 total_cost 所在区间与结构槽位，再做少量 recipe 调整。",
         "   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。",
         "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
-        "4. 每轮只回答一个问题；如果当前 family 无法逼近低成本目标，应优先切去更便宜的结构。",
+        "4. 每轮只回答一个问题；如果当前 family 迟迟不给新信息，应换到其他兼容 family、其他成本带，或高优先级未验证方向如轻量 expert 子库 / MoE-like。",
         "",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",
@@ -294,18 +302,19 @@ def _low_cost_frontier_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
     threshold_ratio: float = 0.5,
-    d_in: int = 1024,
 ) -> dict[str, Any]:
     """Summarize whether the <threshold_ratio total_cost region is underexplored."""
-    original = d_in * 4 * d_in
     low_cost_points: list[dict[str, Any]] = []
     feasible_points: list[dict[str, Any]] = []
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
+        entry_cfg = dict(entry.get("config", {}) or {})
+        if entry.get("target_profile") is not None and "target_profile" not in entry_cfg:
+            entry_cfg["target_profile"] = entry["target_profile"]
         entry_family = str(
-            entry.get("config", {}).get("family_name")
+            entry_cfg.get("family_name")
             or entry.get("architecture")
             or ""
         ).lower()
@@ -322,6 +331,7 @@ def _low_cost_frontier_status(
             tc = (float(sel) + float(deploy)) if sel is not None else None
         if tc is None:
             continue
+        original = resolve_target_profile(entry_cfg).original_matmul_accesses
         ratio = float(tc) / original if original > 0 else float("inf")
         point = {"entry": entry, "fvu": fvu, "ratio": ratio}
         if ratio <= 1.5:
@@ -443,7 +453,20 @@ def _check_param_only_single_variable(
     if action.change_type != "param_only":
         return True, ""
     if action.reference_round is None:
-        return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮的完整配置只改一个 env 参数"
+        if _has_current_target_reference(state):
+            return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮的完整配置只改一个 env 参数"
+        resolved = resolve_action_configs(action, state)
+        changed_keys = resolved.changed_keys
+        if len(changed_keys) > 1:
+            return False, (
+                "当前 target 尚无 reference_round，冷启动 param_only 只能相对 target_profile_baseline 改 1 个 env 参数；"
+                f"当前同时改了 {', '.join(changed_keys)}"
+            )
+        if not changed_keys:
+            return False, (
+                "当前 target 尚无 reference_round；冷启动 param_only 仍必须相对 target_profile_baseline 真正改动 1 个 env 参数"
+            )
+        return True, ""
     explicit_summary = state.load_round_summary(action.reference_round)
     invalid_reason = summary_invalid_reason(explicit_summary)
     if invalid_reason is not None:
@@ -469,6 +492,19 @@ def _check_param_only_single_variable(
     return True, ""
 
 
+def _has_current_target_reference(state: Any) -> bool:
+    current_profile = default_target_profile()
+    for summary in reversed(state.recent_round_summaries(limit=50)):
+        if not isinstance(summary, dict):
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is not None and profile_matches(cfg, current_profile):
+            return True
+    return False
+
+
 def _check_total_cost_feasibility(
     action: Action,
     state: Any,  # StateManager
@@ -486,6 +522,7 @@ def _check_total_cost_feasibility(
     arch = cfg.get("ARCHITECTURE", "topk").lower()
     k = int(cfg.get("K", 128))
     ef = int(cfg.get("EXPANSION_FACTOR", 12))
+    target_profile = resolve_target_profile(cfg)
 
     extra_config: dict[str, Any] = {}
     for env_key, cfg_key in [
@@ -501,7 +538,14 @@ def _check_total_cost_feasibility(
             except (ValueError, TypeError):
                 pass
 
-    cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+    cost = compute_selection_cost(
+        arch,
+        k=k,
+        ef=ef,
+        d_in=target_profile.d_in,
+        n_output=target_profile.n_output,
+        extra_config=extra_config or None,
+    )
     if "error" in cost:
         return True, ""  # 计算失败时不拦截
 

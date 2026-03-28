@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Iterable
 
 from .git_ops import REPO_ROOT
+from .target_profile import budget_accesses, default_target_profile, profile_matches, resolve_target_profile
 
 DIRECT_COMPATIBLE = "direct_compatible"
 EXTENDED_COMPATIBLE = "extended_compatible"
@@ -82,12 +83,15 @@ def summarize_registry_counts(registry: dict[str, str]) -> str:
 
 def compatibility_hard_rules() -> str:
     """Short rules that must appear in every prompt."""
+    profile = default_target_profile()
     return "\n".join([
         "LUTurbo 兼容性硬约束：",
         "1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。",
         "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
         "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
         "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        f"当前 target：训练 hookpoint 为 {profile.training_hookpoint}。",
+        f"成本 proxy：{profile.cost_model_label}。",
         "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
         "   超过此阈值的配置将被 policy 拦截。",
         "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
@@ -100,7 +104,7 @@ def compute_selection_cost(
     architecture: str,
     k: int = 128,
     ef: int = 12,
-    d_in: int = 1024,
+    d_in: int | None = None,
     n_output: int | None = None,
     extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -109,6 +113,13 @@ def compute_selection_cost(
     Uses subprocess to avoid import-time GPU issues, similar to
     ``policy.behavioral_diff_test()``.
     """
+    if d_in is None or n_output is None:
+        profile = default_target_profile()
+        if d_in is None:
+            d_in = profile.d_in
+        if n_output is None:
+            n_output = profile.n_output
+
     cfg_parts = [
         f"architecture='{architecture}'",
         f"k={k}",
@@ -119,7 +130,6 @@ def compute_selection_cost(
             if value is not None:
                 cfg_parts.append(f"{key}={value!r}")
 
-    n_output_arg = f"{n_output}" if n_output is not None else "None"
     code = f"""\
 import sys, json; sys.path.insert(0, '.')
 from sparsify.sparse_coder import _get_sae_class
@@ -127,7 +137,7 @@ from sparsify.config import SparseCoderConfig
 cfg = SparseCoderConfig({', '.join(cfg_parts)})
 cls = _get_sae_class('{architecture}')
 m = cls({d_in}, cfg, device='cpu')
-print("COST:" + json.dumps(m.selection_cost_estimate({n_output_arg})))
+print("COST:" + json.dumps(m.selection_cost_estimate({int(n_output)})))
 """
     try:
         result = subprocess.run(
@@ -159,7 +169,8 @@ def compute_selection_cost_table(
     architectures: list[str] | None = None,
     ef_values: list[int] | None = None,
     k: int = 32,
-    d_in: int = 1024,
+    d_in: int | None = None,
+    n_output: int | None = None,
 ) -> dict[tuple[str, int], dict[str, Any]]:
     """Batch-compute selection costs for (architecture, EF) combinations.
 
@@ -167,6 +178,9 @@ def compute_selection_cost_table(
     Returns {(arch, ef): cost_dict} where cost_dict has keys:
     ratio, feasible, total_accesses, etc.
     """
+    profile = default_target_profile()
+    d_in = profile.d_in if d_in is None else d_in
+    n_output = profile.n_output if n_output is None else n_output
     archs = architectures or _COST_TABLE_ARCHITECTURES
     efs = ef_values or _COST_TABLE_EF_VALUES
 
@@ -185,7 +199,7 @@ def compute_selection_cost_table(
         lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
         lines.append(f"    _cls = _get_sae_class('{arch}')")
         lines.append(f"    _m = _cls({d_in}, _cfg, device='cpu')")
-        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate(None)))")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate({int(n_output)})))")
         lines.append(f"except Exception as _e:")
         lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps({{'error': str(_e)}}))")
 
@@ -218,35 +232,47 @@ def compute_selection_cost_table(
 def frontier_has_feasible_entry(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    d_in: int = 1024,
+    d_in: int | None = None,
+    n_output: int | None = None,
 ) -> bool:
     """Check if frontier has at least one feasible entry within total cost budget.
 
-    Feasible means: total_cost / (d_in * 4*d_in) <= 1.5
+    Feasible means: total_cost / original_matmul_accesses <= 1.5
     where total_cost = encoder selection cost + deployment lookup cost.
     """
-    budget = 1.5 * d_in * 4 * d_in  # 1.5 × h × n
-
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
-        cfg = entry.get("config", {})
+        cfg = dict(entry.get("config", {}) or {})
+        if entry.get("target_profile") is not None and "target_profile" not in cfg:
+            cfg["target_profile"] = entry["target_profile"]
+        if d_in is None and not profile_matches(cfg, default_target_profile()):
+            continue
         family_name = str(
             cfg.get("family_name") or entry.get("architecture") or ""
         ).lower()
         if not is_compatible_label(registry.get(family_name)):
             continue
+        if d_in is not None:
+            entry_budget = 1.5 * d_in * (n_output if n_output is not None else 4 * d_in)
+            cost_d_in = d_in
+            cost_n_output = n_output if n_output is not None else 4 * d_in
+        else:
+            entry_budget = budget_accesses(cfg)
+            profile = resolve_target_profile(cfg)
+            cost_d_in = profile.d_in
+            cost_n_output = profile.n_output
 
         # Prefer stored total_cost; fallback to selection_cost + deployment
         tc = entry.get("total_cost")
         if tc is not None:
-            if float(tc) <= budget:
+            if float(tc) <= entry_budget:
                 return True
             continue
         sel_cost = entry.get("selection_cost")
         deploy = entry.get("deployment_accesses", 0) or 0
         if sel_cost is not None:
-            if float(sel_cost) + float(deploy) <= budget:
+            if float(sel_cost) + float(deploy) <= entry_budget:
                 return True
             continue
         # No stored cost — compute from entry fields
@@ -254,7 +280,8 @@ def frontier_has_feasible_entry(
             str(entry.get("architecture") or cfg.get("architecture") or "topk"),
             k=int(entry.get("k") or cfg.get("k") or 128),
             ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
-            d_in=d_in,
+            d_in=cost_d_in,
+            n_output=cost_n_output,
         )
         if "error" not in cost and cost.get("combined_feasible", False):
             return True

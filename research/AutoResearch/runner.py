@@ -18,6 +18,7 @@ from .override_registry import (
     validate_env_overrides,
 )
 from .controller import decide, parse_log, update_frontier
+from .target_profile import resolve_target_profile
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -560,9 +561,10 @@ def _build_env(
     env.update(merged)
     env["RUN_NAME"] = run_name
     env["SAVE_DIR"] = str(save_dir)
-    env["WANDB_PROJECT"] = env.get("WANDB_PROJECT", "qwen3-0.6B-auto")
+    env["WANDB_PROJECT"] = env.get("WANDB_PROJECT", "qwen3-0.6B-auto-qproj")
     env["MAX_TOKENS"] = str(target_max_tokens)
     env["RESUME"] = "1" if resume else "0"
+    target_profile = resolve_target_profile(merged)
 
     config_json: dict[str, Any] = {
         "architecture": merged.get("ARCHITECTURE", "topk").lower(),
@@ -570,7 +572,7 @@ def _build_env(
         "k": int(merged.get("K", "128")),
         "optimizer": merged.get("OPTIMIZER", "signum"),
         "lr": merged.get("LR", "8e-4"),
-        "hookpoints": merged.get("HOOKPOINTS", "layers.[3].self_attn.o_proj"),
+        "hookpoints": merged.get("HOOKPOINTS", target_profile.training_hookpoint),
         "batch_size": int(merged.get("BATCH_SIZE", "1")),
         "grad_acc_steps": int(merged.get("GRAD_ACC_STEPS", "8")),
         "micro_acc_steps": int(merged.get("MICRO_ACC_STEPS", "1")),
@@ -579,6 +581,11 @@ def _build_env(
         "use_hadamard": merged.get("USE_HADAMARD", "0") == "1",
         "family_name": action.family_name or merged.get("ARCHITECTURE", "topk").lower(),
         "family_stage": action.family_stage or "mainline",
+        "target_profile": target_profile.to_dict(),
+        "cost_model_label": target_profile.cost_model_label,
+        "d_in": target_profile.d_in,
+        "n_output": target_profile.n_output,
+        "original_matmul_accesses": target_profile.original_matmul_accesses,
     }
     for env_key, cfg_key, caster in _STRUCTURAL_RUNTIME_KEYS:
         value = merged.get(env_key)

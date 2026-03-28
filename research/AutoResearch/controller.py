@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .compatibility import compute_selection_cost
+from .target_profile import TargetProfile, resolve_target_profile
 
 
 # ---------------------------------------------------------------------------
@@ -79,13 +80,6 @@ def parse_log(log_path: Path) -> dict[str, Any]:
 
 FVU_TOL = 0.001
 COST_REL_TOL = 0.05  # 5% relative tolerance for total_cost near-duplicate
-D_IN_DEFAULT = 1024   # default d_in for cost estimation (fallback)
-
-# Known hookpoint → d_in mapping for quick lookup
-_HOOKPOINT_DIN: dict[str, int] = {
-    # Qwen3-0.6B / Pythia-160m: o_proj output dim = 1024
-    "layers.[3].self_attn.o_proj": 1024,
-}
 
 
 def frontier_key(round_id: int | str) -> str:
@@ -116,10 +110,11 @@ def decide(
     if status != "ok" or fvu is None:
         return "crash"
 
+    target_profile = _resolve_cost_profile(config or {})
     total_cost = _compute_candidate_total_cost(parsed, config)
     candidate = {"total_cost": total_cost, "fvu": fvu}
 
-    points = _frontier_points(frontier)
+    points = _frontier_points(frontier, target_profile.profile_id)
     if not points:
         return "keep"
 
@@ -162,6 +157,7 @@ def update_frontier(
     sel_cost = float(full_cost["total_accesses"])
     deploy_accesses = full_cost.get("deployment_accesses", 0)
     combined = float(full_cost.get("combined_accesses", sel_cost + (deploy_accesses or 0)))
+    target_profile = _resolve_cost_profile(config)
 
     key = frontier_key(round_id or "unknown")
     frontier[key] = {
@@ -177,6 +173,8 @@ def update_frontier(
         "peak_memory_gb": parsed.get("peak_memory_gb"),
         "deployment_accesses": deploy_accesses,
         "deployment_ratio": full_cost.get("deployment_ratio"),
+        "target_profile": target_profile.to_dict(),
+        "cost_model_label": target_profile.cost_model_label,
         "metric_version": "total_cost_v1",
     }
 
@@ -185,7 +183,10 @@ def update_frontier(
     to_remove = [
         fk
         for fk, entry in frontier.items()
-        if fk != key and isinstance(entry, dict) and _pareto_dominates(new_pt, _entry_to_point(entry))
+        if fk != key
+        and isinstance(entry, dict)
+        and _entry_target_profile(entry).profile_id == target_profile.profile_id
+        and _pareto_dominates(new_pt, _entry_to_point(entry))
     ]
     for fk in to_remove:
         del frontier[fk]
@@ -229,6 +230,7 @@ def compact_frontier(frontier: dict[str, Any]) -> dict[str, Any]:
             continue
         try:
             candidate = _entry_to_point(entry)
+            candidate_profile = _entry_target_profile(entry)
         except (TypeError, ValueError, KeyError, IndexError):
             continue
 
@@ -236,6 +238,8 @@ def compact_frontier(frontier: dict[str, Any]) -> dict[str, Any]:
         kept_points: list[tuple[str, dict[str, Any]]] = []
         for kept_key, kept_entry in compacted.items():
             try:
+                if _entry_target_profile(kept_entry).profile_id != candidate_profile.profile_id:
+                    continue
                 kept_pt = _entry_to_point(kept_entry)
             except (TypeError, ValueError, KeyError, IndexError):
                 continue
@@ -269,11 +273,16 @@ def compact_frontier(frontier: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
+def _frontier_points(
+    frontier: dict[str, Any],
+    target_profile_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Extract {total_cost, fvu} from all frontier entries."""
     points: list[dict[str, Any]] = []
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
+            continue
+        if target_profile_id is not None and _entry_target_profile(entry).profile_id != target_profile_id:
             continue
         try:
             points.append(_entry_to_point(entry))
@@ -337,15 +346,22 @@ def _compute_candidate_cost_full(
     arch = parsed.get("architecture") or cfg.get("architecture", "topk")
     k = int(parsed.get("k") or cfg.get("k") or 128)
     ef = int(parsed.get("expansion_factor") or cfg.get("expansion_factor") or 12)
-    d_in = _resolve_d_in(cfg)
+    target_profile = _resolve_cost_profile(cfg)
 
     extra_config = _extract_extra_config(cfg)
-    cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
+    cost = compute_selection_cost(
+        arch,
+        k=k,
+        ef=ef,
+        d_in=target_profile.d_in,
+        n_output=target_profile.n_output,
+        extra_config=extra_config or None,
+    )
     if "error" not in cost:
         return cost
 
     # Fallback: rough estimate (encoder-only, no deployment info)
-    fallback = float(d_in * d_in * ef)
+    fallback = float(target_profile.d_in * target_profile.d_in * ef)
     return {"total_accesses": fallback, "combined_accesses": fallback, "error": "fallback"}
 
 
@@ -396,10 +412,17 @@ def _estimate_total_cost_from_entry(entry: dict[str, Any]) -> float:
     ).lower()
     k = int(entry.get("k") or cfg.get("k") or 128)
     ef = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
-    d_in = _resolve_d_in(cfg)
+    target_profile = _entry_target_profile(entry)
 
     extra_config = _extract_extra_config(cfg)
-    cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
+    cost = compute_selection_cost(
+        arch,
+        k=k,
+        ef=ef,
+        d_in=target_profile.d_in,
+        n_output=target_profile.n_output,
+        extra_config=extra_config or None,
+    )
     if "error" not in cost:
         if "combined_accesses" in cost:
             return float(cost["combined_accesses"])
@@ -407,20 +430,15 @@ def _estimate_total_cost_from_entry(entry: dict[str, Any]) -> float:
         deploy = float(cost.get("deployment_accesses", 0) or 0)
         return sel + deploy
 
-    return float(d_in * d_in * ef)
+    return float(target_profile.d_in * target_profile.d_in * ef)
 
 
-def _resolve_d_in(config: dict[str, Any]) -> int:
-    """Resolve d_in from config, falling back to D_IN_DEFAULT."""
-    # Explicit d_in in config takes priority
-    d_in = config.get("d_in") or config.get("D_IN")
-    if d_in is not None:
-        try:
-            return int(d_in)
-        except (ValueError, TypeError):
-            pass
-    # Try hookpoint lookup
-    hookpoints = str(config.get("hookpoints") or config.get("HOOKPOINTS") or "")
-    if hookpoints in _HOOKPOINT_DIN:
-        return _HOOKPOINT_DIN[hookpoints]
-    return D_IN_DEFAULT
+def _entry_target_profile(entry: dict[str, Any]) -> TargetProfile:
+    cfg = dict(entry.get("config", {}) or {})
+    if entry.get("target_profile") is not None and "target_profile" not in cfg:
+        cfg["target_profile"] = entry["target_profile"]
+    return _resolve_cost_profile(cfg)
+
+
+def _resolve_cost_profile(config: dict[str, Any]) -> TargetProfile:
+    return resolve_target_profile(config)
