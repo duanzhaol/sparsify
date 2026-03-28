@@ -1,0 +1,2304 @@
+{"change_type":"edit_sae_code","command":"run","family_name":"lowrank_expert_residual","family_stage":"prototype","reference_round":27,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_residual"}],"expected_win":"explore_unknown","needs_sanity":true,"hypothesis":"最终重构公式保持为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i} + Σ_{j∈T(x)} γ_j(x) c_j。这里 U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，C={c_j} 是静态 residual 补偿库；在线侧先计算 trunk 系数 β_r(x)，再用轻量 router 选择单个 expert 子库 e(x) 并在其内做局部 sparse 选择，最后对剩余残差再做一次小预算 sparse 补偿。因此它仍可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”流水线，兼容性判定为扩展兼容。本次 repair 不改变实验设计，只修复 `lowrank_expert_residual` 的注册链与最小可运行实现，使原始 Round 37 实验能够按原设定重新运行。","summary":"已修复 Round 37 的工程性阻塞：补上 `lowrank_expert_residual` 的 config whitelist、factory dispatch、concrete class，并完成同一目标 `(ARCHITECTURE=lowrank_expert_residual, K=192, EF=1)` 的 instantiate/forward/backward smoke。保持原 family 与 env_overrides 不变，重新运行原始实验。","self_review":"这次 repair 没有改 family_name，也没有改 env_overrides；仍然是相对 r27 只切换到 `ARCHITECTURE=lowrank_expert_residual`。阻塞根因是 `Unknown architecture`，已按架构集成 checklist 修复：whitelist、dispatch、class、exact-string smoke 都已完成。额外把该 family 接到了 `TRUNK_RANK/STAGE1_RATIO` override registry，避免后续调参时静默失效。exact smoke 在 `lowrank_expert_residual, K=192, EF=1` 上通过，估算总成本约 1.06x 原始 matmul、预算比率 0.71x，仍在硬约束内。","next_hypotheses":["如果 rerun 能稳定完成，则再根据真实 FVU 判断 `lowrank + expert + residual` 是否值得继续；当前 repair 轮不对结构优劣做新结论。","如果 rerun 仍失败，下一次 repair 应直接针对新的失败模式处理，而不是再次回到注册链。"],"notes_to_memory":["Round 37 的首个 blocker 是注册链缺失，不是训练语义问题。","`lowrank_expert_residual` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","已实现最小可运行 `LowRankExpertResidualSparseCoder`：low-rank trunk + expert-local first pass + global residual cleanup second pass。","已补 `research/AutoResearch/override_registry.py` 中 `lowrank_expert_residual -> {TRUNK_RANK, STAGE1_RATIO}`，避免后续 structural override 被拒绝。","exact smoke 结果：`integration_smoke: OK lowrank_expert_residual 192 1 cuda`；成本估算 combined_ratio≈1.06x，combined_budget_ratio≈0.71x，可行。"],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py","research/AutoResearch/override_registry.py"]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3598-4bd0-7eb0-b116-6005526ca7d8
+--------
+user
+Round 37 进入 repair 模式。
+
+上一轮代码修改遇到了工程性阻塞。
+不要重新设计实验，不要修改 family_name 或 env_overrides。
+你的任务是补丁修复实现，让原始实验能够跑通。
+默认只改最小必要文件；若阻塞原因是 tunable 参数未接通，可同步修复 research/AutoResearch/ 与 scripts/autoresearch_test.sh 中的必要 wiring。
+当前是第 1 / 5 次 repair 尝试。
+最终返回一个符合 action schema 的 JSON 对象。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+Repair 上下文：
+{
+  "round": 37,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "lowrank_expert_residual",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "lowrank_expert_residual"
+      }
+    ],
+    "summary": "不继续在 `lowrank_expert_topk` 上做第三个邻域扫点，而是进入下一结构槽位：实现最小可运行的 `lowrank_expert_residual` 原型。以 r27 的 `expert_topk K=192 EF=1` 为 matched baseline，只改 `ARCHITECTURE`，先验证三段式结构本身是否值得继续。",
+    "hypothesis": "最终重构公式设为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i} + Σ_{j∈T(x)} γ_j(x) c_j。这里 U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，C={c_j} 是静态 residual 补偿库；在线侧先计算 trunk 系数 β_r(x)，再用轻量 router 选择单个 expert 子库 e(x) 并在其内做局部 sparse 选择，最后对剩余残差再做一次小预算 sparse 补偿。因此它仍可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”流水线，兼容性判定为扩展兼容。主假设是：在与 r27 相同的 EF=1、K=192 recipe 下，把 `expert_topk` 升级为 `lowrank + expert + residual` 三段式结构，能回答‘仅有 lowrank+expert 仍不足时，加入第二段 residual 修正是否会形成新的结构性 Pareto 段’这个当前更关键的问题。"
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774721826",
+    "k": "192",
+    "architecture": "lowrank_expert_residual",
+    "expansion_factor": "1",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "experiment_id": "r37_1774721826",
+    "head_commit": "ed4d2bf343a3e3cee498b852f1d6f8f09e404089",
+    "description": "不继续在 `lowrank_expert_topk` 上做第三个邻域扫点，而是进入下一结构槽位：实现最小可运行的 `lowrank_expert_residual` 原型。以 r27 的 `expert_topk K=192 EF=1` 为 matched baseline，只改 `ARCHITECTURE`，先验证三段式结构本身是否值得继续。",
+    "self_review": "满足单轮单变量约束：运行配置相对 r27 只改 `ARCHITECTURE`。这轮优先解决结构未知量，而不是继续在已显示弱势的 recipe 上局部打磨。选择 r27 而不是 r34/r18，是因为它提供了与 expert 路由最接近的 matched baseline，同时避免把结论混入 jumprelu 或大 K 主线。风险是该三段式原型在 K=192 处总成本大概率落在中成本带而非极低成本带，但这仍符合当前阶段允许用少量中成本质量锚点回答结构问题的策略。",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0037_standard_1774721796.log",
+    "error_type": "ValueError",
+    "error_summary": "ValueError: Unknown architecture: 'lowrank_expert_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'expert_topk', 'lowrank_expert_topk', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')",
+    "traceback_excerpt": "[rank1]: Traceback (most recent call last):\n[rank1]: ValueError: Unknown architecture: 'lowrank_expert_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'expert_topk', 'lowrank_expert_topk', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 334, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 269, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 248, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'lowrank_expert_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'expert_topk', 'lowrank_expert_topk', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 248, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'lowrank_expert_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'expert_topk', 'lowrank_expert_topk', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 334, in <module>\n[rank0]:     run()\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 269, in run\n[rank0]:     args = parse(RunConfig)\n[rank0]:            ^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:     parsed_args = parser.parse_args(args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:     args, argv = self.parse_known_args(args, namespace)\n[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:     parsed_args = self._postprocessing(parsed_args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:     parsed_args = self._instantiate_dataclasses(\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 248, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'lowrank_expert_residual'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'expert_topk', 'lowrank_expert_topk', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]:[W329 02:16:42.409322292 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nE0329 02:16:43.507000 145427 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 0 (pid: 145467) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n[1]:\n  time      : 2026-03-29_02:16:43\n  host      : iZuf6cmwgapdeot4ojlegeZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 145468)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-29_02:16:43\n  host      : iZuf6cmwgapdeot4ojlegeZ\n  rank      : 0 (local_rank: 0)\n  exitcode  : 1 (pid: 145467)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "30000000",
+    "resume_stage_count": "1",
+    "continuation_stop_reason": "missing_step_records",
+    "continued_from_checkpoint": "false"
+  }
+}
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+本轮是注册链 repair。我先检查 `lowrank_expert_residual` 在 `sparsify/config.py` 和 `sparsify/sparse_coder.py` 的缺口，然后补最小实现并按同一 `ARCHITECTURE=lowrank_expert_residual, K=192, EF=1` 做 smoke。
+exec
+/bin/bash -lc 'rg -n "lowrank_expert_residual|lowrank_expert_topk|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py research/AutoResearch/override_registry.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/sparse_coder.py:38:class SparseCoder(nn.Module):
+sparsify/sparse_coder.py:171:        cls = _get_sae_class(architecture)
+sparsify/sparse_coder.py:383:def _get_sae_class(architecture: str) -> type:
+sparsify/sparse_coder.py:411:    if architecture == "lowrank_expert_topk":
+sparsify/sparse_coder.py:470:class WhitenedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:519:class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:566:class BatchTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:592:class BucketedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:657:class CodebookTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:770:class ResidualVQSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:881:class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
+sparsify/sparse_coder.py:993:class JumpReLUSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1031:class GatedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1064:class RoutedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1106:class ExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1216:class LowRankExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1238:                "lowrank_expert_topk requires k <= latents_per_expert, "
+sparsify/sparse_coder.py:1406:class GroupTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1439:class FactorizedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1489:class LowRankResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1592:class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1688:class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1815:class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCoder):
+sparsify/sparse_coder.py:1981:class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2101:class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2203:class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2315:class LowRankFactorizedResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:2429:class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2526:class LowRankGroupedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2616:class LowRankGatedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2713:class LowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2913:class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3117:class WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3257:class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3279:class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3462:class RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3481:class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3566:class LowRankJumpReLUResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3653:class WhitenedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3751:class WhitenedLowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3862:class LowRankGroupedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3943:class TwoStageResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:4055:class MultiBranchGatedSparseCoder(SparseCoder):
+sparsify/config.py:8:class SparseCoderConfig(Serializable):
+sparsify/config.py:206:        valid_archs = (
+sparsify/config.py:219:            "lowrank_expert_topk",
+sparsify/config.py:247:        if self.sae.architecture not in valid_archs:
+sparsify/config.py:250:                f"Must be one of {valid_archs}"
+
+exec
+/bin/bash -lc "sed -n '205,255p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "expert_topk",
+            "lowrank_expert_topk",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+            "lowrank_gated_residual",
+            "lowrank_jumprelu_residual",
+            "lowrank_multi_branch_residual",
+            "lowrank_factorized_residual",
+            "lowrank_soft_codebook_residual",
+            "lowrank_gated_soft_codebook_residual",
+            "lowrank_grouped_soft_codebook_residual",
+            "lowrank_two_stage_soft_codebook_residual",
+            "bucketed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_two_stage_soft_codebook_residual",
+            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_gated_residual",
+            "lowrank_grouped_residual",
+            "whitened_topk",
+            "two_stage_residual",
+            "multi_branch_gated",
+        )
+        if self.sae.architecture not in valid_archs:
+            raise ValueError(
+                f"Unknown architecture: {self.sae.architecture!r}. "
+                f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.jumprelu_bandwidth <= 0:
+            raise ValueError(
+                "jumprelu_bandwidth must be positive, "
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/operator_hints.json
+ M research/history/state.json
+ M research/history/timeline.jsonl
+?? research/history/logs/agent_action_0037.json
+?? research/history/logs/agent_round_0037.stdout.log
+?? research/history/logs/round0037_standard_1774721796.config.json
+?? research/history/logs/round0037_standard_1774721796.log
+
+exec
+/bin/bash -lc "sed -n '400,435p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "lowrank_expert_topk":
+        return LowRankExpertTopKSparseCoder
+    if architecture == "group_topk":
+        return GroupTopKSparseCoder
+    if architecture == "factorized_topk":
+        return FactorizedTopKSparseCoder
+    if architecture == "lowrank_residual":
+        return LowRankResidualSparseCoder
+    if architecture == "lowrank_two_stage_residual":
+        return LowRankTwoStageResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_residual":
+        return RoutedLowRankTwoStageResidualSparseCoder
+    if architecture == "bucketed_lowrank_residual":
+        return BucketedLowRankResidualSparseCoder
+    if architecture == "whitened_lowrank_residual":
+        return WhitenedLowRankResidualSparseCoder
+    if architecture == "lowrank_adaptive_budget_residual":
+        return LowRankAdaptiveBudgetResidualSparseCoder
+    if architecture == "lowrank_gated_residual":
+        return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_jumprelu_residual":
+        return LowRankJumpReLUResidualSparseCoder
+    if architecture == "lowrank_multi_branch_residual":
+        return LowRankMultiBranchResidualSparseCoder
+    if architecture == "lowrank_factorized_residual":
+
+codex
+阻塞是典型 registration-chain 问题，不是训练语义问题。我现在补 `valid_archs + _get_sae_class + concrete class` 的最小闭环，并用失败时同一个 `(architecture=lowrank_expert_residual, K=192, EF=1)` 做 smoke。
+exec
+/bin/bash -lc 'rg -n "num_latents|dead_mask|latent_indices|latent_acts|sae.num_latents|dead_features" sparsify/trainer.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/trainer.py:124:            base_lr = cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5
+sparsify/trainer.py:149:            name: torch.zeros(sae.num_latents, device=device, dtype=torch.long)
+sparsify/trainer.py:302:                    sae.num_latents, device=device, dtype=torch.bool
+sparsify/trainer.py:469:                        dead_mask=(
+sparsify/trainer.py:479:                        fired_masks[sae_key][out.latent_indices.flatten()] = True
+sparsify/trainer.py:481:                        fired_indices[sae_key].append(out.latent_indices.flatten())
+sparsify/trainer.py:550:                        sorted_acts, sort_idx = out.latent_acts.sort(
+sparsify/trainer.py:553:                        sorted_indices = out.latent_indices.gather(-1, sort_idx)
+sparsify/trainer.py:563:                        D_S = raw.W_dec[out.latent_indices]  # [batch, K, d_in]
+sparsify/sparse_coder.py:25:    latent_acts: Tensor
+sparsify/sparse_coder.py:28:    latent_indices: Tensor
+sparsify/sparse_coder.py:51:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:53:        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:306:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:324:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:333:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:607:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:610:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:613:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:672:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:681:        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:726:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:745:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:749:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:785:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:794:        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:837:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:856:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:860:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:949:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:968:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:972:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:1006:            (self.num_latents,),
+sparsify/sparse_coder.py:1012:            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+sparsify/sparse_coder.py:1043:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1078:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1123:        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:1124:        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1125:        self.num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1155:            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+sparsify/sparse_coder.py:1200:        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
+sparsify/sparse_coder.py:1208:        acts_shape = (*original_shape, self.num_latents)
+sparsify/sparse_coder.py:1233:        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:1234:        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1235:        self.num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1277:            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+sparsify/sparse_coder.py:1339:        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
+sparsify/sparse_coder.py:1347:        acts_shape = (*original_shape, self.num_latents)
+sparsify/sparse_coder.py:1366:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:1382:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:1386:            auxk_latents = torch.where(dead_mask[None], full_acts, -torch.inf)
+sparsify/sparse_coder.py:1414:        if self.num_latents % group_size != 0:
+sparsify/sparse_coder.py:1416:                "group_topk requires num_latents divisible by group_topk_size, "
+sparsify/sparse_coder.py:1417:                f"got num_latents={self.num_latents} and "
+sparsify/sparse_coder.py:1421:        num_groups = self.num_latents // group_size
+sparsify/sparse_coder.py:1454:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:1456:        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+sparsify/sparse_coder.py:1461:            hidden_dim, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1504:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:1516:        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:1550:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:1568:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:1572:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:1646:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:1664:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:1668:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:1707:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1749:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:1777:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:1782:            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+sparsify/sparse_coder.py:1783:            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+sparsify/sparse_coder.py:1829:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1832:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:1893:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:1926:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:1931:            aux_stage1 = torch.where(dead_mask[None], stage1_scores, -torch.inf)
+sparsify/sparse_coder.py:1952:                dead_mask[None],
+sparsify/sparse_coder.py:1996:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:2006:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2009:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2060:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2077:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2081:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:2154:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2174:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2178:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:2219:                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:2274:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2291:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2295:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:2330:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:2340:        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+sparsify/sparse_coder.py:2345:            hidden_dim, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2389:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2405:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2409:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:2477:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2497:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2501:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:2533:        if self.num_latents % group_size != 0:
+sparsify/sparse_coder.py:2535:                "lowrank_grouped_soft_codebook_residual requires num_latents "
+sparsify/sparse_coder.py:2536:                f"divisible by group_topk_size, got num_latents={self.num_latents} "
+sparsify/sparse_coder.py:2540:        num_groups = self.num_latents // group_size
+sparsify/sparse_coder.py:2568:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2587:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2591:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:2632:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2658:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2684:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2688:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:2746:                self.num_latents,
+sparsify/sparse_coder.py:2755:                self.num_latents,
+sparsify/sparse_coder.py:2840:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:2875:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:2880:            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+sparsify/sparse_coder.py:2881:            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+sparsify/sparse_coder.py:2935:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2938:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2941:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:2944:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3038:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3079:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3084:            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+sparsify/sparse_coder.py:3085:            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+sparsify/sparse_coder.py:3188:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3219:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3224:            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+sparsify/sparse_coder.py:3225:            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+sparsify/sparse_coder.py:3295:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3298:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3368:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3403:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3408:            aux_stage1 = torch.where(dead_mask[None], stage1_scores, -torch.inf)
+sparsify/sparse_coder.py:3431:                dead_mask[None],
+sparsify/sparse_coder.py:3495:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3520:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3542:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3546:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:3581:            (self.num_latents,),
+sparsify/sparse_coder.py:3587:            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+sparsify/sparse_coder.py:3612:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3629:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3633:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:3708:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3727:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3731:            auxk_latents = torch.where(dead_mask[None], pre_acts, -torch.inf)
+sparsify/sparse_coder.py:3765:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3820:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3838:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3842:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:3869:        if self.num_latents % group_size != 0:
+sparsify/sparse_coder.py:3871:                "lowrank_grouped_residual requires num_latents divisible by "
+sparsify/sparse_coder.py:3872:                f"group_topk_size, got num_latents={self.num_latents} and "
+sparsify/sparse_coder.py:3876:        num_groups = self.num_latents // group_size
+sparsify/sparse_coder.py:3902:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:3919:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:3923:            auxk_latents = torch.where(dead_mask[None], acts, -torch.inf)
+sparsify/sparse_coder.py:3958:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:3963:        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:3966:            d_in, self.num_latents, device=device, dtype=dtype
+sparsify/sparse_coder.py:3991:        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+sparsify/sparse_coder.py:4017:        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+sparsify/sparse_coder.py:4022:            aux_stage1 = torch.where(dead_mask[None], stage1_pre, -torch.inf)
+sparsify/sparse_coder.py:4023:            aux_stage2 = torch.where(dead_mask[None], stage2_pre, -torch.inf)
+sparsify/sparse_coder.py:4070:        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+sparsify/sparse_coder.py:4075:                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+sparsify/sparse_coder.py:4081:                nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+
+exec
+/bin/bash -lc "sed -n '320,470p' sparsify/trainer.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        total_forward_time = 0.0
+        total_metrics_time = 0.0
+        timing_step_count = 0
+
+        # Logging accumulators
+        avg_auxk_loss: dict[str, float] = defaultdict(float)
+        avg_fvu: dict[str, float] = defaultdict(float)
+        avg_exceed: dict[str, dict[float, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
+        avg_losses: dict[str, float] = {
+            name: float("inf") for name in self.saes.keys()
+        }
+
+        # Device events for timing
+        if device.type in ("cuda", "npu"):
+            forward_start = create_event(enable_timing=True)
+            forward_end = create_event(enable_timing=True)
+        else:
+            forward_start = forward_end = None
+
+        # Deferred metrics events (optimization: avoid per-hookpoint sync)
+        pending_metrics_events: list[tuple] = []
+
+        # Batched reduce helpers for metrics (optimization: one allreduce
+        # per log step instead of per-hookpoint per-microbatch)
+        def reduce_scalar_mapping(
+            values: dict[str, float],
+        ) -> dict[str, float]:
+            if not values:
+                return {}
+            if not dist.is_initialized():
+                return dict(values)
+            keys = sorted(values)
+            tensor = torch.tensor(
+                [values[key] for key in keys], device=device
+            )
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+            return dict(zip(keys, tensor.tolist()))
+
+        def reduce_nested_scalar_mapping(
+            values: dict[str, dict[float, float]],
+        ) -> dict[str, dict[float, float]]:
+            if not values:
+                return {}
+            if not dist.is_initialized():
+                return {
+                    outer_key: dict(inner)
+                    for outer_key, inner in values.items()
+                }
+            flat_keys = [
+                (outer_key, alpha)
+                for outer_key in sorted(values)
+                for alpha in sorted(values[outer_key])
+            ]
+            tensor = torch.tensor(
+                [values[ok][ak] for ok, ak in flat_keys], device=device
+            )
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            tensor /= dist.get_world_size()
+            result: dict[str, dict[float, float]] = defaultdict(dict)
+            for (ok, ak), v in zip(flat_keys, tensor.tolist()):
+                result[ok][ak] = v
+            return dict(result)
+
+        name_to_module = {
+            name: self.model.base_model.get_submodule(name)
+            for name in self.cfg.hookpoints
+        }
+        maybe_wrapped: dict[str, DDP | SparseCoder | TiledSparseCoder] = {}
+        module_to_name = {v: k for k, v in name_to_module.items()}
+
+        # Build mapping from bare hook name to SAE keys (supports multi-seed)
+        hook_to_sae_keys: dict[str, list[str]] = defaultdict(list)
+        for sae_key in self.saes:
+            hook = sae_key.partition("/")[0]
+            hook_to_sae_keys[hook].append(sae_key)
+
+        def _hook_impl(module: nn.Module, inputs, outputs):
+            nonlocal total_forward_time, total_metrics_time, timing_step_count
+            nonlocal should_time, sync_gradients
+
+            if isinstance(inputs, tuple):
+                inputs = inputs[0]
+
+            name = module_to_name[module]
+
+            # Flatten batch and sequence dimensions, use input activations
+            acts = inputs.flatten(0, 1)
+
+            # Apply Hadamard rotation if enabled
+            if self.cfg.use_hadamard:
+                if name not in self.hadamard_rotations:
+                    d_in = acts.shape[-1]
+                    self.hadamard_rotations[name] = HadamardRotation(
+                        d_in,
+                        block_size=self.cfg.hadamard_block_size,
+                        seed=self.cfg.hadamard_seed,
+                        use_permutation=self.cfg.hadamard_use_perm,
+                        device=acts.device,
+                        dtype=acts.dtype,
+                    )
+                acts = self.hadamard_rotations[name].rotate(acts)
+
+            # Residual SAE: subtract frozen Level 1 reconstruction.
+            # Must be AFTER Hadamard so L1 operates in the same space it was trained in.
+            if self.residual_saes and name in self.residual_saes:
+                with torch.no_grad():
+                    l1_out = self.residual_saes[name](acts).sae_out
+                acts = acts - l1_out
+
+            # Pre-compute unrotated target for exceed metrics
+            original_target_for_exceed = None
+            if (
+                self.cfg.use_hadamard
+                and name in self.hadamard_rotations
+                and name in self.elbow_thresholds
+            ):
+                original_target_for_exceed = self.hadamard_rotations[
+                    name
+                ].unrotate(acts)
+
+            # Process each SAE for this hook (supports multi-seed)
+            for sae_key in hook_to_sae_keys[name]:
+                raw = self.saes[sae_key]
+
+                # On the first iteration, initialize decoder bias from data mean
+                if self.global_step == 0 and not self.cfg.finetune:
+                    mean = self.maybe_all_reduce(acts.mean(0))
+
+                    if hasattr(raw, 'set_b_dec_data'):
+                        raw.set_b_dec_data(mean.to(raw.dtype))
+                    else:
+                        raw.b_dec.data = mean.to(raw.dtype)
+
+                # Normalize decoder if applicable
+                if raw.cfg.normalize_decoder and raw.W_dec.requires_grad:
+                    raw.set_decoder_norm_to_unit_norm()
+
+                wrapped = maybe_wrapped[sae_key]
+                sync_context = (
+                    nullcontext()
+                    if sync_gradients or not isinstance(wrapped, DDP)
+                    else wrapped.no_sync()
+                )
+                with sync_context:
+                    out = wrapped(
+                        x=acts,
+                        dead_mask=(
+                            self.num_tokens_since_fired[sae_key]
+
+exec
+/bin/bash -lc "rg -n \"def dtype|@property\\s+def dtype|self\\.dtype|def device|@property\\s+def device\" sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+189:    def device(self):
+193:    def dtype(self):
+300:        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+736:        sparse_residual = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+751:            aux_sparse = decoder_impl(auxk_indices, auxk_acts.to(self.dtype), self.W_dec.mT)
+847:        sparse_residual = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+862:            aux_sparse = decoder_impl(auxk_indices, auxk_acts.to(self.dtype), self.W_dec.mT)
+959:        sparse_residual = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+974:            aux_sparse = decoder_impl(auxk_indices, auxk_acts.to(self.dtype), self.W_dec.mT)
+1009:            dtype=self.dtype,
+1010:        ).clamp_min(torch.finfo(self.dtype).tiny)
+1012:            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+1362:        return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+1546:        return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+2370:        return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+3584:            dtype=self.dtype,
+3585:        ).clamp_min(torch.finfo(self.dtype).tiny)
+3587:            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+3987:        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+
+exec
+/bin/bash -lc "sed -n '180,205p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            json.dump(
+                {
+                    **self.cfg.to_dict(),
+                    "d_in": self.d_in,
+                },
+                f,
+            )
+
+    @property
+    def device(self):
+        return self.b_dec.device
+
+    @property
+    def dtype(self):
+        return self.b_dec.dtype
+
+    def get_param_groups(self, base_lr: float) -> list[dict]:
+        """Return optimizer parameter groups. Subclasses can override for per-component LR."""
+        return [{"params": self.parameters(), "lr": base_lr}]
+
+    # ------------------------------------------------------------------
+    # Selection cost estimation (for LUTurbo deployment feasibility)
+    # ------------------------------------------------------------------
+
+    def _encoder_linear_layers(self) -> list[tuple[str, "nn.Linear"]]:
+        """Return all nn.Linear layers on the encode path. Override in subclasses."""
+
+codex
+我继续按 `sae-architecture-integration` repair checklist 处理：补 whitelist、dispatch、concrete class，并顺手把已有 `TRUNK_RANK/STAGE1_RATIO` 接到新 family 的 override registry，避免后续 tuning 静默失效。
+apply patch
+patch: completed
+/root/sparsify-ascend/research/AutoResearch/override_registry.py
+/root/sparsify-ascend/sparsify/config.py
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index 91bac59020060f9cb20f1c5672cff0415bfd5bf3..d59ed1592aac4f150477513c3e730e608fb4adc5
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -32,6 +32,7 @@
+     },
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "lowrank_residual": _LOWRANK_KEYS,
++    "lowrank_expert_residual": _TWOSTAGE_KEYS,
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 1c6a01fc7a55adab472eed201f63ce694ea966b7..e8ff559dd4ec919069aca80413fa2aa375065dcd
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -217,6 +217,7 @@
+             "routed",
+             "expert_topk",
+             "lowrank_expert_topk",
++            "lowrank_expert_residual",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fad5835c7b1443c4f97d1a05d0f5f8ac249fa58a..700a327f63d0e23ce35bc06766fc519e6699b758
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -410,6 +410,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+         return LowRankExpertTopKSparseCoder
++    if architecture == "lowrank_expert_residual":
++        return LowRankExpertResidualSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1403,6 +1405,264 @@
+         )
+ 
+ 
++class LowRankExpertResidualSparseCoder(SparseCoder):
++    """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.expert_num_latents = self.num_experts * self.latents_per_expert
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.expert_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        if self.stage1_k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
++                f"got stage1_k={self.stage1_k} and "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++        self.residual_encoder.bias.data.zero_()
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            expert_decoder = self.expert_encoders.data.reshape(
++                self.expert_num_latents, d_in
++            )
++            decoder_init = torch.cat(
++                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage1_k, dim=-1, sorted=False
++        )
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.expert_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_residual = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index 91bac59020060f9cb20f1c5672cff0415bfd5bf3..d59ed1592aac4f150477513c3e730e608fb4adc5
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -32,6 +32,7 @@
+     },
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "lowrank_residual": _LOWRANK_KEYS,
++    "lowrank_expert_residual": _TWOSTAGE_KEYS,
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 1c6a01fc7a55adab472eed201f63ce694ea966b7..e8ff559dd4ec919069aca80413fa2aa375065dcd
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -217,6 +217,7 @@
+             "routed",
+             "expert_topk",
+             "lowrank_expert_topk",
++            "lowrank_expert_residual",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fad5835c7b1443c4f97d1a05d0f5f8ac249fa58a..700a327f63d0e23ce35bc06766fc519e6699b758
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -410,6 +410,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+         return LowRankExpertTopKSparseCoder
++    if architecture == "lowrank_expert_residual":
++        return LowRankExpertResidualSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1403,6 +1405,264 @@
+         )
+ 
+ 
++class LowRankExpertResidualSparseCoder(SparseCoder):
++    """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.expert_num_latents = self.num_experts * self.latents_per_expert
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.expert_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        if self.stage1_k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
++                f"got stage1_k={self.stage1_k} and "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++        self.residual_encoder.bias.data.zero_()
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            expert_decoder = self.expert_encoders.data.reshape(
++                self.expert_num_latents, d_in
++            )
++            decoder_init = torch.cat(
++                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage1_k, dim=-1, sorted=False
++        )
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.expert_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_residual = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import allowed_override_keys_for_architecture
+print(sorted(allowed_override_keys_for_architecture('lowrank_expert_residual')))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+['ACTIVE_GROUPS', 'ARCHITECTURE', 'AUXK_ALPHA', 'BATCH_SIZE', 'COMPILE_MODEL', 'DEAD_FEATURE_THRESHOLD', 'EXPANSION_FACTOR', 'GRAD_ACC_STEPS', 'HOOKPOINTS', 'K', 'LR', 'MATRYOSHKA_KS', 'MATRYOSHKA_WEIGHTS', 'MICRO_ACC_STEPS', 'NUM_GROUPS', 'OPTIMIZER', 'ORTHO_LAMBDA', 'RESIDUAL_FROM', 'STAGE1_RATIO', 'TRUNK_RANK', 'USE_HADAMARD']
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.sparse_coder import _get_sae_class
+from sparsify.config import SparseCoderConfig, TrainConfig
+
+arch = 'lowrank_expert_residual'
+k = 192
+ef = 1
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+TrainConfig(sae=cfg, hookpoints=['layers.[3].self_attn.q_proj'])
+cls = _get_sae_class(arch)
+sae = cls(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+print('cost', sae.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index 91bac59020060f9cb20f1c5672cff0415bfd5bf3..d59ed1592aac4f150477513c3e730e608fb4adc5
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -32,6 +32,7 @@
+     },
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "lowrank_residual": _LOWRANK_KEYS,
++    "lowrank_expert_residual": _TWOSTAGE_KEYS,
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 1c6a01fc7a55adab472eed201f63ce694ea966b7..e8ff559dd4ec919069aca80413fa2aa375065dcd
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -217,6 +217,7 @@
+             "routed",
+             "expert_topk",
+             "lowrank_expert_topk",
++            "lowrank_expert_residual",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fad5835c7b1443c4f97d1a05d0f5f8ac249fa58a..700a327f63d0e23ce35bc06766fc519e6699b758
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -410,6 +410,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+         return LowRankExpertTopKSparseCoder
++    if architecture == "lowrank_expert_residual":
++        return LowRankExpertResidualSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1403,6 +1405,264 @@
+         )
+ 
+ 
++class LowRankExpertResidualSparseCoder(SparseCoder):
++    """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.expert_num_latents = self.num_experts * self.latents_per_expert
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.expert_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        if self.stage1_k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
++                f"got stage1_k={self.stage1_k} and "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++        self.residual_encoder.bias.data.zero_()
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            expert_decoder = self.expert_encoders.data.reshape(
++                self.expert_num_latents, d_in
++            )
++            decoder_init = torch.cat(
++                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage1_k, dim=-1, sorted=False
++        )
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.expert_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_residual = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+codex
+注册链已经补上，正在跑与失败轮相同的 `(lowrank_expert_residual, K=192, EF=1)` smoke。接下来我只看这个 exact target 是否能 instantiate/forward/backward，不扩散到别的实验设计。
+ succeeded in 4525ms:
+Using fused decoder on CUDA.
+integration_smoke: OK lowrank_expert_residual 192 1 cuda
+cost {'total_accesses': 2101248, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 393216, 'shape': '1024x384'}, {'name': 'trunk_decoder', 'accesses': 393216, 'shape': '384x1024'}, {'name': 'router', 'accesses': 4096, 'shape': '1024x4'}, {'name': 'residual_encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'active_expert_encoder', 'accesses': 262144, 'shape': 'active=1×1024x256'}], 'deployment_accesses': 2359296, 'deployment_ratio': 0.56, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1572864, 'shape': 'r=384×n=4096'}, {'name': 'sparse_lookup', 'accesses': 786432, 'shape': 'K=192×n=4096'}], 'combined_accesses': 4460544, 'combined_ratio': 1.06, 'combined_budget_ratio': 0.71, 'combined_feasible': True}
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index 91bac59020060f9cb20f1c5672cff0415bfd5bf3..d59ed1592aac4f150477513c3e730e608fb4adc5
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -32,6 +32,7 @@
+     },
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "lowrank_residual": _LOWRANK_KEYS,
++    "lowrank_expert_residual": _TWOSTAGE_KEYS,
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 1c6a01fc7a55adab472eed201f63ce694ea966b7..e8ff559dd4ec919069aca80413fa2aa375065dcd
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -217,6 +217,7 @@
+             "routed",
+             "expert_topk",
+             "lowrank_expert_topk",
++            "lowrank_expert_residual",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fad5835c7b1443c4f97d1a05d0f5f8ac249fa58a..700a327f63d0e23ce35bc06766fc519e6699b758
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -410,6 +410,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+         return LowRankExpertTopKSparseCoder
++    if architecture == "lowrank_expert_residual":
++        return LowRankExpertResidualSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1403,6 +1405,264 @@
+         )
+ 
+ 
++class LowRankExpertResidualSparseCoder(SparseCoder):
++    """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.expert_num_latents = self.num_experts * self.latents_per_expert
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.expert_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        if self.stage1_k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
++                f"got stage1_k={self.stage1_k} and "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++        self.residual_encoder.bias.data.zero_()
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            expert_decoder = self.expert_encoders.data.reshape(
++                self.expert_num_latents, d_in
++            )
++            decoder_init = torch.cat(
++                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage1_k, dim=-1, sorted=False
++        )
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.expert_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_residual = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+codex
+{"change_type":"edit_sae_code","command":"run","family_name":"lowrank_expert_residual","family_stage":"prototype","reference_round":27,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_residual"}],"expected_win":"explore_unknown","needs_sanity":true,"hypothesis":"最终重构公式保持为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i} + Σ_{j∈T(x)} γ_j(x) c_j。这里 U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，C={c_j} 是静态 residual 补偿库；在线侧先计算 trunk 系数 β_r(x)，再用轻量 router 选择单个 expert 子库 e(x) 并在其内做局部 sparse 选择，最后对剩余残差再做一次小预算 sparse 补偿。因此它仍可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”流水线，兼容性判定为扩展兼容。本次 repair 不改变实验设计，只修复 `lowrank_expert_residual` 的注册链与最小可运行实现，使原始 Round 37 实验能够按原设定重新运行。","summary":"已修复 Round 37 的工程性阻塞：补上 `lowrank_expert_residual` 的 config whitelist、factory dispatch、concrete class，并完成同一目标 `(ARCHITECTURE=lowrank_expert_residual, K=192, EF=1)` 的 instantiate/forward/backward smoke。保持原 family 与 env_overrides 不变，重新运行原始实验。","self_review":"这次 repair 没有改 family_name，也没有改 env_overrides；仍然是相对 r27 只切换到 `ARCHITECTURE=lowrank_expert_residual`。阻塞根因是 `Unknown architecture`，已按架构集成 checklist 修复：whitelist、dispatch、class、exact-string smoke 都已完成。额外把该 family 接到了 `TRUNK_RANK/STAGE1_RATIO` override registry，避免后续调参时静默失效。exact smoke 在 `lowrank_expert_residual, K=192, EF=1` 上通过，估算总成本约 1.06x 原始 matmul、预算比率 0.71x，仍在硬约束内。","next_hypotheses":["如果 rerun 能稳定完成，则再根据真实 FVU 判断 `lowrank + expert + residual` 是否值得继续；当前 repair 轮不对结构优劣做新结论。","如果 rerun 仍失败，下一次 repair 应直接针对新的失败模式处理，而不是再次回到注册链。"],"notes_to_memory":["Round 37 的首个 blocker 是注册链缺失，不是训练语义问题。","`lowrank_expert_residual` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","已实现最小可运行 `LowRankExpertResidualSparseCoder`：low-rank trunk + expert-local first pass + global residual cleanup second pass。","已补 `research/AutoResearch/override_registry.py` 中 `lowrank_expert_residual -> {TRUNK_RANK, STAGE1_RATIO}`，避免后续 structural override 被拒绝。","exact smoke 结果：`integration_smoke: OK lowrank_expert_residual 192 1 cuda`；成本估算 combined_ratio≈1.06x，combined_budget_ratio≈0.71x，可行。"],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py","research/AutoResearch/override_registry.py"]}
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index 91bac59020060f9cb20f1c5672cff0415bfd5bf3..d59ed1592aac4f150477513c3e730e608fb4adc5
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -32,6 +32,7 @@
+     },
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "lowrank_residual": _LOWRANK_KEYS,
++    "lowrank_expert_residual": _TWOSTAGE_KEYS,
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 1c6a01fc7a55adab472eed201f63ce694ea966b7..e8ff559dd4ec919069aca80413fa2aa375065dcd
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -217,6 +217,7 @@
+             "routed",
+             "expert_topk",
+             "lowrank_expert_topk",
++            "lowrank_expert_residual",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fad5835c7b1443c4f97d1a05d0f5f8ac249fa58a..700a327f63d0e23ce35bc06766fc519e6699b758
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -410,6 +410,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+         return LowRankExpertTopKSparseCoder
++    if architecture == "lowrank_expert_residual":
++        return LowRankExpertResidualSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1403,6 +1405,264 @@
+         )
+ 
+ 
++class LowRankExpertResidualSparseCoder(SparseCoder):
++    """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.expert_num_latents = self.num_experts * self.latents_per_expert
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.expert_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        if self.stage1_k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
++                f"got stage1_k={self.stage1_k} and "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++        self.residual_encoder.bias.data.zero_()
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            expert_decoder = self.expert_encoders.data.reshape(
++                self.expert_num_latents, d_in
++            )
++            decoder_init = torch.cat(
++                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage1_k, dim=-1, sorted=False
++        )
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.expert_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++
++        stage1_acts, stage1_indices, stage1_full = self._encode_expert_stage(residual)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = residual - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_residual = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+tokens used
+222,649

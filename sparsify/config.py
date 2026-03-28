@@ -217,6 +217,7 @@ class TrainConfig(Serializable):
             "routed",
             "expert_topk",
             "lowrank_expert_topk",
+            "lowrank_expert_residual",
             "group_topk",
             "factorized_topk",
             "lowrank_residual",
