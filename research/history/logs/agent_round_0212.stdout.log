@@ -1,0 +1,1157 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_factorized_residual"},{"key":"K","value":"64"},{"key":"EXPANSION_FACTOR","value":"1"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"},{"key":"TRUNK_RANK","value":"32"}],"expected_win":"lower_cost","experiment_tier":"full","family_name":"lowrank_factorized_residual","family_stage":"mainline","hypothesis":"候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r beta_r u_r + Σ_i alpha_i b_i，其中 {u_r} 是静态 trunk 向量库、{b_i} 是静态 residual 向量库；factorized scorer 只影响在线选择与系数计算，不改变 decoder 端的静态库有限加权和形式，因此可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”链路，兼容性为扩展兼容。单主变量选择 TRUNK_RANK：在保持 ARCHITECTURE=lowrank_factorized_residual、K=64、EF=1、signum、LR=3e-3 不变时，把 trunk_rank 从当前 auto≈128 下调到 32，测试当前 0.69x 点的主要冗余是否来自过大的 trunk 库；若 trunk 只是提供粗补偿而 residual 分支已承担主要表达，则可把 encoder+deployment 总成本一口气压入 <0.5x 区域，同时维持明显优于 topk@0.31x 的 FVU。","needs_sanity":false,"next_hypotheses":["如果 TRUNK_RANK=32 仍保持明显优于 topk@EF1,K64 的 FVU 且进入 <0.5x，则固定该 family 后只沿 K 轴做一次补点。","如果 TRUNK_RANK=32 的 FVU 退化过大，则说明该 family 的收益高度依赖 trunk 容量，低开销主战场应回到更短链路的 topk 或新的轻量单库方案。"],"notes_to_memory":["lowrank_factorized_residual 的导出形式稳定为 trunk 静态库 + residual 静态库的有限加权和，属于扩展兼容，可继续保留在兼容 frontier 候选集中。","r210 在 0.69x 处取得 0.1256 FVU，且 tokens_per_sec≈166.6k、总耗时 291s，明显快于近期 topk/soft-codebook 线；因此优先压缩 trunk_rank 比继续增大 K 更符合当前低开销与训练成本双目标。"],"primary_variable":"other_param","self_review":"这轮只改一个主轴 TRUNK_RANK，归因干净，且直接针对 r210 暴露出的成本结构问题。选择 32 而不是 64，是因为 64 大概率仍停留在 >0.5x 边界外；32 才有机会真正补上当前最缺的 <0.5x 前沿，但风险是 trunk 过度压缩后 FVU 可能明显反弹。","summary":"在扩展兼容的 lowrank_factorized_residual 上做一次低开销 param-only 探索：固定 K=64、EF=1、signum、LR=3e-3，仅把 TRUNK_RANK 压到 32，目标是在保留 trunk+residual 双库导出形式的同时，把当前 0.69x 候选推进到 <0.5x 区域。","touched_files":[]}
+
+--- STDERR ---
+Reading prompt from stdin...
+OpenAI Codex v0.116.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: medium
+reasoning summaries: none
+session id: 019d329b-1c0a-7f51-8116-bf8ba7ff2df6
+--------
+user
+你是本仓库中的 LUTurbo 自动研究 Agent。
+
+系统使命：
+- 为 LUTurbo 搜索可部署的基向量分解模块
+- 真正目标是降低 LUTurbo 在 CPU 上的总在线成本与时延，而不只是把 sparsify-ascend 内部的 SAE 指标做高
+- 优先考虑那些有希望同时降低“选择 + 系数计算 + 查表 + 在线补偿”总成本的方案
+
+模块契约：
+- 学到的表示必须能导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”推理流水线
+- 最终重构必须能表示成一个或多个静态向量库上的有限加权和
+- SAE 只是当前基线实现，不是必须坚持的唯一架构形式
+
+训练侧代理目标：
+- 维护并改善 (total_cost, FVU) 的 2D Pareto frontier
+- total_cost = encoder 选择成本 + 部署查表成本，两者加和后与 FVU 做 Pareto 权衡
+- 用尽可能低的 total_cost 达到尽可能低的 FVU
+- 当前阶段重点探索区域：total_cost < 0.5x；首要任务是在这个区域内尽量降低 FVU
+- 0.5x-1.0x 区间可作为质量锚点或过渡对照，但不应继续作为默认主战场
+- >1.0x 区间只保留少量高质量参考点，不应继续主导搜索注意力
+- 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
+- K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
+- encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
+- 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
+- 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
+- 可优先尝试天然低成本方向：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案
+- 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得优先尝试
+
+执行层是固定的：
+- 训练：scripts/autoresearch_test.sh
+- 结果：research/controller.py
+- 记忆：research/history/
+- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
+
+规则：
+- 只能编辑 sparsify/ 下的文件
+- 纯参数实验必须使用 env_overrides
+- 每一轮只允许一个主假设
+- 必须设置 primary_variable，明确本轮主变化维度
+- 不要返回 command="stop"
+- 最终必须返回一个符合 action schema 的 JSON 对象
+
+单变量原则：每一轮只改变一个主维度。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 212 策略模式：低开销探索
+原因：当前 frontier 在 <0.5x total_cost 区域只有 1 个点，低开销前沿明显欠覆盖。
+当前参考 family：lowrank_two_stage_soft_codebook_residual
+当前参考配方：ARCHITECTURE=lowrank_two_stage_soft_codebook_residual K=128 EXPANSION_FACTOR=2 OPTIMIZER=signum LR=3.0e-3
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。
+4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。
+5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。
+6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=211, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=8
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.31x (sel=0.25x + deploy=0.06x)  fvu=0.25825566053390503  arch=topk  K=64 EF=1  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=0.56x (sel=0.5x + deploy=0.06x)  fvu=0.2336459457874298  arch=topk  K=64 EF=2  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=0.69x (sel=0.38x + deploy=0.31x)  fvu=0.12559494376182556  arch=lowrank_factorized_residual  K=64 EF=1  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=0.88x (sel=0.5x + deploy=0.38x)  fvu=0.10676437616348267  arch=lowrank_factorized_residual  K=128 EF=2  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=1.0x (sel=0.62x + deploy=0.38x)  fvu=0.07301954925060272  arch=lowrank_residual  K=128 EF=2  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=1.38x (sel=0.75x + deploy=0.62x)  fvu=0.06465830653905869  arch=lowrank_soft_codebook_residual  K=128 EF=2  lr=3.0e-3 opt=signum [FEASIBLE]
+  total=1.88x (sel=1.25x + deploy=0.62x)  fvu=0.058106470853090286  arch=lowrank_two_stage_soft_codebook_residual  K=128 EF=2  lr=3.0e-3 opt=signum [OVER BUDGET]
+  total=6.88x (sel=6.25x + deploy=0.62x)  fvu=0.04880391061306  arch=lowrank_two_stage_soft_codebook_residual  K=128 EF=12  lr=2.4e-3 opt=signum [OVER BUDGET]
+  !! <0.5x 区域仅有 1 个点，当前最佳 FVU=0.2583，仍明显欠覆盖。
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=64, EF=1) [FEASIBLE]:
+    总成本: 0.31x | 预算比率: 0.21x | encoder: 0.25x | 部署: 0.06x | FVU: 0.25825566053390503
+  最优可行点 → lowrank_soft_codebook_residual (K=128, EF=2) [FEASIBLE]:
+    总成本: 1.38x | 预算比率: 0.92x | encoder: 0.75x | 部署: 0.62x | FVU: 0.06465830653905869
+  全局最低 FVU → lowrank_two_stage_soft_codebook_residual (K=128, EF=12) [OVER BUDGET]:
+    总成本: 6.88x | 预算比率: 4.58x | encoder: 6.25x | 部署: 0.62x | FVU: 0.04880391061306
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，5）：
+  r207 topk architecture -> keep fvu=0.2336459457874298 452s | 候选 family: topk。最终重构公式为 x_hat = Σ_i alpha_i b_i，其中 b_i 来自单个静态向量库；在线只做单样本 top-...
+  r208 topk param_only -> keep fvu=0.25825566053390503 407s | 候选 family: topk。最终重构公式为 x_hat = Σ_i alpha_i b_i，其中 b_i 来自单个静态向量库；导出到 LUTurbo/...
+  r209 topk param_only -> policy_reject 88s | 候选 family: topk。最终重构公式为 x_hat = Σ_i alpha_i b_i，其中 b_i 来自单个静态向量库；导出到 LUTurbo/...
+  r210 lowrank_factorized_residual architecture -> keep fvu=0.12559494376182556 291s | 候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r beta_r u_r + Σ_i a...
+  r211 lowrank_factorized_residual param_only -> policy_reject 91s | 候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r beta_r u_r + Σ_i a...
+
+操作提示：
+  1. 最近多轮训练耗时明显上升。做决策时必须同时关注效果和运行代价，不要只看最终 FVU。每轮都要检查 tokens_per_sec、总耗时、final_total_tokens，以及性能下降
+  是来自训练更长、吞吐变慢，还是某个 recipe（如 hadamard）本身更贵。若新 recipe 只带来很小 FVU 改善但显著拖慢训练，应明确把它视为负面信号，并优先验证是否值得继续。
+
+架构家族（frontier 持有者 + 最近测试）：
+  factorized_topk [active] best_fvu=0.22283552587032318 last_r=206: r196 k128 archive; r204 k64 keep; r205 k32 keep
+  lowrank_asymmetric_two_stage_soft_codebook_residual [discarded] best_fvu=0.050548896193504333 last_r=203: r176 k128 discard; r190 k128 discard; r203 k128 discard
+  lowrank_factorized_residual [active] best_fvu=0.09643317759037018 last_r=211: r181 k128 keep; r194 k128 archive; r210 k64 keep
+  lowrank_residual [active] best_fvu=0.06309578567743301 last_r=193: r151 k128 archive; r160 k128 archive; r193 k128 archive
+  lowrank_soft_codebook_residual [active] best_fvu=0.05776164308190346 last_r=202: r159 k128 archive; r192 k128 archive; r202 k128 archive
+  lowrank_two_stage_soft_codebook_residual [active] best_fvu=0.04880391061306 last_r=187: r184 k128 archive; r186 k128 archive; r187 k128 archive
+  topk [active] best_fvu=0.14699885249137878 last_r=209: r195 k128 discard; r207 k64 keep; r208 k64 keep
+
+近期训练失败：
+  r25 topk SignalException: SignalException: Process 60528 got signal: 15
+
+Operator guide 关键优先级：
+## Runtime Priorities
+
+在参考下面的 idea bank 之前，先遵守这些当前阶段的运行时优先级。
+
+1. 第一优先级不是扩展搜索空间，而是消除当前反复出现的 blocker：
+   - `sanity_failed`
+   - `first_step_timeout`
+   - 变量隔离失效导致的混杂实验
+
+2. 如果一轮失败在 `sanity`，优先修复对应架构本身的前向/反向兼容性问题。
+   - 不要先改共享 trainer / runtime 路径，除非失败证据明确指向 trainer。
+   - 如果 sanity 根本没过，不要把问题归因为训练阶段的 first-step bottleneck。
+
+3. 一轮只允许一个主变量。
+   - 不要同时修改 `architecture + lr`
+   - 不要同时修改 `code + architecture + lr`
+   - 只有在运行时明确允许的例外情况下，才允许耦合修改
+
+4. 在系统稳定前，优先顺序应为：
+   - 先拿到能稳定运行并能产生有效信号的实验
+   - 再做架构比较
+   - 最后才扩大到更复杂的训练目标或部署对齐目标
+
+5. 当前不要轻易改动固定执行层的语义。
+   - 不要改变 evaluation semantics
+   - 不要改变 launcher 行为
+   - 不要引入会让历史结果不可比的大改动
+
+6. 如果最近的失败模式表明问题出在系统观测或运行时策略，不要把它误判成架构质量结论。
+
+7. 下面的内容首先是 idea bank，不是强制 recipe。
+   - 在当前 blocker 未解决前，应优先选择最小、最可解释、最容易归因的动作。
+   - 只有当基础运行链路稳定后，才扩大到更发散的搜索。
+
+---
+
+
+历史研究关键结论：
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`total_cost = selection_cost + deployment_cost`
+
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
+
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
+
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
+
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
+
+降低 total_cost 的已知方向：
+
+降低 encoder 成本：
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
+
+---
+
+完整历史研究文档：
+# Prior Research History: LUTurbo-Compatible SAE Search
+
+## 文档状态
+
+这份文档用于指导**当前这条 LUTurbo AutoResearch run 在新约束下继续搜索**。
+它既不是简单沿用旧时代结论继续刷高成本主线，也不是完全无视既有历史从零开始重开世界。
+
+- 统计来源：`research/history/round_summaries/round_0001.json` 到 `round_0171.json`、`research/history/frontier.json`、`research/history/results.tsv`、`sparsify/sparse_coder.py`
+- 当前状态：已完成 171 轮，`round 172` 已启动
+- 新管理逻辑已加入 LUTurbo 兼容性约束与 total_cost 预算约束
+- 旧 history 仍然有价值，但其中大量结论来自高 EF / 高成本 regime，不能直接当成当前轮次的默认策略
+- 旧 frontier 主要用来提供结构灵感、兼容性判断与高质量参考点，不应继续直接主导当前搜索注意力
+- 当前阶段的默认目标是补全 `total_cost < 0.5x` 的低开销区域；如果该区域没有可用点，可先从最简单 baseline（如 `TopK`）重新建立对照
+
+请这样使用本文件：
+
+- 用它来总结旧探索中哪些结构思路值得继承，哪些问题已经暴露
+- 用它来指导当前 run 在新约束下的搜索方向，而不是机械复用旧实验结论
+- 用它来帮助判断某个 family 是否与 LUTurbo/Lottable 兼容
+
+不要这样使用本文件：
+
+- 不要把跨不同 EF、不同 recipe、不同训练阶段的 FVU 直接当成绝对排名
+- 不要把旧 frontier 当成当前默认主线答案
+- 不要忽略新的架构约束，只按旧结果继续搜索
+
+---
+
+## 1. 本次 AutoResearch 搜索目标
+
+这次 AutoResearch 的目标，是在新兼容性与成本约束下，继续搜索**能够替代 LUTurbo 现有 SAE 方案**的可部署架构。
+这不是单纯沿旧高成本主线做局部清洗，但也不是完全抛弃历史、从零开始重开。
+
+要求如下：
+
+- 优先找结构上可落地、可导出、可替换的方案
+- 旧 frontier 只能作为参考，不是当前默认目标答案
+- 当前阶段优先补 `total_cost < 0.5x` 区域的 Pareto 前沿，在这个区域尽量压低 FVU
+- `0.5x-1.0x` 区间主要作为质量锚点或过渡对照
+- `>1.0x` 区间只保留少量高质量参考，不应继续作为默认主战场
+- 如果低开销区域暂时没有可用点，可以从 `TopK`、`factorized_topk`、`lowrank_residual` 这类简单可导出 baseline 重新建立起点
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`total_cost = selection_cost + deployment_cost`
+
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
+
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
+
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
+
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
+
+降低 total_cost 的已知方向：
+
+降低 encoder 成本：
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
+
+---
+
+## 3. 历史总览
+
+### 3.1 四个阶段
+
+| 阶段 | 轮次 | 主导思路 | 主要结果 |
+|---|---:|---|---|
+| P1 | 1-39 | 先把 `lowrank_two_stage_residual` 低 K frontier 跑明白，再做 K/LR/AUX 清洗 | 建立了最早的低 K 主线，确认 plain `lowrank_residual` 只在极低 K 有价值 |
+| P2 | 40-69 | `K=24, EF=12` 严重停滞后，大量扫“机制型” family | 大多数 selector gimmick 全部失败；第一次发现 soft-codebook 是有效方向 |
+| P3 | 70-116 | 围绕 soft-codebook 展开家族化扩张 | `lowrank_two_stage_soft_codebook_residual` 接管 EF=12 主线，`routed_*` 在部分 K 上更强 |
+| P4 | 117-171 | 固定到 EF=16 后，围绕 bucketed 主干做 K 扫描、架构对照、优化器/预处理/损失清洗 | `bucketed_lowrank_two_stage_soft_codebook_residual` 成为 EF=16 主线；大多数后续清洗没有超越它 |
+
+### 3.2 Agent 思考方式的演化
+
+从 history 看，agent 的思维大致经历了四次转折：
+
+1. 先验证“低秩 trunk + 残差稀疏 refinement”是否成立。  
+   这一步是正确的，因为它先把一个有效 inheritance line 建起来，而不是直接乱扫。
+
+2. 当 `K=24, EF=12` 长时间不进步时，agent 转向“机制穷举”。  
+   这一阶段 architecture churn 很重，但也正是在这里试出了 `lowrank_soft_codebook_residual` 这个真正有价值的父节点。
+
+3. 发现 soft-codebook 有用后，agent 的主线判断变成了：  
+   “粗糙结构需要先被 coarse branch 吸收，再把稀疏预算留给 residual refinement。”  
+   这一步是整个历史里最重要的结构性进展。
+
+4. 到 EF=16 阶段后，agent 基本认定 `bucketed_lowrank_two_stage_soft_codebook_residual` 是当前最强 backbone，于是大量轮次在它周围做 K 扫描、家族对照和 recipe 清洗。  
+   问题在于后半段 architecture round 仍然很多，非架构轴尝试偏少，而且不少结论带有 regime shift 干扰。
+
+### 3.3 结构上真正有价值的 inheritance line
+
+最值得继承的不是某一个单点，而是下面这条 family 演化链：
+
+1. `lowrank_residual`
+2. `lowrank_soft_codebook_residual`
+3. `lowrank_two_stage_soft_codebook_residual`
+4. `routed_lowrank_two_stage_soft_codebook_residual`
+5. `bucketed_lowrank_two_stage_soft_codebook_residual`
+
+换句话说，历史不是“随机试了很多方法”，而是逐渐学到：
+
+- 单纯 residual sparse coding 不够
+- coarse codebook 分支确实有用
+- 两阶段 residual refinement 比单阶段更稳
+- routing 有时能改善 support allocation
+- bucketing 在强 backbone 上有效，在弱 backbone 上无效
+
+---
+
+## 4. 当前 frontier 与主线结论
+
+**注意：frontier 已从 (K, EF) 离散格子改为 (total_cost, FVU) 2D Pareto front。**
+
+K 和 EF 不再是固定约束，而是可自由调整的参数。frontier 中每个点代表一个 (total_cost, FVU) 的非支配权衡。total_cost = encoder 选择成本 + 部署查表成本。
+
+以下是旧格式下的历史最优，供新一轮搜索参考：
+
+| 架构 | 历史最好 FVU | 备注 |
+|---|---:|---|
+| `lowrank_two_stage_soft_codebook_residual` | 0.0826 | EF=12 主线 |
+| `routed_lowrank_two_stage_soft_codebook_residual` | 0.0565 | EF=12 高 K 主线 |
+| `bucketed_lowrank_two_stage_soft_codebook_residual` | 0.0451 | EF=16 主线 |
+
+可以直接得出三个结论：
+
+1. 旧的 `lowrank_two_stage_residual` 已经不是 frontier 主人，只是早期关键过渡节点。
+2. soft-codebook 两阶段家族是最强主线。
+3. `bucketed_lowrank_two_stage_soft_codebook_residual` 在大参数预算下最强。
+
+---
+
+## 5. 架构台账
+
+说明：
+
+- 表中“次数”按有训练结果的 round 统计，不含纯 `policy_reject`
+- “最好点”格式为 `r轮次 K/EF FVU`
+- “兼容性”使用上面的三档定义
+
+### 5.1 单库 selector 家族
+
+| 架构 | 次数 | 最好点 | 核心思路 | 兼容性 | 结论与可改造方向 |
+|---|---:|---|---|---|---|
+| `topk` | 1 | `r56 K24/EF12 0.2736` | 最朴素单库稀疏编码 | 直接兼容 | 作为基线有意义，但在目标 regime 明显弱；不应重新作为主线扫，只保留作 sanity baseline。 |
+| `gated` | 1 | `r53 K24/EF12 0.2679` | 在 top-k 前加 sigmoid gate | 直接兼容 | 单独 gating 很弱；如果重用，只应挂到强 backbone 上，而不是 standalone。 |
+| `routed` | 1 | `r54 K24/EF12 0.2878` | 用 router 扰动 support 排名 | 直接兼容 | 裸 routed 不成立；routing 只有接到强 soft-codebook/two-stage 主干上才有意义。 |
+| `jumprelu` | 2 | `r167 K32/EF16 0.2467` | 可学习阈值平滑激活 | 直接兼容 | 历史上始终偏弱；若重试，必须有明确阈值控制或 deployment 截断方案，不要再直接裸试。 |
+| `group_topk` | 1 | `r48 K24/EF12 0.2737` | 先组内竞争，再全局取 top-k | 直接兼容 | 组约束在裸模型上太强；如果要重用，只应作为强 coarse branch 后的 residual selector。 |
+| `factorized_topk` | 1 | `r47 K24/EF12 0.3714` | 稀疏前加低秩 bottleneck scorer | 直接兼容 | 在 EF=12 时 scorer factorization 明显伤害表达（FVU=0.3714）。但在成本约束（≤1.5x）下，factorized_topk 是少数能在 EF≤10 保持可行的架构之一，在低 EF regime 下值得重新评估。 |
+| `bucketed_topk` | 1 | `r55 K24/EF12 0.2725` | 根据范数在两套 scorer 间混合 | 直接兼容 | bucketing 本身不是答案；后面真正有效的是把 bucketing 放到强 soft-codebook 两阶段 backbone 上。 |
+| `batch_topk` | 2 | `r166 K32/EF16 0.2637` | 在 batch 级别分配总预算 | 不兼容 | 当前定义依赖 batch 共同决策，不适合作为 LUTurbo/Lottable 主线。若重构，必须改成单样本可导出的变长 K 方案。 |
+| `adaptive_budget_topk` | 1 | `r108 K24/EF12 0.3593` | 按样本难度动态分配 quota，但仍基于 batch 总预算 | 不兼容 | 和 `batch_topk` 同类问题；若保留思想，只能改成单样本 capped variable-K，而不是 batch-coupled 预算。 |
+| `whitened_topk` | 1 | `r57 K24/EF12 165315.8` | 归一化/混合作为预条件再 top-k | 直接兼容 | 训练严重爆炸。当前 trainable whitening 路线直接冻结，除非先有明确数学修正。 |
+| `multi_branch_gated` | 1 | `r42 K24/EF12 0.2645` | 多个 gated 分支加权混合后再 top-k | 直接兼容 | branch specialization 没有转成效果；如果重用，应让分支对应明确静态子库，而不是只混 scorer。 |
+
+### 5.2 残差与 low-rank 主干家族
+
+| 架构 | 次数 | 最好点 | 核心思路 | 兼容性 | 结论与可改造方向 |
+|---|---:|---|---|---|---|
+| `two_stage_residual` | 1 | `r44 K24/EF12 0.2579` | 不带 low-rank trunk 的两阶段 residual sparse | 扩展兼容 | 说明“分阶段”本身不够，必须配合更强 coarse branch。 |
+| `lowrank_residual` | 4 | `r160 K24/EF16 0.1007` | 低秩 trunk + 单阶段 residual sparse | 扩展兼容 | 早期是重要父节点，超低 K 有价值；但后续被 soft-codebook 分支整体超越。 |
+| `lowrank_two_stage_residual` | 26 | `r16 K32/EF12 0.0893` | 低秩 trunk + 两阶段 residual sparse | 扩展兼容 | 这是早期主线 workhorse，证明 staged residual 是有效的；现在不应重开大扫，但应作为对照父节点保留。 |
+| `routed_lowrank_two_stage_residual` | 1 | `r162 K24/EF16 0.0943` | 给两阶段 residual 加 router | 扩展兼容 | 历史上还经历过 code-fix 才跑通，但最终仍不敌 soft-codebook 主线；routing 只有挂到更强 backbone 上才值得。 |
+| `lowrank_gated_residual` | 7 | `r171 K64/EF16 0.0776` | residual sparse 改为 gated selector | 扩展兼容 | 绝对数值不算极差，但从未真正赢过当前主线；如果重试，只应配合 LR retune 或更强 coarse 分支。 |
+| `lowrank_jumprelu_residual` | 5 | `r148 K32/EF16 0.0954` | residual sparse 改为 JumpReLU | 扩展兼容 | learned threshold 没转成收益；目前应降级为次要灵感而非主线。 |
+| `lowrank_grouped_residual` | 2 | `r161 K24/EF16 0.1007` | residual sparse 改为组内竞争 | 扩展兼容 | grouped 约束太强；如果保留，只能放在已经有 coarse branch 的后段。 |
+| `lowrank_factorized_residual` | 1 | `r61 K24/EF12 0.1298` | factorized residual scorer | 扩展兼容 | 比 plain residual 差，说明 bottleneck scorer 没解决关键问题。 |
+| `lowrank_multi_branch_residual` | 3 | `r157 K24/EF16 0.0998` | 多个 residual scorer 分支混合 | 扩展兼容 | 分支混合只作用在 scorer 上不够；若重做，应让每个分支对应独立可导出的子库。 |
+| `bucketed_lowrank_residual` | 3 | `r163 K24/EF16 0.0985` | residual scorer 做 low/high bucketing | 扩展兼容 | 证明 bucketing 裸用不够，真正有效的是 bucketed + soft-codebook + two-stage 的组合。 |
+| `lowrank_adaptive_budget_residual` | 1 | `r109 K24/EF12 0.1288` | low-rank trunk + batch-coupled adaptive budget | 不兼容 | 与 `adaptive_budget_topk` 同类，当前不应进入主线。 |
+| `whitened_lowrank_residual` | 1 | `r114 K24/EF12 8473.23` | 先预条件 residual 再 sparse 选择 | 扩展兼容 | 训练直接爆炸，说明当前 whitening/preconditioner 设计不稳；冻结。 |
+| `whitened_lowrank_gated_residual` | 1 | `r41 K16/EF12 7.8932` | whitened residual + gated selector | 扩展兼容 | 同样灾难性，不值得继续。 |
+
+### 5.3 Codebook / VQ 家族
+
+| 架构 | 次数 | 最好点 | 核心思路 | 兼容性 | 结论与可改造方向 |
+|---|---:|---|---|---|---|
+| `codebook_topk` | 1 | `r49 K24/EF12 0.2688` | 先 coarse codebook，再 sparse residual | 扩展兼容 | coarse codebook 方向本身是对的，但没有 low-rank trunk 时太弱；后续已经被 `lowrank_soft_codebook_residual` 吸收。 |
+| `residual_vq` | 2 | `r168 K32/EF16 0.2429` | hard codebook + sparse residual | 扩展兼容 | 离散分配太硬，整体偏脆；后续应优先 soft-codebook，不要回到硬 VQ 主线。 |
+| `two_code_residual_vq` | 1 | `r51 K24/EF12 0.2633` | 两级 hard codebook 后再 sparse | 扩展兼容 | 更深的离散 coarse path 没救回来；说明“再加一个 VQ 层”不是关键。 |
+| `lowrank_residual_vq` | 5 | `r147 K32/EF16 0.0944` | low-rank trunk + hard codebook + sparse residual | 扩展兼容 | 比纯 VQ 好很多，但仍 consistently 输给 soft-codebook 系；如果保留，只适合作为“soft -> hard”蒸馏灵感。 |
+
+### 5.4 Soft-codebook 主线家族
+
+| 架构 | 次数 | 最好点 | 核心思路 | 兼容性 | 结论与可改造方向 |
+|---|---:|---|---|---|---|
+| `lowrank_soft_codebook_residual` | 9 | `r64 K32/EF12 0.0909` | low-rank trunk + soft codebook + 单阶段 sparse residual | 扩展兼容 | 这是第一条真正成功的新父节点；如果重新起步，它应该是最简单的 soft-codebook 对照组。 |
+| `lowrank_grouped_soft_codebook_residual` | 5 | `r146 K32/EF16 0.0895` | soft-codebook 后接 grouped sparse | 扩展兼容 | grouped 版始终没打过 plain/two-stage/bucketed；不建议作为主线。 |
+| `lowrank_gated_soft_codebook_residual` | 3 | `r139 K32/EF16 0.0872` | soft-codebook 后接 gated sparse | 扩展兼容 | 比 grouped 稍好，但仍没形成主线优势；如果重用，只能作为 selector head 实验，不要单独长期占轮次。 |
+| `lowrank_two_stage_soft_codebook_residual` | 21 | `r137 K32/EF16 0.0826` | low-rank trunk + soft codebook + 两阶段 residual sparse | 扩展兼容 | 整个 history 最重要 family 之一；EF=12 大部分 frontier 由它接管，应该继续作为核心父节点。 |
+| `lowrank_asymmetric_two_stage_soft_codebook_residual` | 3 | `r140 K32/EF16 0.0885` | 把两阶段预算前置，75/25 分配 | 扩展兼容 | 固定非对称预算没有证明有效；若再试，应改成可学习或数据依赖的 stage budget，而不是手写比例。 |
+| `routed_lowrank_two_stage_soft_codebook_residual` | 13 | `r97 K128/EF12 0.0565` | 在两阶段 soft-codebook 主干上显式做 routing | 扩展兼容 | 这是第二条真正成功主线；EF=12 的 K=8/16/64/96/128 都由它占据，说明 routing 在强 backbone 上确实有价值。 |
+| `routed_lowrank_asymmetric_two_stage_soft_codebook_residual` | 1 | `r116 K24/EF12 0.1546` | routing + 非对称预算同时叠加 | 扩展兼容 | 复杂度加太快，效果没有支撑；说明同时叠多个变化不如沿主线逐步改。 |
+| `bucketed_lowrank_two_stage_soft_codebook_residual` | 22 | `r130 K128/EF16 0.0451` | 在两阶段 soft-codebook 主干上做 bucketed stage scorer | 扩展兼容 | 当前 EF=16 主线霸主。真正证明了 bucketing 要依附强 backbone 才有收益。下一轮应优先从它及其父节点继续改。 |
+| `whitened_lowrank_two_stage_soft_codebook_residual` | 1 | `r118 K16/EF12 14872.87` | 在 soft-codebook 两阶段主干上加 residual whitening | 扩展兼容 | 严重爆炸，当前 whitening 路线冻结。 |
+
+---
+
+## 6. 关键 family 的结构公式
+
+这一节不是为了数学完整，而是为了让下一轮 agent 明白哪些结构是可以直接继承的。
+
+### 6.1 `lowrank_residual`
+
+`x_hat = U(Vx) + Σ_i alpha_i b_i`
+
+- `U(Vx)` 是低秩 trunk
+- `b_i` 是 residual sparse dictionary
+
+结论：这是第一代“扩展兼容”结构。
+
+### 6.2 `lowrank_soft_codebook_residual`
+
+`x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i b_i`
+
+- 在 low-rank trunk 后，加一层 soft codebook coarse branch
+- 然后再做 residual sparse coding
+
+结论：这是整个 soft-codebook 主线的起点。
+
+### 6.3 `lowrank_two_stage_soft_codebook_residual`
+
+`x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) b_j`
+
+- 先 low-rank trunk
+- 再 soft codebook coarse branch
+- 再做两阶段 residual sparse refinement
+
+结论：这是当前最值得继续继承的基础公式之一。
+
+### 6.4 `routed_lowrank_two_stage_soft_codebook_residual`
+
+最终重构公式与上一条相同；变化只在 support selection：
+
+- 路由器只改变选择哪些原子进入 stage1/stage2
+- 最终仍落在固定库上
+
+结论：routing 在这里是“selector 改造”，不是“表示改造”。
+
+### 6.5 `bucketed_lowrank_two_stage_soft_codebook_residual`
+
+最终重构公式仍然与 5.3 相同；变化在 stage scorer：
+
+- 每个 stage 都不是单一 scorer，而是 low/high 两套 scorer 由 norm gate 混合
+- 但最终 decode 仍是固定库
+
+结论：bucketing 在这里是有效的，因为 backbone 本身已经足够强。
+
+---
+
+## 7. 从 history 提炼出的硬结论
+
+
+这部分内容和结论都是在之前的约束下得到的。在新的约束下，也许之前不行的方案，现在可能变得可行了。
+
+所以，请你不要直接复用这部分的结论。
+
+
+### 7.1 哪些方向已经基本证伪
+
+- 所有 batch-coupled budget family：`batch_topk`、`adaptive_budget_topk`、`lowrank_adaptive_budget_residual`
+- 所有当前实现形态的 whitening/preconditioning family：`whitened_topk`、`whitened_lowrank_residual`、`whitened_lowrank_gated_residual`、`whitened_lowrank_two_stage_soft_codebook_residual`
+- 裸 selector gimmick：`topk`、`gated`、`routed`、`group_topk`、`factorized_topk`、`multi_branch_gated`
+- 硬 VQ 主线：`residual_vq`、`two_code_residual_vq`
+
+这些方向不是“永远不许碰”，而是在没有新理由时，不应重新占据**高成本主线**轮次。
+尤其对裸 selector family，上述负结论主要成立于高 EF / 高成本 regime；在 `total_cost < 0.5x` 的极低开销区，这些简单架构仍可能是合理起点，不应因旧 regime 的失败被一刀切排斥。
+
+### 7.2 哪些方向应作为真正的可继承父节点
+
+- `lowrank_soft_codebook_residual`
+- `lowrank_two_stage_soft_codebook_residual`
+- `routed_lowrank_two_stage_soft_codebook_residual`
+- `bucketed_lowrank_two_stage_soft_codebook_residual`
+
+这四个 family 构成下一轮最值得复用的核心父系。
+
+### 7.3 哪些负面结果不应该简单归罪于 architecture
+
+history 里有几个常见误判来源：
+
+1. EF regime shift。  
+   很多 family 早期主要在 `EF=12` 下试，后面又被拿到 `EF=16` 下做现代对照。输掉并不总是 architecture 本身的锅。
+
+2. Optimizer/LR 失配。  
+   尤其在 EF=16 阶段，`adam` 的历史表现更像“逐步靠近可用区间但仍未调好”，而不是“一次失败就可完全判死”。
+
+3. 只看最后 F，不看曲线形状。  
+   历史后段已经出现明显模式：某些 recipe 最终 F 差一点，但曲线形状显示训练仍在改善或者只是 LR 偏大/偏小。
+
+4. code-fix 和 scientific result 混在一起。
+   `routed_*` 家族至少出现过”先修实现，再重新比较”的情况，不能把第一次失败直接当作结构负结论。
+
+### 7.4 新成本约束下的 regime shift
+
+以上 §7.1-7.3 的结论均在 EF=12 或 EF=16 下得出。当前 AutoResearch 已引入选择成本硬约束（≤1.5×h×n），所有 EF=12 配置均超出预算。这意味着：
+
+1. 之前在 EF=12/16 下的 FVU 排名不直接适用于低 EF regime
+2. “简单”架构（topk、factorized_topk）在低 EF 下可能是最佳 cost-FVU 权衡
+3. 复杂架构（bucketed_lowrank_two_stage_*）在 EF≤2 才能满足成本约束，复杂度优势未必能在如此低的 EF 下体现
+4. 应将”低 EF 下的 FVU”作为新的独立搜索维度
+5. 在 `total_cost < 0.5x` 区域，应积极探索更简单、更小、更稀疏的结构，而不是默认沿高质量主线做邻域微调
+6. 对多专家/多子库方案，只有在 router 很轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得优先尝试
+
+---
+
+## 8. 非架构因素的复盘
+
+### 8.1 这个系统历史上太偏 architecture churn
+
+`171` 个 round 里：
+
+- `architecture` 主变量：`85`
+- `k` 主变量：`46`
+- `auxk_alpha`：`13`
+- `lr`：`8`
+- `optimizer`：`5`
+- 其他训练轴总和：很少
+
+这说明：
+
+- 历史经验很丰富，但主要集中在“换 family”
+- recipe 空间其实并没有被对称地探索
+
+### 8.2 已经得到的 recipe 层经验
+
+- `signum` 仍然是目前最稳的主线优化器
+- `adam` 不应因一次失败被判死，但它的有效区间显然和 `signum` 不同，必须配 LR retune 一起看
+- `Hadamard / whitening` 在当前实现上几乎一律负面
+- `AUXK_ALPHA` 能做局部清洗，但从历史看它不是决定性主效应
+- `Matryoshka` 和 loss shaping 目前只试了很少轮，不足以下结论，但现阶段也没有显示出能压过主线 backbone
+
+### 8.3 下一轮对训练轴的要求
+
+下一轮如果再试 optimizer / loss / preprocessing，必须遵守：
+
+1. 改 optimizer 时允许联动调 LR。  
+   不要再用“换了 optimizer 但沿用旧 LR 就输了”来下结论。
+
+2. 必须看训练曲线形状，不只看最终 F。  
+   至少要区分：
+   - 直接崩坏
+   - 明显收敛到差点
+   - 在改善但步子不对
+
+3. 训练轴探索只能挂在强兼容 backbone 上。  
+   不要在已经弱势的 family 上做大量 recipe 清洗。
+
+---
+
+## 9. 下一轮 AutoResearch 应如何修改流程
+
+### 9.1 不要用单一叙事理解“下一轮”
+
+下一轮既不是“完全从零开始重搜 SAE”，也不是“继续沿旧高成本主线一路微调”。
+
+更准确地说，应分成两个 regime：
+
+- 在 `total_cost < 0.5x` 区域，目标是补低开销前沿，允许从简单架构重新出发
+- 在 `total_cost >= 0.5x` 区域，高质量 soft-codebook 主系仍可作为对照、锚点和继承参考
+
+### 9.2 新 family 进入候选集前，必须先写出这五项
+
+1. 它的最终重构公式
+2. 其中有哪些固定向量库
+3. 它是 `直接兼容`、`扩展兼容` 还是 `不兼容`
+4. 它是从哪个历史父节点改出来的
+5. 它相对于父节点只改了哪一个结构点
+
+如果这五项写不清，就不应该进入 round。
+
+### 9.3 允许优先探索的结构原语
+
+在当前阶段，优先考虑下面这些仍可导出、且有望兼顾低成本的原语：
+
+- low-rank trunk
+- soft codebook coarse branch
+- 1-2 个 residual sparse refinement branch
+- routing / gating / bucketing 这类 selector-side 改造
+- 多个静态子库的显式分支
+- factorized / grouped / coarse-to-fine scorer
+- 轻量多专家 / 多子库路由，但前提是 router 很轻、expert 更小、最终仍能导出为静态子库有限加权和
+
+### 9.4 仍应默认冻结的结构原语
+
+- batch-coupled budget
+- trainable whitening / preconditioning family
+- 没有明确理由的硬 VQ 深化
+- 没有导出公式的在线复杂 trunk
+
+### 9.5 搜索策略应按成本区间分层
+
+第一层：低开销区结构层  
+在 `<0.5x` 区域优先补前沿，可从简单架构重新出发，重点关注极低 EF、极低 K、更短选择链路、factorized scorer、轻量多专家/多子库方案。
+
+第二层：中高成本对照层  
+在 `0.5x-1.0x` 或更高区域，只保留少量强 backbone 作为质量锚点和解释性对照，必要时沿 soft-codebook 主系做小步结构改造。
+
+第三层：recipe 层  
+optimizer / LR / loss / aux 清洗应只挂在当前最有希望的 1-2 个 family 上，不要在明显弱势 family 上做大量 recipe 清洗。
+
+### 9.6 建议的搜索顺序
+
+1. 先补 `<0.5x` 区域：`topk`、`factorized_topk`、`lowrank_residual`、更轻的 factorized/grouped/coarse-to-fine 变体
+2. 再看 `0.5x-1.0x` 区域：寻找更强但仍不过度复杂的过渡结构
+3. 仅保留少量高质量 soft-codebook 主系点作为质量锚点：`lowrank_two_stage_soft_codebook_residual`、`routed_*`、`bucketed_*`
+4. 如果新结构来自高质量主系，应写清自己继承自哪个父节点；如果新结构是低开销新起点，也要写清为何它更适合 `<0.5x` regime
+
+---
+
+## 10. 下一轮最值得探索的修改方向
+
+这些方向都建立在“复用旧经验，但按新成本 regime 重新排序优先级”之上。
+
+### 10.1 在高质量参考线上，只改 selector
+
+目标 family：
+
+- `lowrank_two_stage_soft_codebook_residual`
+- `bucketed_lowrank_two_stage_soft_codebook_residual`
+
+可改点：
+
+- 更稳定的 routing / bucketing 方式
+- stage1 / stage2 的可学习预算，而不是固定 50/50 或 75/25
+- 让 selector 改造不改变最终可导出公式
+
+### 10.2 在高质量参考线里，默认保留 coarse branch
+
+history 已经很清楚：
+
+- soft-codebook 是真正解决问题的关键增量
+- 退回到纯 residual family，通常只会得到更差对照
+
+所以如果你是在 `>=0.5x` 的高质量参考线上继续改，新家族最好默认保留 coarse branch。
+但在 `<0.5x` 的低开销区，不应把“必须保留 coarse branch”当成硬约束。
+
+### 10.3 在低开销区，优先尝试简单且更短链路的结构
+
+更合理的候选包括：
+
+- 极低 EF + 小 K 的 `topk`
+- factorized / grouped / coarse-to-fine scorer
+- 更激进的 `lowrank_residual`
+- 轻量多专家 / 多子库方案，但必须满足 LUTurbo 可导出约束
+
+这些结构未必能赢下全局最低 FVU，但它们更有机会先把 total_cost 压进 `<0.5x` 区域。
+
+### 10.4 如果要做多分支，就让每个分支真的对应静态子库
+
+过去失败的一个典型模式是：
+
+- 分支只在 scorer 上混合
+- 最终 decode 仍然太像单库
+
+更合理的方向是：
+
+- 如果做 branch specialization，就让每个 branch 都对应明确可导出的静态子库
+- 否则只是让 encoder 更复杂，不一定给部署带来任何有意义的结构
+
+### 10.5 把“兼容性”写进 prompt，而不是靠事后人工筛选
+
+下一轮 prompt 应该显式告诉 agent：
+
+- 目标不是任意提高 FVU
+- 目标是找到可替代 LUTurbo/Lottable 现有 SE 模型的兼容结构
+- 每个 proposal 必须附带导出公式和兼容性标签
+
+---
+
+## 11. 给下一轮 agent 的起始先验
+
+可以直接把下面这几条作为 prompt 中的硬性提醒：
+
+1. 当前默认目标不是继续刷新全局最低 FVU，而是补全 `total_cost < 0.5x` 区域的 Pareto 前沿；在这个区域允许从简单架构（如 `topk`、`factorized_topk`、`lowrank_residual`）重新出发。
+2. 任何新架构都必须先写出最终重构公式，并判断是 `直接兼容`、`扩展兼容` 还是 `不兼容`。
+3. `batch_topk`、`adaptive_budget_*`、所有 `whitened_*`、硬 VQ 主线，默认冻结，不要无理由重开。
+4. 如果改优化器，不要只换优化器名；允许同时调 LR，并且必须看训练曲线形状，而不是只看最后的 F。
+5. 在 `<0.5x` 区域，简单架构不是被默认排除的对象；在 `>=0.5x` 区域，真正值得继续的高质量父节点只有少数几个。
+6. 如果一个 proposal 不能说明它相对于历史父节点到底改了什么，就说明它还不够成熟，不应进入 round。
+
+---
+
+## 12. 一句话总结
+
+过去 171 轮最重要的收获，不是“试过很多架构”，而是：
+
+- 在高成本高质量 regime，已经基本找到了有效主系：
+  `low-rank trunk -> soft codebook coarse branch -> staged sparse refinement -> selector-side routing/bucketing`
+- 在新 total_cost 约束下，当前更重要的问题不是继续刷这条主系，而是补全 `<0.5x` 低开销区域，寻找更简单、更短链路、仍保持 LUTurbo 可导出的结构
+
+所以，下一轮不该再被“只沿高质量主系推进”这一个叙事绑住；正确做法是：
+低开销区优先探索简单结构，高质量主系只保留为参考锚点，并且所有改动都必须保持 LUTurbo/Lottable 可导出性。
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+mcp startup: no servers
+Plan update
+  → Inspect available LUTurbo-compatible low-cost families and cost hooks under sparsify/
+  • Choose one single-variable hypothesis for a <0.5x total_cost experiment
+  • Return action-schema JSON with compatibility rationale and env overrides if needed
+exec
+/bin/bash -lc 'rg -n "class .*SparseCoder|ARCHITECTURE|selection_cost_estimate|factorized_topk|topk|lowrank_residual" sparsify' in /root/sparsify-ascend succeeded in 0ms:
+sparsify/__main__.py:43:            "group_topk_size": args.sae.group_topk_size,
+sparsify/__main__.py:54:        "global_topk": args.global_topk,
+sparsify/__main__.py:84:            "group_topk_size": cfg.get("sae", {}).get("group_topk_size"),
+sparsify/__main__.py:95:        "global_topk": cfg.get("global_topk"),
+sparsify/fused_encoder.py:33:        values, indices = torch.topk(preacts, k, dim=-1, sorted=False)
+sparsify/trainer.py:107:                        global_topk=cfg.global_topk,
+sparsify/tiled_sparse_coder.py:17:class TiledSparseCoder(nn.Module):
+sparsify/tiled_sparse_coder.py:34:        global_topk: bool = False,
+sparsify/tiled_sparse_coder.py:50:        self.global_topk = global_topk
+sparsify/tiled_sparse_coder.py:117:        if self.global_topk:
+sparsify/tiled_sparse_coder.py:118:            out = self._forward_global_topk(x, y, dead_mask=dead_mask)
+sparsify/tiled_sparse_coder.py:204:    def _forward_global_topk(
+sparsify/tiled_sparse_coder.py:223:        top_acts, top_indices = torch.topk(global_pre_acts, k, dim=-1, sorted=False)
+sparsify/tiled_sparse_coder.py:243:        # AuxK loss is disabled for global_topk mode (dead_mask handling is complex)
+sparsify/tiled_sparse_coder.py:292:                "global_topk": self.global_topk,
+sparsify/tiled_sparse_coder.py:320:            global_topk = cfg_dict.pop("global_topk", False)
+sparsify/tiled_sparse_coder.py:326:            global_topk=global_topk, input_mixing=input_mixing
+sparsify/config.py:8:class SparseCoderConfig(Serializable):
+sparsify/config.py:24:    architecture: str = "topk"
+sparsify/config.py:39:    group_topk_size: int = 4
+exec
+/bin/bash -lc 'rg --files sparsify' in /root/sparsify-ascend succeeded in 0ms:
+sparsify/__main__.py
+sparsify/fused_encoder.py
+sparsify/utils.py
+sparsify/fused_decoder.py
+sparsify/data.py
+sparsify/device.py
+sparsify/trainer.py
+sparsify/tiled_sparse_coder.py
+sparsify/hadamard.py
+sparsify/__init__.py
+sparsify/sign_sgd.py
+sparsify/config.py
+sparsify/eval/pca.py
+sparsify/eval/__init__.py
+sparsify/eval/two_stage.py
+sparsify/eval/encoders.py
+sparsify/checkpoint.py
+sparsify/sparse_coder.py
+sparsify/xformers.py
+sparsify/sparsify/sparse_coder.py
+exec
+/bin/bash -lc "sed -n '225,330p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+    def selection_cost_estimate(self, n_output: int | None = None) -> dict:
+        """Estimate encoder-side, deployment-side, and combined memory accesses.
+
+        Args:
+            n_output: output dim of original weight matrix. Default 4*d_in.
+
+        Returns:
+            dict with three sets of metrics:
+            - Encoder (selection): total_accesses, ratio, budget_ratio, feasible
+            - Deployment (lookup): deployment_accesses, deployment_ratio
+            - Combined (total): combined_accesses, combined_ratio,
+              combined_budget_ratio, combined_feasible
+        """
+        if n_output is None:
+            n_output = 4 * self.d_in
+        original = self.d_in * n_output
+        budget = 1.5 * original
+
+        breakdown = []
+        total = 0
+exec
+/bin/bash -lc "sed -n '1135,1215p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+class FactorizedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with a low-rank ReLU mixing stage before latent scoring."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+exec
+/bin/bash -lc "sed -n '1185,1288p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+class LowRankResidualSparseCoder(SparseCoder):
+    """Model a dense low-rank trunk, then sparsely code the remaining residual."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        # Keep a meaningfully expressive dense trunk before sparse residual
+        # coding. Tying trunk rank too tightly to expansion factor made the
+        # prototype collapse to a minimal rank under the strong EF=16 recipe.
+exec
+/bin/bash -lc "sed -n '1,170p' sparsify/config.py" in /root/sparsify-ascend succeeded in 0ms:
+from dataclasses import dataclass
+from pathlib import Path
+
+from simple_parsing import Serializable, list_field
+
+
+@dataclass
+class SparseCoderConfig(Serializable):
+    """Configuration for a sparse coder (SAE) architecture."""
+
+    expansion_factor: int = 32
+    """Multiple of the input dimension to use as the sparse coder dimension."""
+
+    normalize_decoder: bool = True
+    """Normalize the decoder weights to have unit norm."""
+
+    num_latents: int = 0
+    """Number of latents to use. If 0, use `expansion_factor`."""
+
+    k: int = 32
+exec
+/bin/bash -lc "rg -n 'factorized_topk|lowrank_factorized_residual|round_020[4-6]|round_0196' research/history/round_summaries research/history/results.tsv research/history/frontier.json" in /root/sparsify-ascend succeeded in 0ms:
+research/history/frontier.json:115:    "architecture": "lowrank_factorized_residual",
+research/history/frontier.json:118:      "architecture": "lowrank_factorized_residual",
+research/history/frontier.json:130:      "family_name": "lowrank_factorized_residual",
+research/history/frontier.json:204:    "architecture": "lowrank_factorized_residual",
+research/history/frontier.json:207:      "architecture": "lowrank_factorized_residual",
+research/history/frontier.json:219:      "family_name": "lowrank_factorized_residual",
+research/history/results.tsv:60:r59_1774550729	1774550729	ok	discard	0.22918018698692322	128	factorized_topk	12				/root/sparsify-ascend/checkpoints/research_agent/round_0059/round0059_standard_1774550399_dp2_bs1_ga8_ef12_k128_20260327_024005	efe1c9b53cf146bc05a223e47f1d3037377865d9			Run one matched architecture probe on `factorized_topk`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`, and the same runtime knobs, and change only `ARCHITECTURE` from `gated` to `factorized_topk`. Judge this probe by the whole trajectory, not just the endpoint: if `factorized_topk` stays smooth and remains reasonably close to the `0.142923` `gated` anchor, it is worth keeping in reserve because its low-rank scoring path may better match LUTurbo's total online-cost target; if it is clearly worse across the curve, archive it as a non-promising matched alternative and return to the `gated` mainline next round.	This obeys the Round 59 matched-probe rule by changing exactly one primary variable, `architecture`, while keeping `K`, `OPTIMIZER`, `LR`, `EXPANSION_FACTOR`, and the settled mainline recipe fixed. `factorized_topk` is a stronger LUTurbo-oriented probe than opening another heavier residual family because it preserves the same export contract while plausibly reducing support-scoring complexity; the main risk is that reusing the `gated`-tuned recipe understates its ceiling, but that is acceptable for a family-worthiness screen.	/root/sparsify-ascend/research/history/logs/round0059_standard_1774550399.log
+research/history/results.tsv:92:r91_1774565499	1774565499	ok	discard	0.09643317759037018	128	lowrank_factorized_residual	12				/root/sparsify-ascend/checkpoints/research_agent/round_0091/round0091_standard_1774565169_dp2_bs1_ga8_ef12_k128_20260327_064615	580a2322d01fe87c99f4a6c2c583958b0559185b			Run one matched architecture probe by switching `ARCHITECTURE` to `lowrank_factorized_residual` while keeping `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, and `EXPANSION_FACTOR=12` fixed.	This obeys the round policy by changing exactly one primary variable, `architecture`, while keeping the mainline `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, and `EXPANSION_FACTOR=12` recipe fixed. I am explicitly avoiding `lowrank_adaptive_budget_residual` because with the current batch-size-1 regime it collapses to ordinary top-k behavior and would not be an informative matched probe. The main risk is that `lowrank_factorized_residual` may add selector complexity without helping quality or LUTurbo online cost, so this should be judged strictly as a yes/no family-worthiness test before returning to the mainline.	/root/sparsify-ascend/research/history/logs/round0091_standard_1774565169.log
+research/history/results.tsv:144:r143_1774649721	1774649721	ok	keep	0.2662431001663208	128	factorized_topk	2				/root/sparsify-ascend/checkpoints/research_agent/round_0143/round0143_standard_1774649533_dp2_bs1_ga8_ef2_k128_20260328_061219	db5695eb21b2304c7346a6591a920c4d0cb0ae6f			插入一个严格匹配的架构探针：把当前主线 lowrank_two_stage_soft_codebook_residual 换成更低成本、直接兼容的 factorized_topk，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一次干净对照判断低秩单库选择机制在当前 LUTurbo 成本约束下是否仍值得继续。	遵守单变量原则与本轮 probe 约束：只改 architecture，未联动 K、EF、optimizer、LR 或其他 recipe。选择 factorized_topk，是因为它在 EF=2 下 selection_cost 明显低于当前所有兼容 frontier 点，且属于直接兼容的单库静态表示，能直接回答“更激进的低秩单库选择机制是否值得继续”这一独立架构问题。风险是该 family 在旧的高 EF regime 曾明显偏弱，但当前低 EF 成本约束已发生 regime shift，这正是本轮 probe 的信息价值所在。	/root/sparsify-ascend/research/history/logs/round0143_standard_1774649533.log
+research/history/results.tsv:151:r150_1774651778	1774651778	ok	archive	0.06465830653905869	128	lowrank_soft_codebook_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0150/round0150_standard_1774651564_dp2_bs1_ga8_ef2_k128_20260328_064611	32e23f3c8809c00e1a1eed61db0d2cb12a369c8f			执行一次严格 matched architecture probe：把当前主线 lowrank_two_stage_soft_codebook_residual 换成其单阶段父节点 lowrank_soft_codebook_residual，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一轮干净对照判断两阶段结构本身是否值得继续。	遵守本轮架构探针规则：只改 architecture，保持主线的 K、EXPANSION_FACTOR、OPTIMIZER、LR 与主要 recipe 不变。相比改成更远的 factorized_topk 或 lowrank_residual，这个 probe 与当前主线只有一个结构差异点，归因最干净，也最能回答“两阶段 refinement 本身值不值得继续”的问题。	/root/sparsify-ascend/research/history/logs/round0150_standard_1774651564.log
+research/history/results.tsv:152:r151_1774652014	1774652014	ok	archive	0.07301954925060272	128	lowrank_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0151/round0151_standard_1774651830_dp2_bs1_ga8_ef2_k128_20260328_065036	843bad47b2d5fa2d9d396ad6e997151cb9170649			执行一次严格 matched architecture probe：把当前主线 lowrank_two_stage_soft_codebook_residual 换成更简单的 lowrank_residual，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一轮干净对照判断 soft-codebook + two-stage 结构相对基础 low-rank residual 是否值得继续。	遵守本轮架构探针规则：只改 architecture，保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变。相比更远的 factorized_topk，这个 probe仍沿同一 low-rank residual inheritance line，归因更干净，也更直接回答 soft-codebook coarse branch 本身是否值得继续。	/root/sparsify-ascend/research/history/logs/round0151_standard_1774651830.log
+research/history/results.tsv:160:r159_1774654025	1774654025	ok	archive	0.06465830653905869	128	lowrank_soft_codebook_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0159/round0159_standard_1774653811_dp2_bs1_ga8_ef2_k128_20260328_072337	e1a74be4fde853db3bab65bd487336f739163d2c			插入一个严格匹配的架构探针：将当前主线 lowrank_two_stage_soft_codebook_residual 替换为其单阶段父节点 lowrank_soft_codebook_residual，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一轮干净对照判断第二阶段 refinement 在当前低成本 regime 下是否仍然值得保留。	这轮遵守架构探针规则，只改一个主变量 architecture，并保持主线的 K、EF、optimizer、LR 不变。选择 lowrank_soft_codebook_residual 而不是更远的 topk 或 factorized_topk，是因为它是当前主线的最近父节点，能最干净地隔离“第二阶段 residual refinement 本身是否值得”这个问题，同时还能给出更低 selection_cost 的直接对照。	/root/sparsify-ascend/research/history/logs/round0159_standard_1774653811.log
+research/history/results.tsv:161:r160_1774654256	1774654256	ok	archive	0.07301954925060272	128	lowrank_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0160/round0160_standard_1774654072_dp2_bs1_ga8_ef2_k128_20260328_072758	315098faa69285fbc123488252868b20633f216d			插入一个严格匹配的架构探针：将当前主线 lowrank_two_stage_soft_codebook_residual 替换为 lowrank_residual，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一轮干净对照判断 soft-codebook coarse branch 在当前低成本 regime 下是否仍然值得保留。	这轮遵守架构探针规则，只改一个主变量 architecture，并保持主线的 K、EF、optimizer、LR 不变。选择 lowrank_residual 而不是更远的 topk 或 factorized_topk，是因为它是当前主线去掉 soft-codebook 分支后的最近父节点，能最干净地隔离“soft-codebook coarse branch 本身是否值得”这个单一问题，同时提供显著更低 selection_cost 的直接对照。	/root/sparsify-ascend/research/history/logs/round0160_standard_1774654072.log
+research/history/results.tsv:162:r161_1774654552	1774654552	ok	archive	0.2662431001663208	128	factorized_topk	2				/root/sparsify-ascend/checkpoints/research_agent/round_0161/round0161_standard_1774654307_dp2_bs1_ga8_ef2_k128_20260328_073154	d56e0847ecc2ebc81a15d49979d21c9911e548fe			插入一个严格匹配的架构探针：将当前主线 lowrank_two_stage_soft_codebook_residual 替换为 factorized_topk，其余 K=128、EF=2、signum、LR=3.0e-3 全部保持不变，用一轮干净对照判断这种更低成本的直接兼容单库架构是否值得继续。	这轮遵守架构探针规则，只改一个主变量 architecture，并保持主线的 K、EF、optimizer、LR 不变。选择 factorized_topk 而不是再次重复已测过的 topk/lowrank 父节点，是为了用一次更低 selection_cost 的直接兼容 probe 回答当前剩余的关键问题：极低成本单库路线是否还有继续价值。	/root/sparsify-ascend/research/history/logs/round0161_standard_1774654307.log
+research/history/results.tsv:182:r181_1774658830	1774658830	ok	keep	0.10676437616348267	128	lowrank_factorized_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0181/round0181_standard_1774658642_dp2_bs1_ga8_ef2_k128_20260328_084408	ed251adf2834e06781bbd63d9732a5288138be8e			Probe `lowrank_factorized_residual` as the one matched architecture change. It is LUTurbo-exportable (`扩展兼容`) through a static low-rank trunk plus static residual dictionary, and it tests whether factorized residual scoring is worth continuing against the current soft-codebook two-stage mainline in the low-EF feasible regime.	Single-variable discipline is preserved: only `ARCHITECTURE` changes while `K`, `EXPANSION_FACTOR`, `OPTIMIZER`, and `LR` remain fixed to the mainline recipe. This probe stays inside the compatible and likely feasible set, and it answers a distinct architectural question about whether factorized scoring is intrinsically worth keeping alive on the Pareto search path.	/root/sparsify-ascend/research/history/logs/round0181_standard_1774658642.log
+research/history/results.tsv:195:r194_1774662492	1774662492	ok	archive	0.10676437616348267	128	lowrank_factorized_residual	2				/root/sparsify-ascend/checkpoints/research_agent/round_0194/round0194_standard_1774662308_dp2_bs1_ga8_ef2_k128_20260328_094514	c424a5b535a81e21e484ef1858e42199e18570f9			执行一个 matched architecture probe：将主线切到 lowrank_factorized_residual，其余 recipe 保持 K=128、EXPANSION_FACTOR=2、OPTIMIZER=signum、LR=3.0e-3 不变。该架构的最终重构仍是 trunk 静态库与 residual 静态字典上的有限加权和，属扩展兼容；本轮只回答一个问题，即 factorized scorer 带来的更低 encoder 成本是否足以让该 family 继续作为 LUTurbo 低成本候选。	这是一个严格单变量的 matched probe，科学问题单一明确：验证 factorized scorer 这类低成本选择机制在兼容 residual family 中是否值得继续。虽然其现有 frontier 点较弱，但它能直接回答‘更便宜的 selector 是否还能保住可用 FVU’这一部署相关问题，信息价值高于重复已失败的 soft-codebook siblings。	/root/sparsify-ascend/research/history/logs/round0194_standard_1774662308.log
+research/history/results.tsv:197:r196_1774662954	1774662954	ok	archive	0.2662431001663208	128	factorized_topk	2				/root/sparsify-ascend/checkpoints/research_agent/round_0196/round0196_standard_1774662770_dp2_bs1_ga8_ef2_k128_20260328_095256	29b2cf8805a4bae9dee64552fe6b578b1c1e1e67			执行一个 matched architecture probe：将主线切到 factorized_topk，其余 recipe 保持 K=128、EXPANSION_FACTOR=2、OPTIMIZER=signum、LR=3.0e-3 不变。该架构的最终重构是单一静态字典库上的有限稀疏加权和，属直接兼容；本轮只回答一个问题，即低秩 factorized selector 是否足以让最便宜的单库 LUTurbo 方案继续值得保留。	这是一个严格单变量的 matched probe，科学问题清晰：最便宜的直接兼容 factorized 单库架构是否还有 LUTurbo 价值。它不改变部署公式，只隔离 selector 低秩化本身的效果，适合在连续多轮 probe 后给单库路线一个更完整的结论。	/root/sparsify-ascend/research/history/logs/round0196_standard_1774662770.log
+research/history/results.tsv:205:r204_1774668747	1774668747	ok	keep	0.3012690246105194	64	factorized_topk	2				/root/sparsify-ascend/checkpoints/research_agent/round_0204/round0204_standard_1774668528_dp2_bs1_ga8_ef2_k64_20260328_112855	8a604b7866d2fba929d79396c230a9b89c858037			运行一个纯参数低开销探索：保持 factorized_topk, EF=2, signum, LR=3e-3 不变，仅将 K 从 128 降到 64，目标是在直接兼容前提下把 total_cost 压到约 0.44x，并为 <0.5x 区域建立首个可行 Pareto 候选。	方案严格遵守单变量原则，且不需要改 sparsify/ 代码。主要风险是 K=64 的 FVU 可能明显差于现有 0.50x 点；但当前任务优先级是补 <0.5x 覆盖，这个风险是可接受的。	/root/sparsify-ascend/research/history/logs/round0204_standard_1774668528.log
+research/history/results.tsv:206:r205_1774669029	1774669029	ok	keep	0.36946922540664673	32	factorized_topk	2				/root/sparsify-ascend/checkpoints/research_agent/round_0205/round0205_standard_1774668841_dp2_bs1_ga8_ef2_k32_20260328_113407	5ca14bb0b33af9e45611f312a904a6476c30f930			在直接兼容 family factorized_topk 上做单变量低开销下探：固定 EF=2、signum、LR=3e-3，仅把 K 从 64 降到 32，目标是把 total_cost 从 0.44x 进一步压到约 0.41x，并补全 <0.5x Pareto 前沿的更低部署成本端。	该提案严格遵守单变量原则，目标明确指向 <0.5x 区域扩点。主要风险是 K=32 可能把 FVU 推高过快，但这正是当前低开销 regime 需要量化的 tradeoff。	/root/sparsify-ascend/research/history/logs/round0205_standard_1774668841.log
+research/history/results.tsv:209:r208_1774669980	1774669980	ok	keep	0.25825566053390503	64	topk	1				/root/sparsify-ascend/checkpoints/research_agent/round_0208/round0208_standard_1774669672_dp2_bs1_ga8_ef1_k64_20260328_114759	efe2dc3ce631cbed63507b91f7f63c8e32da6a81			在直接兼容的 topk family 上做单变量低成本下探：固定 K=64、signum、LR=3e-3，仅把 EXPANSION_FACTOR 从 2 降到 1，目标是在约 0.31x 总成本处建立一个比 factorized_topk 更强的 <0.5x 候选点。	该提案严格遵守单变量原则，并直接服务于当前 <0.5x 区域补点目标。主要风险是 EF=1 可能使 topk 表达能力下降较多，但其信息价值高，因为它能直接回答非 factorized 简单架构能否在真正低成本区站住脚。	/root/sparsify-ascend/research/history/logs/round0208_standard_1774669672.log
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0204.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 204,
+  "timestamp": 1774668747,
+  "started_at": 1774668408,
+  "ended_at": 1774668747,
+  "duration_sec": 339,
+  "family_name": "factorized_topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774668408253180511",
+    "evt_1774668528808595050",
+    "evt_1774668747152729149"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: factorized_topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff0c\u4f4e\u79e9 factor scorer \u53ea\u53c2\u4e0e\u5728\u7ebf\u9009\u62e9\u3001\u4e0d\u6539\u53d8 decoder \u5f62\u5f0f\uff0c\u56e0\u6b64\u5bf9 LUTurbo/Lottable \u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u5355\u4e3b\u53d8\u91cf\u9009\u62e9 k\uff1a\u628a\u5f53\u524d 0.50x \u524d\u6cbf\u70b9 factorized_topk \u4ece K=128 \u4e0b\u8c03\u5230 K=64\uff0c\u4fdd\u6301 ARCHITECTURE/EF/OPT/LR \u4e0d\u53d8\uff0c\u53ef\u628a deployment cost \u7ea6\u4ece 0.12x \u964d\u5230 0.06x\uff0c\u4f7f total_cost \u7ea6\u4ece 0.50x \u964d\u5230 0.44x\uff0c\u76f4\u63a5\u8865\u5230 <0.5x \u533a\u57df\uff1b\u9884\u671f FVU \u4f1a\u5347\u9ad8\uff0c\u4f46\u4ecd\u53ef\u80fd\u6210\u4e3a\u8be5\u4f4e\u5f00\u9500\u533a\u57df\u7684\u9996\u4e2a\u6709\u6548 Pareto \u70b9\u3002",
+    "summary": "\u8fd0\u884c\u4e00\u4e2a\u7eaf\u53c2\u6570\u4f4e\u5f00\u9500\u63a2\u7d22\uff1a\u4fdd\u6301 factorized_topk, EF=2, signum, LR=3e-3 \u4e0d\u53d8\uff0c\u4ec5\u5c06 K \u4ece 128 \u964d\u5230 64\uff0c\u76ee\u6807\u662f\u5728\u76f4\u63a5\u517c\u5bb9\u524d\u63d0\u4e0b\u628a total_cost \u538b\u5230\u7ea6 0.44x\uff0c\u5e76\u4e3a <0.5x \u533a\u57df\u5efa\u7acb\u9996\u4e2a\u53ef\u884c Pareto \u5019\u9009\u3002",
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0205.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 205,
+  "timestamp": 1774669029,
+  "started_at": 1774668747,
+  "ended_at": 1774669029,
+  "duration_sec": 282,
+  "family_name": "factorized_topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774668747196468727",
+    "evt_1774668841273130686",
+    "evt_1774669029597939922"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: factorized_topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1bfactorized scorer \u4ec5\u7528\u4e8e\u5728\u7ebf\u6253\u5206\u4e0e\u9009\u5740\uff0c\u5bfc\u51fa\u5230 LUTurbo/Lottable \u65f6\u4ecd\u662f\u5355\u5e93\u67e5\u8868\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u57fa\u4e8e r204 \u5df2\u5728 K=64\u3001EF=2 \u4e0b\u62ff\u5230 0.44x / 0.3013 \u7684 <0.5x \u70b9\uff0c\u672c\u8f6e\u7ee7\u7eed\u4fdd\u6301 architecture\u3001EF\u3001optimizer\u3001LR \u4e0d\u53d8\uff0c\u4ec5\u5c06 K \u4ece 64 \u4e0b\u63a2\u5230 32\uff0c\u9884\u8ba1 deployment cost \u53ef\u7531\u7ea6 0.06x \u8fdb\u4e00\u6b65\u964d\u5230\u7ea6 0.03x\uff0c\u4f7f total_cost \u7ea6\u843d\u5728 0.41x\uff0c\u8865\u5168\u66f4\u4f4e\u6210\u672c\u7aef\u8986\u76d6\uff0c\u5e76\u68c0\u9a8c\u8be5 family \u5728\u66f4\u77ed\u67e5\u8868\u94fe\u8def\u4e0b\u7684 FVU \u9000\u5316\u659c\u7387\u3002",
+    "summary": "\u5728\u76f4\u63a5\u517c\u5bb9 family factorized_topk \u4e0a\u505a\u5355\u53d8\u91cf\u4f4e\u5f00\u9500\u4e0b\u63a2\uff1a\u56fa\u5b9a EF=2\u3001signum\u3001LR=3e-3\uff0c\u4ec5\u628a K \u4ece 64 \u964d\u5230 32\uff0c\u76ee\u6807\u662f\u628a total_cost \u4ece 0.44x \u8fdb\u4e00\u6b65\u538b\u5230\u7ea6 0.41x\uff0c\u5e76\u8865\u5168 <0.5x Pareto \u524d\u6cbf\u7684\u66f4\u4f4e\u90e8\u7f72\u6210\u672c\u7aef\u3002",
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0208.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 208,
+  "timestamp": 1774669980,
+  "started_at": 1774669573,
+  "ended_at": 1774669980,
+  "duration_sec": 407,
+  "family_name": "topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774669573972594219",
+    "evt_1774669672695137089",
+    "evt_1774669980964162580"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1b\u5bfc\u51fa\u5230 LUTurbo/Lottable \u65f6\u4ecd\u662f\u5355\u6837\u672c top-k \u9009\u62e9\u540e\u7684\u5355\u5e93\u67e5\u8868\u4e0e\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002r207 \u8868\u660e\u5728\u76f8\u540c K=64\u3001EF=2 \u4e0b\uff0ctopk \u7684 FVU \u660e\u663e\u4f18\u4e8e factorized_topk\uff0c\u8bf4\u660e <0.5x \u533a\u57df\u7684\u4e3b\u8981\u74f6\u9888\u5f88\u53ef\u80fd\u6765\u81ea scorer factorization \u800c\u975e\u7eaf\u9884\u7b97\u3002\u672c\u8f6e\u4fdd\u6301 architecture=topk\u3001K=64\u3001optimizer\u3001LR \u4e0d\u53d8\uff0c\u53ea\u628a EXPANSION_FACTOR \u4ece 2 \u964d\u5230 1\uff0c\u76f4\u63a5\u538b\u4f4e encoder selection cost\uff0c\u76ee\u6807\u662f\u5728\u8fdb\u5165 <0.5x \u533a\u57df\u7684\u540c\u65f6\uff0c\u6d4b\u8bd5\u975e factorized \u5355\u5e93 baseline \u80fd\u5426\u62ff\u5230\u660e\u663e\u4f18\u4e8e factorized_topk@0.44x \u7684 FVU\u3002\u6309\u6210\u672c\u8868\u7ebf\u6027\u5916\u63a8\uff0cselection cost \u7ea6\u53ef\u4ece 0.50x \u964d\u5230 0.25x\uff0ctotal_cost \u7ea6\u843d\u5728 0.31x\u3002",
+    "summary": "\u5728\u76f4\u63a5\u517c\u5bb9\u7684 topk family \u4e0a\u505a\u5355\u53d8\u91cf\u4f4e\u6210\u672c\u4e0b\u63a2\uff1a\u56fa\u5b9a K=64\u3001signum\u3001LR=3e-3\uff0c\u4ec5\u628a EXPANSION_FACTOR \u4ece 2 \u964d\u5230 1\uff0c\u76ee\u6807\u662f\u5728\u7ea6 0.31x \u603b\u6210\u672c\u5904\u5efa\u7acb\u4e00\u4e2a\u6bd4 factorized_topk \u66f4\u5f3a\u7684 <0.5x \u5019\u9009\u70b9\u3002",
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0207.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 207,
+  "timestamp": 1774669573,
+  "started_at": 1774669121,
+  "ended_at": 1774669573,
+  "duration_sec": 452,
+  "family_name": "topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774669121141848850",
+    "evt_1774669235613059161",
+    "evt_1774669573930049927"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1b\u5728\u7ebf\u53ea\u505a\u5355\u6837\u672c top-k \u9009\u62e9\uff0c\u5bfc\u51fa\u5230 LUTurbo/Lottable \u65f6\u5c31\u662f\u5355\u5e93\u67e5\u8868 + \u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u4e0a\u4e00\u8f6e factorized_topk \u7684 FACTORIZED_HIDDEN_DIM \u964d\u672c\u5c1d\u8bd5\u88ab policy \u62e6\u622a\uff0c\u4e14\u5f53\u524d <0.5x \u533a\u57df FVU \u660e\u663e\u53d7 scorer \u5bb9\u91cf\u9650\u5236\uff1b\u56e0\u6b64\u672c\u8f6e\u56fa\u5b9a K=64\u3001EF=2\u3001optimizer\u3001LR\uff0c\u4ec5\u628a architecture \u4ece factorized_topk \u5207\u5230 topk\uff0c\u9a8c\u8bc1\u53bb\u6389\u4f4e\u79e9 scorer bottleneck \u540e\uff0c\u662f\u5426\u80fd\u5728\u63a5\u8fd1\u4f4e\u5f00\u9500\u8fb9\u754c\u7684\u603b\u6210\u672c\u4e0b\u663e\u8457\u6539\u5584 FVU\u3002\u9884\u8ba1 total_cost \u7ea6 0.56x\uff0c\u867d\u7565\u9ad8\u4e8e 0.5x\uff0c\u4f46\u53ef\u4f5c\u4e3a\u6700\u90bb\u8fd1\u7684\u8d28\u91cf\u951a\u70b9\uff0c\u5e2e\u52a9\u5224\u65ad <0.5x \u533a\u57df\u7684\u4e3b\u8981\u74f6\u9888\u662f\u5426\u6765\u81ea factorization\u3002",
+    "summary": "\u5207\u6362\u5230\u76f4\u63a5\u517c\u5bb9\u7684 topk family\uff0c\u56fa\u5b9a K=64\u3001EF=2\u3001signum\u3001LR=3e-3\uff0c\u53ea\u6539\u53d8 architecture\uff0c\u83b7\u5f97\u4e00\u4e2a\u8d34\u8fd1\u4f4e\u5f00\u9500\u8fb9\u754c\u7684\u8d28\u91cf\u951a\u70b9\uff0c\u7528\u6765\u5224\u65ad\u53bb\u6389 factorized scorer \u540e FVU \u80fd\u63d0\u5347\u591a\u5c11\u3002",
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0209.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 209,
+  "timestamp": 1774670069,
+  "started_at": 1774669981,
+  "ended_at": 1774670069,
+  "duration_sec": 88,
+  "family_name": "topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774669981006589585"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1b\u5bfc\u51fa\u5230 LUTurbo/Lottable \u65f6\u4ecd\u662f\u5355\u6837\u672c top-k \u9009\u62e9\u540e\u7684\u5355\u5e93\u67e5\u8868\u4e0e\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002r208 \u5df2\u8bc1\u660e topk \u5728 EF=1\u3001K=64\u3001total_cost=0.31x \u4e0b\u80fd\u663e\u8457\u4f18\u4e8e\u6b64\u524d factorized_topk \u4f4e\u5f00\u9500\u70b9\uff0c\u56e0\u6b64\u672c\u8f6e\u4fdd\u6301 architecture=topk\u3001EXPANSION_FACTOR=1\u3001optimizer\u3001LR \u4e0d\u53d8\uff0c\u53ea\u628a K \u4ece 64 \u63d0\u5230 96\uff0c\u6cbf deployment \u6210\u672c\u8f74\u5728 <0.5x \u533a\u57df\u5185\u6362\u53d6\u66f4\u4f4e FVU\u3002\u9884\u8ba1 deployment cost \u7531\u7ea6 0.06x \u5347\u5230\u7ea6 0.09x\uff0ctotal_cost \u7ea6\u4e3a 0.34x\uff0c\u4ecd\u7a33\u5c45\u4f4e\u5f00\u9500\u533a\uff0c\u540c\u65f6\u6709\u671b\u660e\u663e\u6539\u5584\u5f53\u524d 0.2583 \u7684 FVU\u3002",
+    "summary": "\u56fa\u5b9a topk \u7684 EF=1\u3001signum\u3001LR=3e-3\uff0c\u53ea\u5c06 K \u4ece 64 \u63d0\u5347\u5230 96\uff0c\u76ee\u6807\u662f\u5728\u7ea6 0.34x \u603b\u6210\u672c\u5904\u83b7\u5f97\u4e00\u4e2a\u6bd4\u5f53\u524d 0.31x \u70b9\u66f4\u4f4e FVU \u7684\u65b0\u4f4e\u5f00\u9500 Pareto \u5019\u9009\u3002",
+    "change_type": "param_only",
+    "expected_win": "better_fvu_within_low_cost_region",
+exec
+/bin/bash -lc "sed -n '2011,2128p' sparsify/sparse_coder.py" in /root/sparsify-ascend succeeded in 0ms:
+class LowRankFactorizedResidualSparseCoder(SparseCoder):
+    """Low-rank trunk followed by a factorized residual scorer before top-k."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
+        self.trunk_encoder = nn.Linear(
+            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+exec
+/bin/bash -lc 'rg -n "trunk_rank|factorized_hidden_dim|num_codes|stage1_ratio" research/history/results.tsv | tail -n 40' in /root/sparsify-ascend succeeded in 0ms:
+207:	1774669121	policy_reject	policy_reject												primary_variable=factorized_hidden_dim（归一化为 factorized_hidden_dim），但实际改动主轴是 k		
+exec
+/bin/bash -lc "sed -n '1,220p' research/history/round_summaries/round_0210.json" in /root/sparsify-ascend succeeded in 0ms:
+{
+  "round": 210,
+  "timestamp": 1774670360,
+  "started_at": 1774670069,
+  "ended_at": 1774670360,
+  "duration_sec": 291,
+  "family_name": "lowrank_factorized_residual",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774670069398928736",
+    "evt_1774670171848460674",
+    "evt_1774670360178113647"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: lowrank_factorized_residual\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_r beta_r u_r + \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d u_r \u662f\u9759\u6001 trunk \u5411\u91cf\u5e93\uff0cb_i \u662f\u9759\u6001 residual \u5411\u91cf\u5e93\uff1b\u5728\u7ebf\u4fa7\u53ea\u8ba1\u7b97\u7cfb\u6570 beta_r \u4e0e alpha_i\uff0c\u5e76\u5728 LUTurbo/Lottable \u7aef\u5bfc\u51fa\u4e3a\u4e24\u4e2a\u9759\u6001\u5411\u91cf\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u6269\u5c55\u517c\u5bb9\u3002r209 \u5bf9 topk@EF1,K96 \u7684\u7ee7\u7eed\u52a0\u5927\u67e5\u8868\u9884\u7b97\u88ab policy \u62e6\u622a\uff0c\u8bf4\u660e\u5355\u7eaf\u6cbf topk \u7684 K \u8f74\u4e0a\u63a2\u4e0d\u7a33\uff1b\u672c\u8f6e\u4fdd\u6301 K=64\u3001EF=1\u3001optimizer\u3001LR \u4e0d\u53d8\uff0c\u53ea\u628a architecture \u4ece topk \u5207\u5230 lowrank_factorized_residual\uff0c\u6d4b\u8bd5\u5728\u4ecd\u7784\u51c6 <0.5x \u533a\u57df\u7684\u524d\u63d0\u4e0b\uff0c\u52a0\u5165\u6781\u8f7b low-rank trunk \u4e0e factorized residual scorer \u540e\uff0c\u662f\u5426\u80fd\u663e\u8457\u4f18\u4e8e topk@0.31x \u7684 FVU\u3002\u6309\u73b0\u6709\u6210\u672c\u8868\u5916\u63a8\uff0c\u8be5\u914d\u7f6e\u6709\u5e0c\u671b\u843d\u5728\u4f4e\u5f00\u9500\u533a\u6216\u5176\u8fb9\u754c\u9644\u8fd1\uff0c\u540c\u65f6\u63d0\u4f9b\u6bd4\u7eaf\u5355\u5e93 topk \u66f4\u5f3a\u7684\u8868\u8fbe\u3002",
+    "summary": "\u5207\u6362\u5230\u6269\u5c55\u517c\u5bb9\u7684 lowrank_factorized_residual\uff0c\u56fa\u5b9a K=64\u3001EF=1\u3001signum\u3001LR=3e-3\uff0c\u53ea\u6539\u53d8 architecture\uff0c\u9a8c\u8bc1\u8f7b\u91cf trunk+residual \u7ed3\u6784\u80fd\u5426\u5728\u4f4e\u5f00\u9500\u533a\u9644\u8fd1\u62ff\u5230\u660e\u663e\u4f18\u4e8e topk \u7684 FVU\u3002",
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_factorized_residual"},{"key":"K","value":"64"},{"key":"EXPANSION_FACTOR","value":"1"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"},{"key":"TRUNK_RANK","value":"32"}],"expected_win":"lower_cost","experiment_tier":"full","family_name":"lowrank_factorized_residual","family_stage":"mainline","hypothesis":"候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r beta_r u_r + Σ_i alpha_i b_i，其中 {u_r} 是静态 trunk 向量库、{b_i} 是静态 residual 向量库；factorized scorer 只影响在线选择与系数计算，不改变 decoder 端的静态库有限加权和形式，因此可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”链路，兼容性为扩展兼容。单主变量选择 TRUNK_RANK：在保持 ARCHITECTURE=lowrank_factorized_residual、K=64、EF=1、signum、LR=3e-3 不变时，把 trunk_rank 从当前 auto≈128 下调到 32，测试当前 0.69x 点的主要冗余是否来自过大的 trunk 库；若 trunk 只是提供粗补偿而 residual 分支已承担主要表达，则可把 encoder+deployment 总成本一口气压入 <0.5x 区域，同时维持明显优于 topk@0.31x 的 FVU。","needs_sanity":false,"next_hypotheses":["如果 TRUNK_RANK=32 仍保持明显优于 topk@EF1,K64 的 FVU 且进入 <0.5x，则固定该 family 后只沿 K 轴做一次补点。","如果 TRUNK_RANK=32 的 FVU 退化过大，则说明该 family 的收益高度依赖 trunk 容量，低开销主战场应回到更短链路的 topk 或新的轻量单库方案。"],"notes_to_memory":["lowrank_factorized_residual 的导出形式稳定为 trunk 静态库 + residual 静态库的有限加权和，属于扩展兼容，可继续保留在兼容 frontier 候选集中。","r210 在 0.69x 处取得 0.1256 FVU，且 tokens_per_sec≈166.6k、总耗时 291s，明显快于近期 topk/soft-codebook 线；因此优先压缩 trunk_rank 比继续增大 K 更符合当前低开销与训练成本双目标。"],"primary_variable":"other_param","self_review":"这轮只改一个主轴 TRUNK_RANK，归因干净，且直接针对 r210 暴露出的成本结构问题。选择 32 而不是 64，是因为 64 大概率仍停留在 >0.5x 边界外；32 才有机会真正补上当前最缺的 <0.5x 前沿，但风险是 trunk 过度压缩后 FVU 可能明显反弹。","summary":"在扩展兼容的 lowrank_factorized_residual 上做一次低开销 param-only 探索：固定 K=64、EF=1、signum、LR=3e-3，仅把 TRUNK_RANK 压到 32，目标是在保留 trunk+residual 双库导出形式的同时，把当前 0.69x 候选推进到 <0.5x 区域。","touched_files":[]}
+tokens used
+76,813
