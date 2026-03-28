@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from .git_ops import REPO_ROOT
-from .override_registry import config_from_overrides, validate_env_overrides
+from .config_resolution import resolve_action_configs
+from .override_registry import (
+    env_config_from_runtime_config,
+    validate_env_overrides,
+)
 from .controller import decide, parse_log, update_frontier
 from .types import (
     Action,
@@ -26,6 +30,12 @@ from .types import (
 )
 
 SCRIPT_PATH = REPO_ROOT / "scripts" / "autoresearch_test.sh"
+_STRUCTURAL_RUNTIME_KEYS: tuple[tuple[str, str, type], ...] = (
+    ("TRUNK_RANK", "trunk_rank", int),
+    ("NUM_CODES", "num_codes", int),
+    ("STAGE1_RATIO", "stage1_ratio", float),
+    ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim", int),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +119,12 @@ def run_training(
         run_name,
         save_dir,
         config,
-        state.frontier,
+        state,
         target_max_tokens=config.initial_max_tokens,
         resume=False,
     )
+    ctx.runtime_config_json = config_json
+    ctx.runtime_env_config = env_config_from_runtime_config(config_json)
     baseline_key = _baseline_key(config_json)
     baseline_tps = state.get_baseline_tps(
         config_json["architecture"], config_json["hookpoints"]
@@ -196,17 +208,20 @@ def run_training(
             run_name,
             save_dir,
             config,
-            state.frontier,
+            state,
             target_max_tokens=current_target_tokens,
             resume=True,
         )
+        ctx.runtime_config_json = config_json
+        ctx.runtime_env_config = env_config_from_runtime_config(config_json)
 
     # Finalize
     checkpoint_dir = _latest_checkpoint_dir(save_dir, run_name)
     curve_metrics = _summarize_curve(step_records)
     observed_fvu = _extract_step_fvu(last_step_record)
 
-    # Parse log and decide via new controller (direct call, no subprocess)
+    from .git_ops import current_git_commit
+    commit = current_git_commit()
     parsed = parse_log(log_path)
     # Fill in config-derived fields if log didn't have them
     if parsed.get("k") is None:
@@ -223,16 +238,21 @@ def run_training(
         if parsed.get("status") in (None, "crash"):
             parsed["status"] = "ok"
 
-    decision = decide(state.frontier, parsed, config=config_json)
-
-    # Update frontier if improved
-    from .git_ops import current_git_commit
-    commit = current_git_commit()
-    update_frontier(state.frontier, parsed, decision, config_json, commit, round_id=round_id)
+    config_mismatch = _validate_checkpoint_config(checkpoint_dir, config_json)
+    if config_mismatch is None:
+        decision = decide(state.frontier, parsed, config=config_json)
+        update_frontier(state.frontier, parsed, decision, config_json, commit, round_id=round_id)
+    else:
+        decision = "crash"
+        parsed["status"] = "crash"
+        parsed["checkpoint"] = str(checkpoint_dir) if checkpoint_dir is not None else parsed.get("checkpoint")
 
     # Determine health
     run_health = "normal"
-    if termination_reason == "throughput_too_low":
+    if config_mismatch is not None:
+        run_health = "crash"
+        termination_reason = "config_mismatch"
+    elif termination_reason == "throughput_too_low":
         run_health = "perf_regression"
     elif termination_reason != "completed" or decision == "crash":
         run_health = "crash"
@@ -288,11 +308,20 @@ def run_training(
     )
 
     if result.decision == "crash":
-        details = extract_failure_details(log_path)
-        result.error_type = details.get("error_type")
-        result.error_summary = details.get("error_summary")
-        result.traceback_excerpt = details.get("traceback_excerpt")
-        result.log_excerpt = details.get("log_excerpt")
+        if config_mismatch is not None:
+            result.error_type = "config_mismatch"
+            result.error_summary = config_mismatch
+            result.traceback_excerpt = None
+            result.log_excerpt = config_mismatch
+            result.description = (
+                f"{action.summary} [INVALID: requested structural parameter did not reach runtime]"
+            )
+        else:
+            details = extract_failure_details(log_path)
+            result.error_type = details.get("error_type")
+            result.error_summary = details.get("error_summary")
+            result.traceback_excerpt = details.get("traceback_excerpt")
+            result.log_excerpt = details.get("log_excerpt")
 
     state.log_round_event(
         ctx, "training_finished",
@@ -498,97 +527,35 @@ def check_agent_backend_reachable(agent_proxy: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_base_config(
-    action: Action,
-    frontier: dict[str, Any] | None,
-) -> dict[str, str]:
-    """Find the best frontier config to use as base for partial overrides.
-
-    Looks for a frontier entry matching the action's family_name. If found,
-    converts its stored config dict back to env-var format. Falls back to
-    BASE_ENV_DEFAULTS if no match.
-    """
-    if not frontier:
-        return dict(BASE_ENV_DEFAULTS)
-
-    family = (action.family_name or "").lower()
-    best_entry = None
-    best_fvu = float("inf")
-
-    for entry in frontier.values():
-        if not isinstance(entry, dict):
-            continue
-        cfg = entry.get("config", {})
-        entry_family = str(
-            cfg.get("family_name") or cfg.get("architecture") or ""
-        ).lower()
-        if entry_family == family:
-            fvu = float(entry.get("fvu", float("inf")))
-            if fvu < best_fvu:
-                best_fvu = fvu
-                best_entry = entry
-
-    if best_entry is None:
-        return dict(BASE_ENV_DEFAULTS)
-
-    # Build env-var dict from frontier config
-    cfg = best_entry["config"]
-    base = dict(BASE_ENV_DEFAULTS)
-    key_map = {
-        "architecture": "ARCHITECTURE",
-        "expansion_factor": "EXPANSION_FACTOR",
-        "k": "K",
-        "optimizer": "OPTIMIZER",
-        "lr": "LR",
-        "hookpoints": "HOOKPOINTS",
-        "batch_size": "BATCH_SIZE",
-        "grad_acc_steps": "GRAD_ACC_STEPS",
-        "micro_acc_steps": "MICRO_ACC_STEPS",
-        "auxk_alpha": "AUXK_ALPHA",
-        "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
-        "use_hadamard": "USE_HADAMARD",
-    }
-    for json_key, env_key in key_map.items():
-        val = cfg.get(json_key)
-        if val is not None:
-            if env_key == "USE_HADAMARD":
-                base[env_key] = "1" if bool(val) else "0"
-            else:
-                base[env_key] = str(val)
-    return base
-
-
 def _build_env(
     action: Action,
     run_name: str,
     save_dir: Path,
     config: LoopConfig,
-    frontier: dict[str, Any] | None = None,
+    state: Any,
     *,
     target_max_tokens: int,
     resume: bool,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     """Build subprocess env vars and config JSON from action.
 
-    When frontier is provided, uses the best matching frontier entry's config
-    as the base (instead of BASE_ENV_DEFAULTS) so that partial overrides
-    inherit the winning recipe rather than falling back to global defaults.
+    Uses the shared resolved candidate config so runtime sees the same
+    effective env config as policy validation and prompt rendering.
     """
     env = os.environ.copy()
     overrides = action.env_overrides
+    resolved = resolve_action_configs(action, state)
     rejected = validate_env_overrides(
         overrides,
-        fallback_architecture=action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"],
+        fallback_architecture=resolved.candidate_env_config.get(
+            "ARCHITECTURE",
+            action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"],
+        ),
     )
     if rejected:
         raise RuntimeError(f"Disallowed env override keys: {', '.join(rejected)}")
 
-    base_config = _resolve_base_config(action, frontier)
-    merged = config_from_overrides(overrides, base_config=base_config)
-    # If family_name set but no explicit ARCHITECTURE override, use family_name
-    has_arch = any(item.get("key") == "ARCHITECTURE" for item in overrides)
-    if action.family_name and not has_arch:
-        merged["ARCHITECTURE"] = action.family_name.lower()
+    merged = resolved.candidate_env_config
 
     env.update(merged)
     env["RUN_NAME"] = run_name
@@ -613,6 +580,10 @@ def _build_env(
         "family_name": action.family_name or merged.get("ARCHITECTURE", "topk").lower(),
         "family_stage": action.family_stage or "mainline",
     }
+    for env_key, cfg_key, caster in _STRUCTURAL_RUNTIME_KEYS:
+        value = merged.get(env_key)
+        if value not in (None, ""):
+            config_json[cfg_key] = caster(value)
     # Optional architecture-specific keys
     _OPTIONAL = {
         "NUM_GROUPS": ("num_groups", int),
@@ -632,6 +603,48 @@ def _build_env(
             config_json[cfg_key] = caster(value)
 
     return env, config_json
+
+
+def _validate_checkpoint_config(
+    checkpoint_dir: Path | None,
+    intended_config: dict[str, Any],
+) -> str | None:
+    """Ensure structural runtime params actually landed in checkpoint config.
+
+    Returns a human-readable mismatch string, or None if the config matches
+    or no structural params were requested for this run.
+    """
+    expected: dict[str, Any] = {}
+    for _env_key, cfg_key, _caster in _STRUCTURAL_RUNTIME_KEYS:
+        value = intended_config.get(cfg_key)
+        if value is not None:
+            expected[cfg_key] = value
+    if not expected or checkpoint_dir is None:
+        return None
+
+    config_path = checkpoint_dir / "config.json"
+    if not config_path.exists():
+        return f"requested structural params {expected}, but checkpoint config.json is missing"
+
+    try:
+        raw = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        return f"requested structural params {expected}, but checkpoint config.json is unreadable"
+
+    sae_cfg = raw.get("sae", {})
+    mismatches: list[str] = []
+    for cfg_key, expected_value in expected.items():
+        actual_value = sae_cfg.get(cfg_key)
+        if actual_value != expected_value:
+            mismatches.append(
+                f"{cfg_key}: requested={expected_value!r}, checkpoint={actual_value!r}"
+            )
+    if mismatches:
+        return (
+            "requested structural parameters did not reach runtime: "
+            + "; ".join(mismatches)
+        )
+    return None
 
 
 def _baseline_key(config_json: dict[str, Any]) -> str:

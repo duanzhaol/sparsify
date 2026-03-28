@@ -244,7 +244,6 @@ def _record_sanity_failure(
         "tier": tier,
         "family_name": family_name,
         "change_type": action.get("change_type"),
-        "primary_variable": action.get("primary_variable"),
         "hypothesis": action.get("hypothesis"),
         **payload,
     }
@@ -285,7 +284,6 @@ def _coerce_repair_action(
         original_change_type if original_change_type in {"edit_sae_code", "edit_perf_code"} else "edit_sae_code"
     )
     coerced["needs_sanity"] = True
-    coerced["primary_variable"] = "code_fix"
     coerced["touched_files"] = list(repair_action.get("touched_files") or [])
     notes = list(repair_action.get("notes_to_memory") or [])
     notes.append(
@@ -496,7 +494,6 @@ def coerce_stop_action(action: dict[str, Any], state: dict[str, Any], round_id: 
             f"round {round_id}: continue exploring around the current best {family_name} configuration instead of stopping"
         ]
     coerced["next_hypotheses"] = next_hypotheses[:8]
-    coerced["primary_variable"] = str(action.get("primary_variable") or "other_param")
     return coerced
 
 
@@ -1228,7 +1225,6 @@ def main() -> int:
             action["change_type"] = "param_only"
             action["needs_sanity"] = False
             action["touched_files"] = []
-            action["primary_variable"] = "other_param"
             action.setdefault("notes_to_memory", []).append(
                 f"Runtime coerced {original_change_type} to param_only due to crash recovery mode"
             )

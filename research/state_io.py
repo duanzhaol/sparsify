@@ -478,7 +478,6 @@ def append_memory(
             "tier": action.get("experiment_tier"),
             "family_name": family_name,
             "change_type": action.get("change_type"),
-            "primary_variable": action.get("primary_variable"),
             "hypothesis": action.get("hypothesis"),
             "termination_reason": result.get("termination_reason"),
             "error_type": result.get("error_type", ""),

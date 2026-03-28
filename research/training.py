@@ -182,6 +182,15 @@ def build_env(action: dict[str, Any], tier: str, run_name: str, save_dir: Path, 
         "family_name": action.get("family_name") or config.get("ARCHITECTURE", "topk").lower(),
         "family_stage": action.get("family_stage") or ("mainline" if action.get("change_type") == "param_only" else "prototype"),
     }
+    for env_key, cfg_key, caster in [
+        ("TRUNK_RANK", "trunk_rank", int),
+        ("NUM_CODES", "num_codes", int),
+        ("STAGE1_RATIO", "stage1_ratio", float),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim", int),
+    ]:
+        value = config.get(env_key)
+        if value not in (None, ""):
+            config_json[cfg_key] = caster(value)
     optional_keys = {
         "NUM_GROUPS": ("num_groups", int),
         "ACTIVE_GROUPS": ("active_groups", int),

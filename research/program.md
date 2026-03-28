@@ -234,7 +234,7 @@ These early stops are part of the research loop. They exist to prevent wasting l
 The runtime strategy layer (`research/policy.py`) may intervene before or during a round:
 
 - **Behavioral diff test**: if `change_type=edit_sae_code`, the runtime compares the candidate architecture's `encode()` output against baseline `topk`. If outputs are identical (zero-init no-op), the round is aborted as `crash` with reason `identical_to_baseline`.
-- **Variable isolation check**: the runtime warns (currently soft enforcement) if a round changes more than one primary dimension (e.g. architecture + optimizer simultaneously). Coupled changes like `lr` + `optimizer` are allowed.
+- **Variable isolation check**: for `param_only`, the runtime compares the full `reference_round` config against the candidate env patch and rejects rounds that change more than one env parameter.
 - **Incubation limits**: at most 2 architecture families may be incubating concurrently. Each incubating family gets at most 3 proxy rounds before being auto-archived. Exceeding these limits results in `policy_reject`.
 - **Dynamic proxy budget**: code-edit rounds (`edit_sae_code`) automatically get a larger proxy token budget (40M instead of default 20M) to allow zero-initialized components time to diverge.
 - **Stagnation detection**: after consecutive rounds without improvement, the runtime injects guidance into the prompt recommending mode shifts (exploitation sweep, K exploration, or crash stabilization).
@@ -283,7 +283,7 @@ Each round must end with a structured JSON action containing:
 - self-review
 - notes to memory
 - next hypotheses
-- `primary_variable`: which single dimension this round changes (`architecture`, `optimizer`, `lr`, `k`, `expansion_factor`, `other_param`, or `code_fix`)
+- `reference_round` for `param_only` actions, so env overrides are interpreted as a patch against one explicit prior full config
 
 The execution layer will reject edits outside the allowed code area.
 

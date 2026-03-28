@@ -26,6 +26,12 @@ from .compatibility import (
     is_compatible_label,
     summarize_registry_counts,
 )
+from .config_resolution import (
+    config_from_round_summary,
+    render_env_config,
+    summary_config_source,
+    summary_is_usable_reference,
+)
 
 # ---------------------------------------------------------------------------
 # Constants — Hard constraints baked into prompt template
@@ -66,26 +72,30 @@ EXECUTION_LAYER = """\
 - 训练：scripts/autoresearch_test.sh
 - 结果：research/controller.py
 - 记忆：research/history/
-- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境"""
+- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
+- 如果新增可调参数，不仅要在 sparsify/ 中实现，还必须同步接通 research/AutoResearch/ 下的 override/config-resolution/runner 持久化链路、scripts/autoresearch_test.sh 参数透传、以及必要的 resume/validation 路径；否则实验会静默回退到默认值
+- 新增 tunable 参数时，允许编辑的最小必要范围是：sparsify/、research/AutoResearch/、scripts/autoresearch_test.sh；不要改其他路径"""
 
 EDIT_RULES = """\
 规则：
-- 只能编辑 sparsify/ 下的文件
+- 默认只编辑 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许同时修改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件
 - 纯参数实验必须使用 env_overrides
 - 每一轮只允许一个主假设
-- 必须设置 primary_variable，明确本轮主变化维度
-- 如果 change_type=param_only，必须显式给出 reference_round，表示“我是相对哪一轮的配方只改一个轴”
+- 不要声明 primary_variable；系统会根据 reference_round 的完整配置自动判断本轮到底改了哪个参数
+- 如果 change_type=param_only，必须显式给出 reference_round，表示“我是相对哪一轮的完整配置只改一个 env 参数”
+- 新增 tunable 参数后的第一轮，必须先验证该参数真的进入了训练配置：至少检查 round*.config.json 和 checkpoint config.json 中该字段存在且取值正确
 - 不要返回 command="stop"
 - 最终必须返回一个符合 action schema 的 JSON 对象"""
 
 SINGLE_VARIABLE_PRINCIPLE = (
-    "单变量原则：每一轮只改变一个主维度。"
-    "param_only 必须锚定一个 reference_round，并保持其余核心配方不变。"
+    "单变量原则：每一轮只改变一个 env 参数。"
+    "param_only 必须锚定一个 reference_round；env_overrides 是对该轮完整配置的 patch。"
 )
 
 HARD_CONSTRAINT_REMINDER = (
-    "提醒：每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
-    "Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment。"
+    "提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 应显式给出 reference_round。"
+    "默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。"
+    "Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。"
 )
 
 ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
@@ -455,6 +465,8 @@ def section_recent_rounds(
     for summary in round_summaries:
         if not isinstance(summary, dict):
             continue
+        if not summary_is_usable_reference(summary):
+            continue
         family_name = str(
             summary.get("family_name")
             or summary.get("action", {}).get("family_name")
@@ -467,6 +479,76 @@ def section_recent_rounds(
     if not compatible_lines:
         return "最近几轮（兼容架构）：\n  （最近没有兼容 family 的新结果）"
     return f"最近几轮（兼容架构，{len(compatible_lines)}）：\n" + "\n".join(compatible_lines)
+
+
+def section_reference_configs(
+    round_summaries: list[dict[str, Any]],
+    registry: dict[str, str],
+    limit: int = 2,
+) -> str:
+    """Show recent runnable full env configs that can serve as reference_round anchors."""
+    usable: list[dict[str, Any]] = []
+    for summary in round_summaries:
+        if not isinstance(summary, dict):
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        usable.append(summary)
+
+    def _priority(summary: dict[str, Any]) -> tuple[int, int]:
+        decision = str(summary.get("result", {}).get("decision") or "")
+        round_id = int(summary.get("round") or 0)
+        decision_rank = 0 if decision in {"keep", "archive"} else 1
+        return (decision_rank, -round_id)
+
+    def _family_name(summary: dict[str, Any]) -> str:
+        result = summary.get("result", {})
+        return str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or result.get("architecture")
+            or ""
+        ).lower()
+
+    def _format_block(summary: dict[str, Any]) -> str | None:
+        result = summary.get("result", {})
+        decision = str(result.get("decision") or "")
+        family_name = _family_name(summary)
+        if family_name and not is_compatible_label(registry.get(family_name)):
+            return None
+        cfg = config_from_round_summary(summary)
+        if not cfg:
+            return None
+        round_id = summary.get("round", "?")
+        source = summary_config_source(summary)
+        return (
+            f"  r{round_id} {family_name or cfg.get('ARCHITECTURE', '?')} "
+            f"(decision={decision}, source={source})\n{render_env_config(cfg)}"
+        )
+
+    ordered = sorted(usable, key=_priority)
+    chosen: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    deferred: list[dict[str, Any]] = []
+    for summary in ordered:
+        family_name = _family_name(summary)
+        if family_name and family_name in seen_families:
+            deferred.append(summary)
+            continue
+        chosen.append(summary)
+        if family_name:
+            seen_families.add(family_name)
+
+    blocks: list[str] = []
+    for summary in [*chosen, *deferred]:
+        if len(blocks) >= limit:
+            break
+        block = _format_block(summary)
+        if block:
+            blocks.append(block)
+    if not blocks:
+        return ""
+    return "最近可用 reference_round 的完整配置：\n" + "\n\n".join(blocks)
 
 
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
@@ -664,6 +746,11 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         state.recent_round_summaries(limit=5),
         registry,
     ))
+    sections.append(section_reference_configs(
+        state.recent_round_summaries(limit=20),
+        registry,
+        limit=4,
+    ))
     sections.append(section_tactical_hints(state.get_pending_hints()[:8]))
 
     # Layer 3
@@ -712,6 +799,11 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.recent_round_summaries(limit=4),
         registry,
     ))
+    sections.append(section_reference_configs(
+        state.recent_round_summaries(limit=20),
+        registry,
+        limit=4,
+    ))
     sections.append(section_tactical_hints(state.get_pending_hints()[:4]))
     sections.append(section_prior_research_digest(
         state.load_prior_research(),
@@ -749,7 +841,7 @@ def compose_repair(
         "上一轮代码修改遇到了工程性阻塞。\n"
         "不要重新设计实验，不要修改 family_name 或 env_overrides。\n"
         "你的任务是补丁修复实现，让原始实验能够跑通。\n"
-        "只能在 sparsify/ 内修改。\n"
+        "默认只改最小必要文件；若阻塞原因是 tunable 参数未接通，可同步修复 research/AutoResearch/ 与 scripts/autoresearch_test.sh 中的必要 wiring。\n"
         f"当前是第 {repair_attempt} / {max_repair_attempts} 次 repair 尝试。\n"
         "最终返回一个符合 action schema 的 JSON 对象。"
     )

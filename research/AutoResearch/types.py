@@ -121,7 +121,6 @@ class Action:
     touched_files: list[str]
     notes_to_memory: list[str]
     next_hypotheses: list[str]
-    primary_variable: str  # architecture | optimizer | lr | k | ... | code_fix
     reference_round: int | None = None
 
     @classmethod
@@ -138,6 +137,11 @@ class Action:
         raw_overrides = d.get("env_overrides", [])
         if isinstance(raw_overrides, dict):
             raw_overrides = [{"key": k, "value": str(v)} for k, v in raw_overrides.items()]
+        override_arch = None
+        for item in raw_overrides:
+            if str(item.get("key") or "") == "ARCHITECTURE" and item.get("value") not in (None, ""):
+                override_arch = str(item.get("value")).lower()
+                break
 
         return cls(
             command=d.get("command", "run"),
@@ -145,7 +149,7 @@ class Action:
             summary=d.get("summary", ""),
             change_type=d.get("change_type", "param_only"),
             expected_win=d.get("expected_win", "explore_unknown"),
-            family_name=d.get("family_name", BASE_ENV_DEFAULTS["ARCHITECTURE"]),
+            family_name=override_arch or str(d.get("family_name", BASE_ENV_DEFAULTS["ARCHITECTURE"])).lower(),
             family_stage=d.get("family_stage", "mainline"),
             self_review=d.get("self_review", ""),
             needs_sanity=bool(d.get("needs_sanity", False)),
@@ -153,7 +157,6 @@ class Action:
             touched_files=d.get("touched_files", []),
             notes_to_memory=d.get("notes_to_memory", []),
             next_hypotheses=d.get("next_hypotheses", []),
-            primary_variable=d.get("primary_variable", "other_param"),
             reference_round=int(d["reference_round"]) if d.get("reference_round") not in (None, "") else None,
         )
 
@@ -172,7 +175,6 @@ class Action:
             "touched_files": self.touched_files,
             "notes_to_memory": self.notes_to_memory,
             "next_hypotheses": self.next_hypotheses,
-            "primary_variable": self.primary_variable,
         }
         if self.reference_round is not None:
             data["reference_round"] = self.reference_round
@@ -187,7 +189,11 @@ class Action:
         return {item["key"]: item["value"] for item in self.env_overrides}
 
     def effective_config(self) -> dict[str, str]:
-        """Return BASE_ENV_DEFAULTS merged with env_overrides."""
+        """Legacy helper: BASE_ENV_DEFAULTS merged with env_overrides.
+
+        This is not the authoritative runtime config for param_only actions.
+        Active runtime/policy paths should use config_resolution.resolve_action_configs().
+        """
         cfg = dict(BASE_ENV_DEFAULTS)
         cfg.update(self.env_dict())
         return cfg
@@ -283,6 +289,12 @@ class RoundContext:
     timeline_event_ids: list[str] = field(default_factory=list)
     touched_files: list[str] = field(default_factory=list)
     patch_path: Path | None = None
+    resolved_reference_env_config: dict[str, str] | None = None
+    resolved_candidate_env_config: dict[str, str] | None = None
+    changed_keys: list[str] = field(default_factory=list)
+    reference_source: str | None = None
+    runtime_config_json: dict[str, Any] | None = None
+    runtime_env_config: dict[str, str] | None = None
 
     # Repair cycle tracking
     last_repair_signature: str | None = None

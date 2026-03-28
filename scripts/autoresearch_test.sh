@@ -39,6 +39,14 @@ DEAD_FEATURE_THRESHOLD="${DEAD_FEATURE_THRESHOLD:-10000000}"
 SAVE_EVERY="${SAVE_EVERY:-1000}"
 
 # 可选架构/正则附加参数。
+#
+# 注意：如果 AutoResearch 新增了可调结构参数，必须同步在这里读取并透传到
+# `python -m sparsify`。仅在 agent/env_overrides/runner 中注册参数是不够的；
+# 若本脚本未追加对应 `--flag`，训练会静默回退到默认值，导致实验结果无效。
+TRUNK_RANK="${TRUNK_RANK:-}"
+NUM_CODES="${NUM_CODES:-}"
+STAGE1_RATIO="${STAGE1_RATIO:-}"
+FACTORIZED_HIDDEN_DIM="${FACTORIZED_HIDDEN_DIM:-}"
 NUM_GROUPS="${NUM_GROUPS:-}"
 ACTIVE_GROUPS="${ACTIVE_GROUPS:-}"
 JUMPRELU_INIT_THRESHOLD="${JUMPRELU_INIT_THRESHOLD:-}"
@@ -105,6 +113,22 @@ fi
 
 if [[ -n "${ACTIVE_GROUPS}" ]]; then
   cmd+=(--active_groups "${ACTIVE_GROUPS}")
+fi
+
+if [[ -n "${TRUNK_RANK}" ]]; then
+  cmd+=(--trunk_rank "${TRUNK_RANK}")
+fi
+
+if [[ -n "${NUM_CODES}" ]]; then
+  cmd+=(--num_codes "${NUM_CODES}")
+fi
+
+if [[ -n "${STAGE1_RATIO}" ]]; then
+  cmd+=(--stage1_ratio "${STAGE1_RATIO}")
+fi
+
+if [[ -n "${FACTORIZED_HIDDEN_DIM}" ]]; then
+  cmd+=(--factorized_hidden_dim "${FACTORIZED_HIDDEN_DIM}")
 fi
 
 if [[ -n "${JUMPRELU_INIT_THRESHOLD}" ]]; then

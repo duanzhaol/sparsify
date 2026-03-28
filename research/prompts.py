@@ -545,7 +545,7 @@ Important rules:
 - If several rounds have passed without proposing a new family or advancing an incubating family, bias toward architecture exploration rather than more local tuning.
 - Never stop the session on your own. You must always return command="run".
 - If evidence is weak or local tuning looks exhausted, propose the least-bad next informative move instead of stopping.
-- Set primary_variable to indicate which single dimension this round changes (architecture, optimizer, lr, k, expansion_factor, other_param, or code_fix). Avoid changing multiple primary variables in one round.
+- For `param_only`, provide `reference_round` and make `env_overrides` a patch against that round's full config. Only one env parameter may change in a single round.
 - Return a final JSON object matching the schema exactly.
 {policy_section}
 Current structured context:
@@ -632,7 +632,7 @@ The JSON must match the same shape as the established action contract:
 - command, hypothesis, summary, change_type, experiment_tier, expected_win
 - family_name, family_stage, self_review, needs_sanity
 - env_overrides, touched_files, notes_to_memory, next_hypotheses
-- primary_variable (which single dimension this round changes: architecture, optimizer, lr, k, expansion_factor, other_param, or code_fix)
+- reference_round for param_only actions, so the runtime can compare your candidate against one explicit prior full config
 Runtime priorities that override weak local heuristics:
 - Lower K is the top priority. If K exploration and EF exploration are both plausible, do K first.
 - Treat expansion_factor as a capacity axis. Do not claim an architecture win from cross-EF comparisons alone.

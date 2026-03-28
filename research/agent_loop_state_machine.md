@@ -343,7 +343,7 @@ edit_sae_code
 - 不允许改 `family_name`
 - 不允许改 `experiment_tier`
 - 不允许改 `env_overrides`
-- `primary_variable` 被强制为 `code_fix`
+- 不再要求 `primary_variable`；repair 只允许修 blocker，不允许改实验目标
 - 只允许修 blocker，不允许偷偷换实验目标
 
 ### 8.1 Repair 状态机

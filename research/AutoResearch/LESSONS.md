@@ -78,7 +78,6 @@
 **有效的约束**：
 - Repair action 锁定 `family_name`, `env_overrides`, `experiment_tier`
   （不允许 agent 借修复之名改实验目标）
-- `primary_variable` 强制为 `"code_fix"`
 - `needs_sanity` 强制为 True
 
 ---
@@ -87,11 +86,24 @@
 
 ### Variable Isolation（单变量原则）
 
-每轮只改一个主维度：architecture / optimizer / lr / K / expansion_factor / code_edit。
-如果 `change_type=param_only`，必须显式写 `reference_round`，表示“我是相对哪一轮的配方只改一个轴”。
+每轮只改一个 env 参数。
+如果 `change_type=param_only`，必须显式写 `reference_round`，表示“我是相对哪一轮的完整配置只改一个参数”。
+系统应自动比较 `reference_round` 的完整配置与当前 `env_overrides` patch 后的完整配置，不要再依赖 agent 手写某个 `primary_variable` 字段。
 不要再默认允许 `optimizer + lr` 耦合修改；如果确实要同时改两者，应改为新架构探针或明确的非 `param_only` 轮次。
 
 **教训**：多变量同时改导致无法归因结果，浪费轮次。
+
+### 参数注册不等于参数生效
+
+- 允许某个 key 出现在 `env_overrides`，不代表训练一定吃到了这个参数
+- 新增 tunable 参数时，至少要同步检查这几层：
+  - `override_registry` 是否允许该参数
+  - runner / training 的 `config_json` 是否持久化该参数
+  - `scripts/autoresearch_test.sh` 是否把环境变量透传成对应 CLI flag
+  - resume / checkpoint config 校验是否覆盖该参数
+- 第一轮依赖新参数的实验，必须先确认 `round*.config.json` 与 checkpoint `config.json` 中该字段真实出现；否则该轮结果应视为无效，不得拿来更新 frontier
+
+**教训**：`env_overrides` 层面的“看起来成功”很危险。若 launcher 没接线，实验会静默回退到默认值，数值可能与历史点完全相同，但会被误判成新证据。
 
 ### Incubation 管理
 

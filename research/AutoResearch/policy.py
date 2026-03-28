@@ -21,29 +21,19 @@ import subprocess
 from typing import Any
 
 from .compatibility import compute_selection_cost, is_compatible_label
+from .config_resolution import (
+    render_env_config,
+    resolve_action_configs,
+    resolve_mainline_snapshot,
+    summary_invalid_reason,
+)
 from .git_ops import REPO_ROOT
-from .types import Action, BASE_ENV_DEFAULTS
+from .types import Action
 
 MAX_INCUBATING_FAMILIES = 10
 MAX_INCUBATING_PROXY_ROUNDS = 3
 CRASH_STREAK_FOR_ENGINEERING_REPAIR = 2
 NO_IMPROVE_STREAK_FOR_ARCH_PROBE = 5
-
-_CORE_AXES = {
-    "architecture": "ARCHITECTURE",
-    "optimizer": "OPTIMIZER",
-    "lr": "LR",
-    "k": "K",
-    "expansion_factor": "EXPANSION_FACTOR",
-}
-
-# Map ENV-style names to internal axis names (for primary_variable normalization)
-_PRIMARY_VARIABLE_ALIASES: dict[str, str] = {
-    env_key.lower(): axis for axis, env_key in _CORE_AXES.items()
-}
-# Also accept the env-key casing directly
-_PRIMARY_VARIABLE_ALIASES.update({env_key: axis for axis, env_key in _CORE_AXES.items()})
-
 
 # ---------------------------------------------------------------------------
 # Top-level validation
@@ -66,7 +56,8 @@ def validate_action(
     if action.change_type == "no_change":
         return action, "不允许 no_change；每一轮都必须提出可执行的实验或修复"
 
-    family_name = action.family_name or action.effective_config().get("ARCHITECTURE")
+    resolved = resolve_action_configs(action, state)
+    family_name = action.family_name or resolved.candidate_env_config.get("ARCHITECTURE")
     compat_label = state.family_compatibility_label(family_name)
     if compat_label == "incompatible":
         return action, (
@@ -86,7 +77,7 @@ def validate_action(
     if not ok:
         return action, f"Incubation limit: {msg}"
 
-    ok, msg = _check_total_cost_feasibility(action)
+    ok, msg = _check_total_cost_feasibility(action, state)
     if not ok:
         return action, msg
 
@@ -212,8 +203,9 @@ def build_policy_guidance(
     policy_state: dict[str, Any],
 ) -> str:
     """把当前策略模式渲染成 prompt 中直接可读的中文说明。"""
-    mainline = _resolve_mainline_snapshot(state)
+    mainline = resolve_mainline_snapshot(state)
     recipe_line = _format_recipe_line(mainline["config"])
+    recipe_block = render_env_config(mainline["config"])
     mode = policy_state["mode"]
     reason = policy_state["reason"]
 
@@ -223,6 +215,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"当前主线 family：{mainline['family_name']}",
             f"当前主线参考配方：{recipe_line}",
+            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 优先继续修最近失败实现，不要新开 architecture family。",
             "2. 不要同时换 optimizer、lr、loss、preprocess 等训练 recipe。",
@@ -235,6 +228,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"当前主线 family：{mainline['family_name']}",
             f"当前主线参考配方：{recipe_line}",
+            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 首要目标：找到 total_cost (encoder + deployment) ≤1.5×h×n 的配置。",
             "2. 降低 encoder 成本最有效的手段是降低 EXPANSION_FACTOR。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。",
@@ -252,6 +246,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"当前参考 family：{mainline['family_name']}",
             f"当前参考配方：{recipe_line}",
+            f"当前参考完整配置（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。",
             "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
@@ -269,6 +264,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"当前主线 family：{mainline['family_name']}",
             f"当前主线参考配方：{recipe_line}",
+            f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
             "1. 只允许做 1 个 matched architecture probe。",
             "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
@@ -281,6 +277,7 @@ def build_policy_guidance(
         f"原因：{reason}",
         f"当前主线 family：{mainline['family_name']}",
         f"当前主线参考配方：{recipe_line}",
+        f"当前主线完整配置（source={mainline['source']}）：\n{recipe_block}",
         "本轮要求：",
         "1. 只有在已经进入某个低成本 family 后，才默认围绕该 family 做局部推进。",
         "2. 推荐顺序：先确认 total_cost 落在目标区间，再做必要的 clean baseline，然后调学习率，再换优化器，再看 loss/preprocess。",
@@ -442,54 +439,40 @@ def _check_param_only_single_variable(
     action: Action,
     state: Any,  # StateManager
 ) -> tuple[bool, str]:
-    """只对 param_only 做轻量单变量校验。"""
+    """只对 param_only 做单 env key 校验。"""
     if action.change_type != "param_only":
         return True, ""
     if action.reference_round is None:
-        return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮只改一个主轴"
-
-    candidate = _candidate_config(action)
-    reference = _resolve_reference_config(action, state)
-
-    changed_axes = [
-        axis
-        for axis, env_key in _CORE_AXES.items()
-        if str(candidate.get(env_key)) != str(reference.get(env_key))
-    ]
-
-    if len(changed_axes) > 1:
+        return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮的完整配置只改一个 env 参数"
+    explicit_summary = state.load_round_summary(action.reference_round)
+    invalid_reason = summary_invalid_reason(explicit_summary)
+    if invalid_reason is not None:
         return False, (
-            "param_only 一次只能改一个主轴；"
-            f"当前同时改了 {', '.join(changed_axes)}"
+            f"reference_round=r{action.reference_round} 已被标记为无效，"
+            f"不能作为单变量锚点。原因：{invalid_reason}"
         )
 
-    # Normalize primary_variable: accept both "expansion_factor" and "EXPANSION_FACTOR"
-    pv = _PRIMARY_VARIABLE_ALIASES.get(action.primary_variable, action.primary_variable)
+    resolved = resolve_action_configs(action, state)
+    changed_keys = resolved.changed_keys
 
-    if not changed_axes:
-        if pv in _CORE_AXES:
-            return False, (
-                f"primary_variable={action.primary_variable}，"
-                "但和参考配方相比没有看到这个主轴发生变化"
-            )
-        return True, ""
-
-    changed_axis = changed_axes[0]
-    if pv == "other_param":
+    if len(changed_keys) > 1:
         return False, (
-            f"当前实际改动主轴是 {changed_axis}，"
-            "primary_variable 不应写 other_param"
+            "param_only 一次只能改一个 env 参数；"
+            f"当前同时改了 {', '.join(changed_keys)}"
         )
-    if pv != changed_axis:
+    if not changed_keys:
         return False, (
-            f"primary_variable={action.primary_variable}（归一化为 {pv}），"
-            f"但实际改动主轴是 {changed_axis}"
+            "param_only 必须相对 reference_round 真的改动 1 个 env 参数；"
+            f"当前 reference_source={resolved.reference_source}，未检测到任何变化"
         )
 
     return True, ""
 
 
-def _check_total_cost_feasibility(action: Action) -> tuple[bool, str]:
+def _check_total_cost_feasibility(
+    action: Action,
+    state: Any,  # StateManager
+) -> tuple[bool, str]:
     """拦截总成本 (encoder + deployment) 超过 1.5×h×n 的配置。
 
     对 edit_sae_code 类型的 action 跳过 pre-check：代码修改可能正是为了降低成本，
@@ -499,7 +482,7 @@ def _check_total_cost_feasibility(action: Action) -> tuple[bool, str]:
     if action.change_type == "edit_sae_code":
         return True, ""
 
-    cfg = action.effective_config()
+    cfg = resolve_action_configs(action, state).candidate_env_config
     arch = cfg.get("ARCHITECTURE", "topk").lower()
     k = int(cfg.get("K", 128))
     ef = int(cfg.get("EXPANSION_FACTOR", 12))
@@ -535,278 +518,6 @@ def _check_total_cost_feasibility(action: Action) -> tuple[bool, str]:
         f"预算比率 {combined_budget}x（需 ≤1.0x，即 total ≤1.5×h×n）。"
         f"降低 encoder 成本：减小 EF / TRUNK_RANK / NUM_CODES。降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。"
     )
-
-
-def _candidate_config(action: Action) -> dict[str, str]:
-    """得到这轮 action 实际会训练的核心配置。"""
-    config = action.effective_config()
-    if action.family_name and not any(
-        item.get("key") == "ARCHITECTURE" for item in action.env_overrides
-    ):
-        config["ARCHITECTURE"] = action.family_name.lower()
-    return config
-
-
-def _resolve_reference_config(
-    action: Action,
-    state: Any,  # StateManager
-) -> dict[str, str]:
-    """给单变量校验选择一个清晰的参考配方。
-
-    规则：
-    1. 如果 action 显式给了 reference_round → 优先使用该轮真实配方
-    2. 如果 action 的 family 就是当前主线 family → 用主线 snapshot（和 prompt 展示一致）
-    3. 如果 action 的 family 不同 → 优先找同 family 最近一次成功运行的配方
-    4. 再找同 family frontier 中最佳可行 entry
-    5. 都找不到 → fallback 到主线 snapshot
-    """
-    if action.reference_round is not None:
-        explicit = _config_from_round_summary(state, action.reference_round)
-        if explicit is not None:
-            return explicit
-
-    mainline = _resolve_mainline_snapshot(state)
-    action_family = (action.family_name or "").lower()
-    mainline_family = mainline["family_name"]
-
-    # If same family as mainline, use mainline config (matches what agent sees)
-    if action_family == mainline_family or not action_family:
-        return dict(mainline["config"])
-
-    # Different family: first try the most recent successful run in that family.
-    recent_family_cfg = _latest_successful_family_config(state, action_family)
-    if recent_family_cfg is not None:
-        return recent_family_cfg
-
-    # Then try the best feasible frontier entry in that family.
-    registry = state.load_compatibility_registry()
-    family_best = _best_frontier_entry(
-        state.frontier,
-        family_name=action_family,
-        registry=registry,
-        prefer_feasible=True,
-    )
-    if family_best is not None:
-        return _frontier_entry_to_env_config(family_best)
-
-    # Fallback to mainline
-    return dict(mainline["config"])
-
-
-def _config_from_round_summary(state: Any, round_id: int) -> dict[str, str] | None:
-    """Recover env-style config from a specific historical round summary."""
-    summary = state.load_round_summary(round_id)
-    if not summary:
-        return None
-
-    action = summary.get("action", {})
-    family_name = str(
-        summary.get("family_name")
-        or action.get("family_name")
-        or ""
-    ).lower()
-    if not family_name:
-        return None
-
-    config = dict(BASE_ENV_DEFAULTS)
-    for item in action.get("env_overrides", []) or []:
-        key = item.get("key")
-        value = item.get("value")
-        if key is not None and value is not None:
-            config[str(key)] = str(value)
-    if family_name:
-        config["ARCHITECTURE"] = family_name
-    return config
-
-
-def _latest_successful_family_config(
-    state: Any,
-    family_name: str,
-) -> dict[str, str] | None:
-    """Find the latest non-rejected, non-crash config for the given family."""
-    target = (family_name or "").lower()
-    if not target:
-        return None
-
-    for summary in reversed(state.recent_round_summaries(limit=50)):
-        if not isinstance(summary, dict):
-            continue
-        summary_family = str(
-            summary.get("family_name")
-            or summary.get("action", {}).get("family_name")
-            or summary.get("result", {}).get("architecture")
-            or ""
-        ).lower()
-        if summary_family != target:
-            continue
-        decision = str(summary.get("result", {}).get("decision") or "")
-        if decision in {"policy_reject", "crash"}:
-            continue
-        cfg = _config_from_round_summary(state, int(summary.get("round", 0) or 0))
-        if cfg is not None:
-            return cfg
-    return None
-
-
-def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
-    """找到当前最像主线的 family 与配方。
-
-    优先选成本可行的 frontier entry，这样 reference config 反映的是
-    agent 应该在其上继续改进的基准，而不是不可行的历史最优。
-    """
-    registry = state.load_compatibility_registry()
-    best_entry = _best_frontier_entry(
-        state.frontier, registry=registry, prefer_feasible=True,
-    )
-    if best_entry is not None:
-        config = _frontier_entry_to_env_config(best_entry)
-        family_name = str(
-            best_entry.get("config", {}).get("family_name")
-            or best_entry.get("architecture")
-            or config.get("ARCHITECTURE", "topk")
-        ).lower()
-        return {
-            "family_name": family_name,
-            "config": config,
-            "source": "frontier_best",
-        }
-
-    active_family_name = _latest_active_family_name(state.families, registry)
-    config = dict(BASE_ENV_DEFAULTS)
-    config["EXPANSION_FACTOR"] = "12"
-    if active_family_name:
-        config["ARCHITECTURE"] = active_family_name
-        return {
-            "family_name": active_family_name,
-            "config": config,
-            "source": "latest_active_family",
-        }
-
-    return {
-        "family_name": "topk",
-        "config": config,
-        "source": "topk_baseline",
-    }
-
-
-def _best_frontier_entry(
-    frontier: dict[str, Any],
-    family_name: str | None = None,
-    registry: dict[str, str] | None = None,
-    prefer_feasible: bool = False,
-    d_in: int = 1024,
-) -> dict[str, Any] | None:
-    """按 FVU 选择最佳 frontier entry；可选按 family 过滤。
-
-    当 prefer_feasible=True 时，优先从成本可行的条目中选择；
-    仅当没有可行条目时才 fallback 到全部条目。
-    """
-    budget = 1.5 * d_in * 4 * d_in  # 1.5 × h × n
-
-    def _pick_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-        best, best_fvu = None, float("inf")
-        for e in entries:
-            try:
-                fvu = float(e.get("fvu", float("inf")))
-            except (TypeError, ValueError):
-                continue
-            if fvu < best_fvu:
-                best_fvu = fvu
-                best = e
-        return best
-
-    target_family = (family_name or "").lower()
-    feasible: list[dict[str, Any]] = []
-    all_candidates: list[dict[str, Any]] = []
-
-    for entry in frontier.values():
-        if not isinstance(entry, dict):
-            continue
-
-        entry_family = str(
-            entry.get("config", {}).get("family_name")
-            or entry.get("architecture")
-            or ""
-        ).lower()
-
-        if target_family:
-            if entry_family != target_family:
-                continue
-
-        if registry is not None and not is_compatible_label(registry.get(entry_family)):
-            continue
-
-        all_candidates.append(entry)
-
-        if prefer_feasible:
-            tc = entry.get("total_cost")
-            if tc is None:
-                sel = entry.get("selection_cost")
-                deploy = entry.get("deployment_accesses", 0) or 0
-                tc = (float(sel) + float(deploy)) if sel is not None else None
-            if tc is not None and float(tc) <= budget:
-                feasible.append(entry)
-
-    if prefer_feasible and feasible:
-        return _pick_best(feasible)
-    return _pick_best(all_candidates)
-
-
-def _frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
-    """把 frontier 里的 config 还原成 env 风格配置。"""
-    config = dict(BASE_ENV_DEFAULTS)
-    raw = entry.get("config", {})
-
-    mapping = {
-        "architecture": "ARCHITECTURE",
-        "expansion_factor": "EXPANSION_FACTOR",
-        "k": "K",
-        "optimizer": "OPTIMIZER",
-        "lr": "LR",
-        "hookpoints": "HOOKPOINTS",
-        "batch_size": "BATCH_SIZE",
-        "grad_acc_steps": "GRAD_ACC_STEPS",
-        "micro_acc_steps": "MICRO_ACC_STEPS",
-        "auxk_alpha": "AUXK_ALPHA",
-        "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
-        "use_hadamard": "USE_HADAMARD",
-        "family_name": "FAMILY_NAME",
-        "family_stage": "FAMILY_STAGE",
-    }
-    for src_key, dst_key in mapping.items():
-        value = raw.get(src_key)
-        if value is not None:
-            config[dst_key] = str(value)
-
-    if entry.get("architecture") is not None:
-        config["ARCHITECTURE"] = str(entry["architecture"]).lower()
-    if entry.get("k") is not None:
-        config["K"] = str(entry["k"])
-    if entry.get("ef") is not None:
-        config["EXPANSION_FACTOR"] = str(entry["ef"])
-
-    return config
-
-
-def _latest_active_family_name(
-    families: dict[str, Any],
-    registry: dict[str, str] | None = None,
-) -> str | None:
-    """在没有 frontier 时，用最近活跃 family 作为主线参考。"""
-    best_name: str | None = None
-    best_round = -1
-
-    for name, family in families.items():
-        if registry is not None and not is_compatible_label(registry.get(str(name).lower())):
-            continue
-        if family.get("status") != "active":
-            continue
-        last_round = int(family.get("last_round") or -1)
-        if last_round > best_round:
-            best_round = last_round
-            best_name = name
-
-    return best_name
 
 
 def _format_recipe_line(config: dict[str, str]) -> str:

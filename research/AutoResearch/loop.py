@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from .agent import Agent, coerce_stop_action
+from .config_resolution import resolve_action_configs
 from .git_ops import (
     REPO_ROOT,
     assert_allowed_changes,
@@ -161,9 +162,14 @@ def _run_round(
     if action.command != "run":
         action = coerce_stop_action(action, state, round_id)
 
-    ctx.family_name = action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"]
+    resolved = resolve_action_configs(action, state)
+    ctx.family_name = action.family_name or resolved.candidate_env_config.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
     ctx.family_stage = action.family_stage
     ctx.session_id = state.agent.get("active_session_id")
+    ctx.resolved_reference_env_config = resolved.reference_env_config
+    ctx.resolved_candidate_env_config = resolved.candidate_env_config
+    ctx.changed_keys = resolved.changed_keys
+    ctx.reference_source = resolved.reference_source
 
     # 5. Detect code changes
     after = snapshot_paths()
@@ -189,7 +195,7 @@ def _run_round(
 
     # 7. Behavioral diff test (for code edits with architecture changes)
     if action.is_code_edit and action.change_type == "edit_sae_code":
-        cfg = action.effective_config()
+        cfg = resolved.candidate_env_config
         arch = cfg.get("ARCHITECTURE", "topk").lower()
         if arch != "topk":
             diff_result = behavioral_diff_test(
@@ -244,7 +250,7 @@ def _train_with_repair(
 
         # Sanity check
         if action.needs_sanity and action.is_code_edit:
-            cfg = action.effective_config()
+            cfg = resolve_action_configs(action, state).candidate_env_config
             try:
                 print(f"Round {round_id}: running sanity check")
                 run_sanity(

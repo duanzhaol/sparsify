@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .config_resolution import summary_is_usable_reference
 from .git_ops import REPO_ROOT
 from .prompt import compose_proposal, compose_resume, compose_repair
 from .types import (
@@ -298,7 +299,6 @@ class Agent:
             else "edit_sae_code"
         )
         coerced["needs_sanity"] = True
-        coerced["primary_variable"] = "code_fix"
         coerced["reference_round"] = base_action.reference_round
         notes = list(repair_dict.get("notes_to_memory") or [])
         notes.append(f"repair attempt {repair_attempt}: constrained to original experiment target")
@@ -314,7 +314,11 @@ class Agent:
         if action.change_type != "param_only" or action.reference_round is not None:
             return action
 
-        family_name = (action.family_name or action.effective_config().get("ARCHITECTURE") or "").lower()
+        family_name = (
+            action.family_name
+            or action.env_dict().get("ARCHITECTURE")
+            or ""
+        ).lower()
         if not family_name:
             return action
 
@@ -358,6 +362,7 @@ def _infer_reference_round(state: Any, family_name: str) -> int | None:
     if not target:
         return None
 
+    fallback_round: int | None = None
     for summary in reversed(state.recent_round_summaries(limit=50)):
         if not isinstance(summary, dict):
             continue
@@ -369,15 +374,19 @@ def _infer_reference_round(state: Any, family_name: str) -> int | None:
         ).lower()
         if summary_family != target:
             continue
-        decision = str(summary.get("result", {}).get("decision") or "")
-        if decision in {"policy_reject", "crash"}:
+        if not summary_is_usable_reference(summary):
             continue
+        decision = str(summary.get("result", {}).get("decision") or "")
         try:
-            return int(summary.get("round"))
+            round_id = int(summary.get("round"))
         except (TypeError, ValueError):
-            return None
+            continue
+        if decision in {"keep", "archive"}:
+            return round_id
+        if fallback_round is None:
+            fallback_round = round_id
 
-    return None
+    return fallback_round
 
 
 
@@ -412,7 +421,10 @@ def coerce_stop_action(action: Action, state: Any, round_id: int) -> Action:
     d.setdefault("family_name", best_family)
     d.setdefault("family_stage", "mainline")
     d.setdefault("self_review", "Continuing search (stop not allowed)")
-    d.setdefault("primary_variable", "other_param")
+    if d.get("change_type") == "param_only" and d.get("reference_round") in (None, ""):
+        inferred_reference = _infer_reference_round(state, str(d.get("family_name") or best_family))
+        if inferred_reference is not None:
+            d["reference_round"] = inferred_reference
     notes = list(d.get("notes_to_memory") or [])
     notes.append("Runtime converted stop to run")
     d["notes_to_memory"] = notes[-12:]

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .compatibility import parse_compatibility_registry
+from .config_resolution import resolve_action_configs
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -156,12 +157,15 @@ class StateManager:
         """Update all state files after a round completes."""
         action_dict = action.to_dict()
         result_dict = result.to_dict()
-        family_name = (action.family_name or action.effective_config().get("ARCHITECTURE", "")).lower()
+        family_name = (
+            action.family_name
+            or (ctx.resolved_candidate_env_config or {}).get("ARCHITECTURE", "")
+        ).lower()
         existing_family = self.families.get(family_name)
         is_new_family = existing_family is None or existing_family.get("last_round") is None
 
         # 1. Update memory (families, insights, failures)
-        self._append_memory(action, result, round_id, touched_files)
+        self._append_memory(action, result, round_id, touched_files, ctx)
 
         # 2. Update agent counters
         self._update_agent_counters(result, is_new_family)
@@ -537,10 +541,15 @@ class StateManager:
         result: Result,
         round_id: int,
         touched_files: list[str],
+        ctx: RoundContext | None = None,
     ) -> None:
         """Update memory with round outcome."""
         m = self._memory
-        cfg = action.effective_config()
+        cfg = (
+            ctx.resolved_candidate_env_config
+            if ctx is not None and ctx.resolved_candidate_env_config is not None
+            else resolve_action_configs(action, self).candidate_env_config
+        )
         arch = cfg.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
         family_name = (action.family_name or arch).lower()
         family_stage = action.family_stage or "mainline"
@@ -614,7 +623,6 @@ class StateManager:
                 "round": round_id,
                 "family_name": family_name,
                 "change_type": action.change_type,
-                "primary_variable": action.primary_variable,
                 "hypothesis": action.hypothesis,
                 "termination_reason": result.termination_reason,
                 "error_type": result.error_type or "",
@@ -734,6 +742,12 @@ class StateManager:
             "experiment_branch": current_git_branch(),
             "action": action_dict,
             "result": result_dict,
+            "resolved_reference_env_config": ctx.resolved_reference_env_config,
+            "resolved_candidate_env_config": ctx.resolved_candidate_env_config,
+            "changed_keys": ctx.changed_keys,
+            "reference_source": ctx.reference_source,
+            "runtime_config_json": ctx.runtime_config_json,
+            "runtime_env_config": ctx.runtime_env_config,
             "touched_files": touched_files,
             "patch_path": str(patch_path) if patch_path is not None else None,
         }

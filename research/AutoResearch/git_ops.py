@@ -15,13 +15,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RESEARCH_DIR = REPO_ROOT / "research"
 HISTORY_DIR = RESEARCH_DIR / "history"
 
-ALLOWED_EDIT_PREFIXES = ("sparsify/",)
+ALLOWED_EDIT_PREFIXES = (
+    "sparsify/",
+    "research/AutoResearch/",
+    "scripts/autoresearch_test.sh",
+)
 
-SNAPSHOT_ROOTS = ("sparsify",)
+SNAPSHOT_ROOTS = (
+    "sparsify",
+    "research/AutoResearch",
+    "scripts/autoresearch_test.sh",
+)
 SNAPSHOT_EXCLUDES = (
     "research/history/",
     "research/history_old/",
-    "research/AutoResearch/",
     "sparsify/__pycache__/",
     "research/__pycache__/",
     "scripts/__pycache__/",
@@ -35,7 +42,6 @@ SNAPSHOT_EXCLUDES = (
     "research/prepare.py",
     "research/program.md",
     "research/agent_action.schema.json",
-    "scripts/autoresearch_test.sh",
 )
 SNAPSHOT_EXCLUDE_SUFFIXES = (".pyc", ".pyo")
 TRACKED_HISTORY_PATHS: tuple[Path, ...] = ()  # Set by init_tracked_paths()
@@ -141,6 +147,15 @@ def snapshot_paths() -> dict[str, str]:
     for root in SNAPSHOT_ROOTS:
         base = REPO_ROOT / root
         if not base.exists():
+            continue
+        if base.is_file():
+            rel = base.relative_to(REPO_ROOT).as_posix()
+            if any(rel.startswith(prefix) for prefix in SNAPSHOT_EXCLUDES):
+                continue
+            if rel.endswith(SNAPSHOT_EXCLUDE_SUFFIXES):
+                continue
+            snapshots[rel] = hashlib.sha256(base.read_bytes()).hexdigest()
+            print(f"  snapshot: {rel} -> 1 file")
             continue
         count = 0
         for path in base.rglob("*"):
@@ -251,4 +266,3 @@ def capture_before_files(paths: list[str], round_id: int) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if src.exists():
             dst.write_bytes(src.read_bytes())
-

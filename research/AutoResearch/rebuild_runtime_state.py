@@ -18,6 +18,7 @@ from .compatibility import (
     is_compatible_label,
     parse_compatibility_registry,
 )
+from .config_resolution import config_from_round_summary, summary_invalid_reason
 from .controller import frontier_key, _extract_extra_config
 from .types import BASE_ENV_DEFAULTS, HISTORY_DIR
 
@@ -130,8 +131,9 @@ def rebuild_runtime_state(
         family["design_hypothesis"] = action.get("hypothesis", family.get("design_hypothesis", ""))
         family["next_steps"] = list(action.get("next_hypotheses", []))[:8]
         family["compatibility"] = compat_label
+        invalid_reason = summary_invalid_reason(summary)
 
-        if result.get("decision") != "policy_reject":
+        if invalid_reason is None and result.get("decision") != "policy_reject":
             family["tested_configs"].append({
                 "round": round_id,
                 "stage": summary.get("family_stage"),
@@ -142,12 +144,11 @@ def rebuild_runtime_state(
             })
             family["tested_configs"] = family["tested_configs"][-20:]
 
-        if result.get("decision") == "crash":
+        if invalid_reason is None and result.get("decision") == "crash":
             failure = {
                 "round": round_id,
                 "family_name": family_name,
                 "change_type": action.get("change_type"),
-                "primary_variable": action.get("primary_variable"),
                 "hypothesis": action.get("hypothesis"),
                 "termination_reason": result.get("termination_reason"),
                 "error_type": result.get("error_type") or "",
@@ -161,6 +162,13 @@ def rebuild_runtime_state(
 
         if not is_compatible_label(compat_label):
             family["status"] = "filtered_incompatible"
+            continue
+
+        if invalid_reason is not None:
+            family.setdefault("known_issues", []).append(
+                f"round {round_id}: invalid result ignored | {invalid_reason}"
+            )
+            family["known_issues"] = family["known_issues"][-20:]
             continue
 
         if _is_successful_metric(result):
@@ -260,6 +268,37 @@ def rebuild_runtime_state(
 
 
 def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
+    resolved_env = config_from_round_summary(summary)
+    if resolved_env is not None:
+        config = {
+            "architecture": str(resolved_env.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"])).lower(),
+            "expansion_factor": int(resolved_env.get("EXPANSION_FACTOR", BASE_ENV_DEFAULTS["EXPANSION_FACTOR"])),
+            "k": int(resolved_env.get("K", BASE_ENV_DEFAULTS["K"])),
+            "optimizer": str(resolved_env.get("OPTIMIZER", BASE_ENV_DEFAULTS["OPTIMIZER"])),
+            "lr": str(resolved_env.get("LR", BASE_ENV_DEFAULTS["LR"])),
+            "hookpoints": str(resolved_env.get("HOOKPOINTS", BASE_ENV_DEFAULTS["HOOKPOINTS"])),
+            "batch_size": int(resolved_env.get("BATCH_SIZE", BASE_ENV_DEFAULTS["BATCH_SIZE"])),
+            "grad_acc_steps": int(resolved_env.get("GRAD_ACC_STEPS", BASE_ENV_DEFAULTS["GRAD_ACC_STEPS"])),
+            "micro_acc_steps": int(resolved_env.get("MICRO_ACC_STEPS", BASE_ENV_DEFAULTS["MICRO_ACC_STEPS"])),
+            "auxk_alpha": float(resolved_env.get("AUXK_ALPHA", BASE_ENV_DEFAULTS["AUXK_ALPHA"])),
+            "dead_feature_threshold": int(resolved_env.get("DEAD_FEATURE_THRESHOLD", BASE_ENV_DEFAULTS["DEAD_FEATURE_THRESHOLD"])),
+            "use_hadamard": str(resolved_env.get("USE_HADAMARD", BASE_ENV_DEFAULTS["USE_HADAMARD"])).lower() not in {"0", "false"},
+        }
+        optional_map = {
+            "TRUNK_RANK": ("trunk_rank", int),
+            "NUM_CODES": ("num_codes", int),
+            "STAGE1_RATIO": ("stage1_ratio", float),
+            "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", int),
+        }
+        for env_key, (cfg_key, caster) in optional_map.items():
+            value = resolved_env.get(env_key)
+            if value not in (None, ""):
+                config[cfg_key] = caster(value)
+        action = summary.get("action", {})
+        config["family_name"] = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
+        config["family_stage"] = summary.get("family_stage") or action.get("family_stage") or "mainline"
+        return config
+
     config = {
         "architecture": BASE_ENV_DEFAULTS["ARCHITECTURE"],
         "expansion_factor": int(BASE_ENV_DEFAULTS["EXPANSION_FACTOR"]),

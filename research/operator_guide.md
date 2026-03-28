@@ -20,7 +20,7 @@
    - 不要先改共享 trainer / runtime 路径，除非失败证据明确指向 trainer。
    - 如果 sanity 根本没过，不要把问题归因为训练阶段的 first-step bottleneck。
 
-3. 一轮只允许一个主变量。
+3. 一轮只允许一个 env 参数变化。
    - 不要同时修改 `architecture + lr`
    - 不要同时修改 `code + architecture + lr`
    - 只有在运行时明确允许的例外情况下，才允许耦合修改
@@ -40,6 +40,19 @@
 7. 下面的内容首先是 idea bank，不是强制 recipe。
    - 在当前 blocker 未解决前，应优先选择最小、最可解释、最容易归因的动作。
    - 只有当基础运行链路稳定后，才扩大到更发散的搜索。
+
+8. 如果本轮结论依赖一个新参数或新 override，不要先讨论架构优劣，先确认参数真的生效。
+   - 检查 `research/history/logs/round*.config.json`
+   - 检查 checkpoint `config.json`
+   - 如果参数未进入训练配置，这轮结果无效
+
+9. 新增 tunable 参数时，必须完成完整接线 checklist。
+   - 在 `sparsify/` 中实现参数消费
+   - 在 `research/AutoResearch/override_registry.py` 注册 override key
+   - 在 runner / training config 持久化中记录该字段
+   - 在 `scripts/autoresearch_test.sh` 把环境变量透传成 CLI flag
+   - 在 resume / runtime validation 中覆盖该字段
+   - 第一轮先做“参数生效确认”，不要直接把结果当成架构证据
 
 ---
 
@@ -475,7 +488,7 @@ Agent 不应只看：
 
 ### 4.1 不只做单变量 ablation
 高层结构思路可以来自多个想法的组合，但**单轮 action 仍必须只回答一个主问题**。
-也就是说，可以在跨多轮搜索里逐步把两个想法拼起来；不要在同一轮 `param_only` 里同时改多个主轴。
+也就是说，可以在跨多轮搜索里逐步把两个想法拼起来；不要在同一轮 `param_only` 里同时改多个参数。
 
 可跨轮组合的方向示例：
 
@@ -486,7 +499,7 @@ Agent 不应只看：
 - coarse VQ + residual SAE
 
 很多有效方案未必来自某一个单独改动，而是来自两个思想的组合。
-正确做法是：先建立一个清晰的 `reference_round` 锚点，再沿单变量路径逐步把组合搭出来。
+正确做法是：先建立一个清晰的 `reference_round` 锚点，让 `env_overrides` 作为对该轮完整配置的 patch，再沿单变量路径逐步把组合搭出来。
 
 ---
 

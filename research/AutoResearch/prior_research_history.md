@@ -380,8 +380,8 @@ history 里有几个常见误判来源：
 
 `171` 个 round 里：
 
-- `architecture` 主变量：`85`
-- `k` 主变量：`46`
+- 以 `architecture` 为主的轮次：`85`
+- 以 `k` 为主的轮次：`46`
 - `auxk_alpha`：`13`
 - `lr`：`8`
 - `optimizer`：`5`

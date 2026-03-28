@@ -204,7 +204,6 @@ def compact_round_summary(summary: dict[str, Any]) -> dict[str, Any]:
             "touched_files": action.get("touched_files", []),
             "notes_to_memory": [trim_text(note, limit=180) for note in action.get("notes_to_memory", [])[:4]],
             "next_hypotheses": [trim_text(note, limit=180) for note in action.get("next_hypotheses", [])[:3]],
-            "primary_variable": action.get("primary_variable"),
         }
         compact["action"] = {key: value for key, value in compact_action.items() if value not in (None, "", [], {})}
     return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
@@ -667,7 +666,6 @@ def build_round_digest(summary: dict[str, Any], candidate_reasons: dict[int, lis
         "family_name": summary.get("family_name"),
         "family_stage": summary.get("family_stage"),
         "change_type": action.get("change_type"),
-        "primary_variable": action.get("primary_variable"),
         "decision": primary_result.get("decision"),
         "termination_reason": primary_result.get("termination_reason"),
         "val_fvu": primary_result.get("val_fvu"),
