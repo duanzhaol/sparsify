@@ -1,0 +1,1732 @@
+{"command":"run","hypothesis":"选择直接兼容 family `topk`，其最终重构公式为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo 时，`{b_i}` 是静态向量库，在线仅做 top-64 选择、系数计算、查表 `W b_i`、加权求和，并保留现有选择性补偿接口。相对 cold-start baseline 仅把 `K` 从 128 降到 64，可把 combined total_cost 从约 `0.38x` 降到约 `0.31x`，先在 `<0.5x` 区域建立可解释 cost anchor。","summary":"兼容性判断：`topk` 为直接兼容。选择 `K=64` 是单变量、低接线风险、最贴合当前 round 1 成本探索目标的动作；在 `d_in=1024, n=4096, EF=1` 下，encoder ratio 约 `0.25x`，deployment ratio 约 `0.06x`，combined ratio 约 `0.31x`，明显低于 `1.5x` 硬预算，也比 baseline `K=128` 的约 `0.38x` 更接近低成本前沿。","change_type":"param_only","experiment_tier":"proxy","expected_win":"lower_cost","family_name":"topk","family_stage":"mainline","self_review":"遵守冷启动单变量原则：`reference_round=null`，仅修改一个 env 参数 `K`。该提案不依赖新增 tunable 参数，也不引入不兼容 family。主要风险是 FVU 可能因 `K` 减半而上升，但这正是当前 target 需要先测清的低成本锚点。","needs_sanity":false,"env_overrides":[{"key":"K","value":"64"}],"touched_files":[],"notes_to_memory":["`topk` 直接兼容 LUTurbo：`x_hat = Σ α_i b_i`，可直接导出为静态向量库查表加权和。","cold-start 首轮优先建立 `<0.5x` 低成本 anchor；`K=64, EF=1` 的 topk combined cost 约 `0.31x`。"],"next_hypotheses":["如果 `K=64` 的 FVU 仍可接受，下一轮继续向 `K=32` 压缩以补足更低成本区。","如果 `K=64` 的 FVU 退化过大，再回到同量级成本附近测试 `factorized_topk` 或恢复更高 `K`。"],"reference_round":null}
+
+--- STDERR ---
+Reading prompt from stdin...
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d34da-1651-7630-8146-70ed02d7f807
+--------
+user
+你是本仓库中的 LUTurbo 自动研究 Agent。
+
+系统使命：
+- 为 LUTurbo 搜索可部署的基向量分解模块
+- 真正目标是降低 LUTurbo 在 CPU 上的总在线成本与时延，而不只是把 sparsify-ascend 内部的 SAE 指标做高
+- 优先考虑那些有希望同时降低“选择 + 系数计算 + 查表 + 在线补偿”总成本的方案
+
+模块契约：
+- 学到的表示必须能导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”推理流水线
+- 最终重构必须能表示成一个或多个静态向量库上的有限加权和
+- SAE 只是当前基线实现，不是必须坚持的唯一架构形式
+
+训练侧代理目标：
+- 维护并改善 (total_cost, FVU) 的 2D Pareto frontier
+- total_cost = encoder 选择成本 + 部署查表成本，两者加和后与 FVU 做 Pareto 权衡
+- 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
+- 用尽可能低的 total_cost 达到尽可能低的 FVU
+- 当前阶段优先补足低成本区域，尤其是 total_cost < 0.5x；但在新位置冷启动时，允许少量 0.5x-1.0x anchor 用于建立局部认知
+- 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
+- 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
+- K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
+- encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
+- 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
+- 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
+- 可探索的方向包括：更低 EF / K、factorized scorer、低秩 trunk、codebook、分阶段 residual、轻量多专家/多子库方案等
+- 当前如果对已实现 family 的结果持续不满意，应优先把一部分探索预算转向“尚未充分验证但结构上有潜力”的方向，而不是只在旧 family 上继续局部微调
+- 在这些高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由是重点候选之一，因为它有机会在增大总容量的同时维持较小的单 token 激活路径
+- 上述方向只是候选搜索空间，不是默认结论；不要因为旧经验预先排斥任何兼容 family
+- 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试
+
+执行层是固定的：
+- 训练：scripts/autoresearch_test.sh
+- 结果：research/controller.py
+- 记忆：research/history/
+- 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
+- 如果新增可调参数，不仅要在 sparsify/ 中实现，还必须同步接通 research/AutoResearch/ 下的 override/config-resolution/runner 持久化链路、scripts/autoresearch_test.sh 参数透传、以及必要的 resume/validation 路径；否则实验会静默回退到默认值
+- 新增 tunable 参数时，允许编辑的最小必要范围是：sparsify/、research/AutoResearch/、scripts/autoresearch_test.sh；不要改其他路径
+
+规则：
+- 默认只编辑 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许同时修改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件
+- 纯参数实验必须使用 env_overrides
+- 每一轮只允许一个主假设
+- 不要声明 primary_variable；系统会根据 reference_round 的完整配置自动判断本轮到底改了哪个参数
+- 如果 change_type=param_only，默认必须显式给出 reference_round；只有当前 target profile 还没有任何可用 reference_round 时，才允许显式返回 `reference_round=null`，相对 `target_profile_baseline` 冷启动，并且仍然只能改 1 个 env 参数
+- 新增 tunable 参数后的第一轮，必须先验证该参数真的进入了训练配置：至少检查 round*.config.json 和 checkpoint config.json 中该字段存在且取值正确
+- 不要返回 command="stop"
+- 最终必须返回一个符合 action schema 的 JSON 对象
+
+单变量原则：每一轮只改变一个 env 参数。有 reference_round 时，env_overrides 是对该轮完整配置的 patch。若当前 target 仍是冷启动且暂无 reference_round，则允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 1 策略模式：成本探索
+原因：当前 frontier 没有成本可行的点（均超过 1.5×h×n 预算）。首要目标是找到可行配置。
+当前参考 family：topk
+当前参考配方：ARCHITECTURE=topk K=128 EXPANSION_FACTOR=1 OPTIMIZER=signum LR=8e-4
+当前参考完整配置（source=target_profile_baseline）：
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 首要目标：找到 total_cost (encoder + deployment) ≤1.5×h×n 的配置。
+2. 降低 encoder 成本最有效的手段是降低 EXPANSION_FACTOR。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。
+3. 选 K 时需权衡 FVU 改善与部署查表开销（K×n），K 过大会推高 total_cost。
+4. 参考成本速查表选择可行的 (架构, EF) 组合。
+5. 可以尝试不同架构；不要因为旧位置结论预先排斥简单结构、低秩结构或更复杂结构。
+6. 如果已实现 family 长时间都不给满意结果，可以优先抽少量轮次去实现或接线高优先级未验证方向，例如轻量 expert 子库 / MoE-like 路由。
+7. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 8 个，扩展兼容 21 个，不兼容 3 个。
+
+Agent 状态：round=0, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=0
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前高优先级未充分验证方向：
+  1. 轻量 expert 子库 / MoE-like 路由。
+     只有在 router 足够轻、ACTIVE_EXPERTS 很小、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. 如果已实现 family 持续不能给出满意结果，不要只继续微调旧 family；应优先抽出一部分轮次去补这些未充分验证方向。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  （暂无条目）
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构）：
+  （当前 target 还没有历史结果）
+
+最近可用 reference_round 的完整配置：
+  （当前 target profile 尚无历史结果）
+  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。
+
+架构家族（frontier 持有者 + 最近测试）：
+  （暂无局部记忆）
+
+Operator guide 关键优先级：
+## Runtime Priorities
+
+在参考下面的 idea bank 之前，先遵守这些当前阶段的运行时优先级。
+
+1. 如果当前阶段出现反复 blocker，第一优先级不是扩展搜索空间，而是先消除 blocker。
+   典型 blocker 包括：
+   - `sanity_failed`
+   - `first_step_timeout`
+   - 变量隔离失效导致的混杂实验
+
+2. 如果一轮失败在 `sanity`，优先修复对应架构本身的前向/反向兼容性问题。
+   - 不要先改共享 trainer / runtime 路径，除非失败证据明确指向 trainer。
+   - 如果 sanity 根本没过，不要把问题归因为训练阶段的 first-step bottleneck。
+
+3. 一轮只允许一个 env 参数变化。
+   - 不要同时修改 `architecture + lr`
+   - 不要同时修改 `code + architecture + lr`
+   - 只有在运行时明确允许的例外情况下，才允许耦合修改
+
+4. 在系统尚未稳定时，优先顺序应为：
+   - 先拿到能稳定运行并能产生有效信号的实验
+   - 再做架构比较
+   - 最后才扩大到更复杂的训练目标或部署对齐目标
+
+5. 当前不要轻易改动固定执行层的语义。
+   - 不要改变 evaluation semantics
+   - 不要改变 launcher 行为
+   - 不要引入会让历史结果不可比的大改动
+
+6. 如果最近的失败模式表明问题出在系统观测或运行时策略，不要把它误判成架构质量结论。
+
+7. 下面的内容首先是 idea bank，不是强制 recipe。
+   - 如果当前存在未解决 blocker，应优先选择最小、最可解释、最容易归因的动作。
+   - 只有当基础运行链路稳定后，才扩大到更发散的搜索。
+
+8. 如果本轮结论依赖一个新参数或新 override，不要先讨论架构优劣，先确认参数真的生效。
+   - 检查 `research/history/logs/round*.config.json`
+   - 检查 checkpoint `config.json`
+   - 如果参数未进入训练配置，这轮结果无效
+
+9. 新增 tunable 参数时，必须完成完整接线 checklist。
+   - 在 `sparsify/` 中实现参数消费
+   - 在 `research/AutoResearch/override_registry.py` 注册 override key
+   - 在 runner / training config 持久化中记录该字段
+   - 在 `scripts/autoresearch_test.sh` 把环境变量透传成 CLI flag
+   - 在 resume / runtime validation 中覆盖该字段
+   - 第一轮先做“参数生效确认”，不要直接把结果当成架构证据
+
+---
+
+
+完整背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | scorer mixture 仍可导出为静态库和 | 扩展兼容 |
+| `whitened_lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 扩展兼容 |
+| `whitened_lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理 + gated residual 需要 fresh validation | 扩展兼容 |
+| `two_stage_residual` | multi-stage sparse sum | candidate | staged residual 仍是静态库和 | 扩展兼容 |
+| `lowrank_two_stage_residual` | trunk + two-stage sparse sum | candidate | staged residual path | 扩展兼容 |
+| `routed_lowrank_two_stage_residual` | trunk + routed two-stage sparse sum | candidate | route 只在选择链路 | 扩展兼容 |
+| `codebook_topk` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | coarse codebook + sparse residual | 扩展兼容 |
+| `residual_vq` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | hard codebook coarse branch | 扩展兼容 |
+| `two_code_residual_vq` | multi-codebook + sparse residual | candidate | 更深 coarse path，结构更复杂 | 扩展兼容 |
+| `lowrank_residual_vq` | trunk + codebook + sparse residual | candidate | trunk + codebook + sparse residual | 扩展兼容 |
+| `lowrank_soft_codebook_residual` | trunk + soft codebook + sparse residual | candidate | 结构参数更多，部署侧额外查表更重 | 扩展兼容 |
+| `lowrank_two_stage_soft_codebook_residual` | trunk + soft codebook + two-stage sparse residual | candidate | staged + codebook + trunk，结构更复杂 | 扩展兼容 |
+| `lowrank_asymmetric_two_stage_soft_codebook_residual` | trunk + soft codebook + asymmetric staged residual | candidate | asymmetric staged residual | 扩展兼容 |
+| `routed_lowrank_two_stage_soft_codebook_residual` | trunk + soft codebook + routed staged residual | candidate | routed staged residual | 扩展兼容 |
+| `bucketed_lowrank_two_stage_soft_codebook_residual` | trunk + soft codebook + bucketed staged residual | candidate | bucketed staged residual | 扩展兼容 |
+| `whitened_lowrank_two_stage_soft_codebook_residual` | trunk + codebook + staged residual | candidate | 预处理 + staged/codebook 组合需 fresh validation | 扩展兼容 |
+| `lowrank_adaptive_budget_residual` | batch-coupled residual budget | blocked | 当前实现仍不是单样本固定导出 | 不兼容 |
+
+说明：
+
+- `直接兼容` / `扩展兼容` family 都可以进入搜索
+- 这张表只表达“结构上能否导出到 LUTurbo/Lottable”，不表达效果排名
+- `candidate` 只表示“可以测”，不表示“应该优先”或“已经被证明更好”
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- total_cost 必须拆成 encoder 与 deployment 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优 frontier 点
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 简单结构和复杂结构，谁在当前位置的低成本区更优
+- low-rank trunk 是否能显著降低当前 target 的所需 K
+- factorized scorer 在当前位置是收益还是约束
+- codebook / VQ / staged residual 的额外结构是否值得其部署开销
+- whitening / preprocessing 在当前位置是稳定增益还是副作用
+- loss/preprocess 切换是否会比结构切换更重要
+- MoE-like / multi-branch / routed 子库方案是否能在保持导出约束的前提下带来新 Pareto 点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 高优先级未接线方向
+
+下面这些方向目前不应被当成“已经可直接跑的 family”，但在探索优先级上应被抬高：
+
+- 轻量 expert 子库 / MoE-like 路由
+- 多子库 + 局部 sparse residual
+- 先轻量 router，再在局部字典内 top-k 的结构
+
+原因不是它们已经被证明更好，而是：
+
+- 它们可能允许“总容量变大，但单 token 激活路径仍然较短”
+- 它们有机会把 selection 从“全字典打分”变成“局部子库打分”
+- 它们是目前现有已实现 family 之外，少数仍明显欠探索、但又符合部署直觉的方向
+
+如果要实现第一版，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+一句话：MoE-like 目前不是已验证主线，但应被视为高优先级未验证方向，而不是长期压后。
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的可解释 baseline 和 cost anchors
+- 再根据当前 target 的 frontier 形状决定下一步往哪里扩
+- 优先选择归因清晰、接线风险低、能补充新信息的实验
+- 如果已实现 family 持续不能给出满意结果，应优先抽出一部分预算转向高优先级未验证方向，尤其是轻量 expert 子库 / MoE-like
+- 不要让旧位置的主线故事替代当前 target 的新证据
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+?? research/history/frontier.json
+?? research/history/state.json
+?? research/history/timeline.jsonl
+
+exec
+/bin/bash -lc 'rg --files sparsify | rg "(config|sparse_coder|architecture|model|trainer|sae)"' in /root/sparsify-ascend
+exec
+/bin/bash -lc "rg -n \"ARCHITECTURE|architecture\" sparsify research/AutoResearch scripts/autoresearch_test.sh -g '"'!research/history/**'"'" in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/trainer.py
+sparsify/tiled_sparse_coder.py
+sparsify/config.py
+sparsify/sparse_coder.py
+sparsify/sparsify/sparse_coder.py
+
+ succeeded in 0ms:
+scripts/autoresearch_test.sh:24:ARCHITECTURE="${ARCHITECTURE:-topk}"
+scripts/autoresearch_test.sh:79:  --architecture "${ARCHITECTURE}"
+research/AutoResearch/config_resolution.py:18:    allowed_override_keys_for_architecture,
+research/AutoResearch/config_resolution.py:145:    if sae.get("architecture") is not None:
+research/AutoResearch/config_resolution.py:146:        config["ARCHITECTURE"] = str(sae.get("architecture")).lower()
+research/AutoResearch/config_resolution.py:147:    allowed_keys = allowed_override_keys_for_architecture(config["ARCHITECTURE"])
+research/AutoResearch/config_resolution.py:149:        "architecture": "ARCHITECTURE",
+research/AutoResearch/config_resolution.py:221:        config["ARCHITECTURE"] = family_name
+research/AutoResearch/config_resolution.py:230:        "architecture": "ARCHITECTURE",
+research/AutoResearch/config_resolution.py:271:    if entry.get("architecture") is not None:
+research/AutoResearch/config_resolution.py:272:        config["ARCHITECTURE"] = str(entry["architecture"]).lower()
+research/AutoResearch/config_resolution.py:312:            or entry.get("architecture")
+research/AutoResearch/config_resolution.py:368:            or best_entry.get("architecture")
+research/AutoResearch/config_resolution.py:369:            or config.get("ARCHITECTURE", "topk")
+research/AutoResearch/config_resolution.py:379:        "family_name": config["ARCHITECTURE"],
+research/AutoResearch/config_resolution.py:399:            or summary.get("result", {}).get("architecture")
+research/AutoResearch/controller.py:29:    "architecture": re.compile(r"^architecture:\s+(\S+)$", re.MULTILINE),
+research/AutoResearch/controller.py:41:    Returns a dict with: status, val_fvu, k, architecture, expansion_factor,
+research/AutoResearch/controller.py:169:        "architecture": parsed.get("architecture"),
+research/AutoResearch/controller.py:346:    arch = parsed.get("architecture") or cfg.get("architecture", "topk")
+research/AutoResearch/controller.py:383:    """Extract architecture-specific params from config for cost estimation."""
+research/AutoResearch/controller.py:408:        entry.get("architecture")
+research/AutoResearch/controller.py:409:        or cfg.get("architecture")
+research/AutoResearch/LESSONS.md:110:- 新 architecture family 最多 3 轮 proxy 观察期（incubating）
+research/AutoResearch/LESSONS.md:181:- 吞吐 watchdog 的 baseline 需要按 `architecture + hookpoints` 分别记录
+sparsify/__main__.py:36:            "architecture": args.sae.architecture,
+sparsify/__main__.py:81:            "architecture": cfg.get("sae", {}).get("architecture"),
+research/AutoResearch/override_registry.py:23:ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
+research/AutoResearch/override_registry.py:59:    "ARCHITECTURE",
+research/AutoResearch/override_registry.py:84:    "architecture": "ARCHITECTURE",
+research/AutoResearch/override_registry.py:125:def resolve_architecture_from_overrides(overrides: list | dict, fallback: str = "topk") -> str:
+research/AutoResearch/override_registry.py:127:        if key == "ARCHITECTURE" and value:
+research/AutoResearch/override_registry.py:132:def allowed_override_keys_for_architecture(architecture: str) -> set[str]:
+research/AutoResearch/override_registry.py:133:    return COMMON_OVERRIDE_KEYS | ARCHITECTURE_OVERRIDE_KEYS.get(architecture.lower(), set())
+research/AutoResearch/override_registry.py:136:def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+research/AutoResearch/override_registry.py:137:    architecture = resolve_architecture_from_overrides(overrides, fallback=fallback_architecture)
+research/AutoResearch/override_registry.py:138:    allowed = allowed_override_keys_for_architecture(architecture)
+research/AutoResearch/types.py:41:    "ARCHITECTURE": "topk",
+research/AutoResearch/types.py:98:    "val_fvu", "k", "architecture", "expansion_factor",
+research/AutoResearch/types.py:144:            if str(item.get("key") or "") == "ARCHITECTURE" and item.get("value") not in (None, ""):
+research/AutoResearch/types.py:154:            family_name=override_arch or str(d.get("family_name", BASE_ENV_DEFAULTS["ARCHITECTURE"])).lower(),
+research/AutoResearch/types.py:213:    architecture: str | None = None
+research/AutoResearch/policy.py:12:- architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
+research/AutoResearch/policy.py:63:    family_name = action.family_name or resolved.candidate_env_config.get("ARCHITECTURE")
+research/AutoResearch/policy.py:173:        mode = "architecture_probe"
+research/AutoResearch/policy.py:176:            "可以插入 1 个 matched architecture probe。"
+research/AutoResearch/policy.py:226:            "1. 优先继续修最近失败实现，不要新开 architecture family。",
+research/AutoResearch/policy.py:269:    if mode == "architecture_probe":
+research/AutoResearch/policy.py:277:            "1. 只允许做 1 个 matched architecture probe。",
+research/AutoResearch/policy.py:278:            "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
+research/AutoResearch/policy.py:318:            or entry.get("architecture")
+research/AutoResearch/policy.py:372:def behavioral_diff_test(architecture: str, k: int, ef: int) -> dict[str, Any]:
+research/AutoResearch/policy.py:373:    """Compare candidate architecture encode() output vs baseline topk."""
+research/AutoResearch/policy.py:374:    if architecture == "topk":
+research/AutoResearch/policy.py:375:        return {"identical": False, "max_diff": 0.0, "architecture": architecture}
+research/AutoResearch/policy.py:389:base = SparseCoder(1024, SparseCoderConfig(architecture='topk', k={k}, expansion_factor={ef}), device=device, dtype=torch.float32)
+research/AutoResearch/policy.py:392:cand = SparseCoder(1024, SparseCoderConfig(architecture='{architecture}', k={k}, expansion_factor={ef}), device=device, dtype=torch.float32)
+research/AutoResearch/policy.py:419:                    "architecture": architecture,
+research/AutoResearch/policy.py:424:            "architecture": architecture,
+research/AutoResearch/policy.py:431:            "architecture": architecture,
+research/AutoResearch/policy.py:438:            "architecture": architecture,
+research/AutoResearch/policy.py:522:    arch = cfg.get("ARCHITECTURE", "topk").lower()
+research/AutoResearch/policy.py:570:        f"ARCHITECTURE={config.get('ARCHITECTURE', '?')} "
+sparsify/trainer.py:111:                    sae_cls = _get_sae_class(cfg.sae.architecture)
+sparsify/trainer.py:257:                "architecture": self.cfg.sae.architecture,
+research/AutoResearch/prompt.py:109:ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
+research/AutoResearch/prompt.py:110:    "/root/.codex/skills/sae-architecture-integration/SKILL.md"
+research/AutoResearch/prompt.py:228:        arch = entry.get("architecture", "?")
+research/AutoResearch/prompt.py:351:        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+research/AutoResearch/prompt.py:379:        arch = entry.get("architecture", "?")
+research/AutoResearch/prompt.py:396:        arch = entry.get("architecture", "?")
+research/AutoResearch/prompt.py:428:        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+research/AutoResearch/prompt.py:454:        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+research/AutoResearch/prompt.py:507:    from .compatibility import _COST_TABLE_ARCHITECTURES, _COST_TABLE_EF_VALUES
+research/AutoResearch/prompt.py:509:    # Filter to compatible architectures only
+research/AutoResearch/prompt.py:510:    archs = [a for a in _COST_TABLE_ARCHITECTURES if is_compatible_label(registry.get(a))]
+research/AutoResearch/prompt.py:512:        archs = _COST_TABLE_ARCHITECTURES  # fallback: show all if registry empty
+research/AutoResearch/prompt.py:570:            or summary.get("result", {}).get("architecture")
+research/AutoResearch/prompt.py:619:            or result.get("architecture")
+research/AutoResearch/prompt.py:635:            f"  r{round_id} {family_name or cfg.get('ARCHITECTURE', '?')} "
+research/AutoResearch/prompt.py:712:    families = memory.get("architecture_families", {})
+research/AutoResearch/prompt.py:725:            fn = cfg.get("family_name", entry.get("architecture", ""))
+research/AutoResearch/prompt.py:734:            or summary.get("result", {}).get("architecture")
+research/AutoResearch/prompt.py:794:        for name in memory.get("architecture_families", {})
+research/AutoResearch/prompt.py:855:def section_architecture_checklist(
+research/AutoResearch/prompt.py:921:    checklist = _load_architecture_checklist()
+research/AutoResearch/prompt.py:924:        sections.append(section_architecture_checklist(checklist, state.memory, raw))
+research/AutoResearch/prompt.py:967:    checklist = _load_architecture_checklist()
+research/AutoResearch/prompt.py:970:        sections.append(section_architecture_checklist(checklist, state.memory, raw))
+research/AutoResearch/prompt.py:1014:    checklist = _load_architecture_checklist()
+research/AutoResearch/prompt.py:1026:def _load_architecture_checklist() -> str:
+research/AutoResearch/prompt.py:1028:    if not ARCHITECTURE_INTEGRATION_SKILL_PATH.exists():
+research/AutoResearch/prompt.py:1030:    text = ARCHITECTURE_INTEGRATION_SKILL_PATH.read_text().strip()
+research/AutoResearch/prompt.py:1061:            if any(kw in summary for kw in ("unknown architecture", "dispatch", "registration")):
+research/AutoResearch/prompt.py:1078:        arch = row.get("architecture", "?")
+research/AutoResearch/prompt.py:1103:    """Extract architecture-specific params for cost estimation from config."""
+sparsify/config.py:9:    """Configuration for a sparse coder (SAE) architecture."""
+sparsify/config.py:24:    architecture: str = "topk"
+sparsify/config.py:25:    """Encoding architecture."""
+sparsify/config.py:50:    """Fraction of K budget for stage 1 in two-stage architectures. None = 0.5."""
+sparsify/config.py:245:        if self.sae.architecture not in valid_archs:
+sparsify/config.py:247:                f"Unknown architecture: {self.sae.architecture!r}. "
+research/AutoResearch/agent.py:320:            or action.env_dict().get("ARCHITECTURE")
+research/AutoResearch/agent.py:374:            or summary.get("result", {}).get("architecture")
+research/AutoResearch/agent.py:398:# _summarize_results, _load_architecture_checklist, _should_include_checklist
+research/AutoResearch/agent.py:406:    best_family = BASE_ENV_DEFAULTS["ARCHITECTURE"]
+research/AutoResearch/agent.py:417:                        best_family = str(cfg.get("family_name") or entry.get("architecture") or best_family)
+research/AutoResearch/state.py:82:    "architecture_findings": [],
+research/AutoResearch/state.py:86:    "architecture_families": {},
+research/AutoResearch/state.py:143:        return self._memory.setdefault("architecture_families", {})
+research/AutoResearch/state.py:163:            or (ctx.resolved_candidate_env_config or {}).get("ARCHITECTURE", "")
+research/AutoResearch/state.py:235:            **{k: config.get(k) for k in ("tier", "architecture", "k") if config.get(k) is not None},
+research/AutoResearch/state.py:240:    def get_baseline_tps(self, architecture: str, hookpoints: str) -> float | None:
+research/AutoResearch/state.py:241:        key = f"standard|{architecture}|{hookpoints}"
+research/AutoResearch/state.py:272:            arch = entry.get("architecture", "?")
+research/AutoResearch/state.py:308:        for name, fam in m.get("architecture_families", {}).items():
+research/AutoResearch/state.py:357:            f"{v.get('architecture','?')} k={v.get('k','?')}: {v.get('tokens_per_sec',0):.0f} tok/s (r{v.get('round','?')})"
+research/AutoResearch/state.py:510:                or summary.get("result", {}).get("architecture")
+research/AutoResearch/state.py:551:        families = self._memory.get("architecture_families", {})
+research/AutoResearch/state.py:628:                arch = str(entry.get("architecture") or cfg.get("architecture") or "topk").lower()
+research/AutoResearch/state.py:686:        arch = cfg.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
+research/AutoResearch/state.py:702:            "architecture": arch,
+research/AutoResearch/state.py:740:            m.setdefault("architecture_findings", []).append(outcome_note)
+research/AutoResearch/state.py:741:            m["architecture_findings"] = m["architecture_findings"][-20:]
+research/AutoResearch/state.py:783:        families = self._memory.setdefault("architecture_families", {})
+research/AutoResearch/runner.py:75:def run_sanity(architecture: str, k: int, ef: int) -> None:
+research/AutoResearch/runner.py:76:    """Run a fast forward+backward pass to validate the architecture."""
+research/AutoResearch/runner.py:87:        f"cfg = SparseCoderConfig(architecture={architecture!r}, k={k}, expansion_factor={ef})",
+research/AutoResearch/runner.py:131:        config_json["architecture"], config_json["hookpoints"]
+research/AutoResearch/runner.py:140:        f"arch={config_json['architecture']} k={config_json['k']} "
+research/AutoResearch/runner.py:230:    if parsed.get("architecture") is None:
+research/AutoResearch/runner.py:231:        parsed["architecture"] = config_json.get("architecture")
+research/AutoResearch/runner.py:269:        architecture=parsed.get("architecture"),
+research/AutoResearch/runner.py:336:            config_json["architecture"], config_json["hookpoints"]
+research/AutoResearch/runner.py:551:        fallback_architecture=resolved.candidate_env_config.get(
+research/AutoResearch/runner.py:552:            "ARCHITECTURE",
+research/AutoResearch/runner.py:553:            action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"],
+research/AutoResearch/runner.py:570:        "architecture": merged.get("ARCHITECTURE", "topk").lower(),
+research/AutoResearch/runner.py:582:        "family_name": action.family_name or merged.get("ARCHITECTURE", "topk").lower(),
+research/AutoResearch/runner.py:594:    # Optional architecture-specific keys
+research/AutoResearch/runner.py:658:    return f"standard|{config_json.get('architecture')}|{config_json.get('hookpoints')}"
+research/AutoResearch/rebuild_runtime_state.py:116:        family_name = str(summary.get("family_name") or action.get("family_name") or result.get("architecture") or "").lower()
+research/AutoResearch/rebuild_runtime_state.py:191:            arch = str(result.get("architecture") or config.get("architecture") or family_name).lower()
+research/AutoResearch/rebuild_runtime_state.py:198:                "architecture": arch,
+research/AutoResearch/rebuild_runtime_state.py:233:        family_name = str(entry.get("config", {}).get("family_name") or entry.get("architecture") or "").lower()
+research/AutoResearch/rebuild_runtime_state.py:249:    rebuilt_memory["architecture_families"] = families
+research/AutoResearch/rebuild_runtime_state.py:270:            "architecture": str(resolved_env.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"])).lower(),
+research/AutoResearch/rebuild_runtime_state.py:294:        config["family_name"] = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
+research/AutoResearch/rebuild_runtime_state.py:304:        "architecture": BASE_ENV_DEFAULTS["ARCHITECTURE"],
+research/AutoResearch/rebuild_runtime_state.py:322:        if key == "ARCHITECTURE":
+research/AutoResearch/rebuild_runtime_state.py:323:            config["architecture"] = str(value).lower()
+research/AutoResearch/rebuild_runtime_state.py:347:    family_name = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
+research/AutoResearch/rebuild_runtime_state.py:351:    if result.get("architecture"):
+research/AutoResearch/rebuild_runtime_state.py:352:        config["architecture"] = str(result["architecture"]).lower()
+research/AutoResearch/rebuild_runtime_state.py:389:        "architecture": str(result.get("architecture") or "").lower(),
+research/AutoResearch/rebuild_runtime_state.py:426:    family_name = str(best.get("config", {}).get("family_name") or best.get("architecture") or "").lower()
+research/AutoResearch/rebuild_runtime_state.py:444:    family_name = str(best.get("config", {}).get("family_name") or best.get("architecture") or "").lower()
+research/AutoResearch/loop.py:166:    ctx.family_name = action.family_name or resolved.candidate_env_config.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
+research/AutoResearch/loop.py:196:    # 7. Behavioral diff test (for code edits with architecture changes)
+research/AutoResearch/loop.py:199:        arch = cfg.get("ARCHITECTURE", "topk").lower()
+research/AutoResearch/loop.py:257:                    cfg.get("ARCHITECTURE", "topk").lower(),
+sparsify/metrics_logger.py:14:        manifest.json  — run identity (git info, model, dataset, architecture, etc.)
+research/AutoResearch/audit_history_execution.py:44:    "ARCHITECTURE": ("architecture", "top"),
+research/AutoResearch/audit_history_execution.py:58:    "ARCHITECTURE": ("architecture", "sae"),
+research/AutoResearch/audit_history_execution.py:77:    "ARCHITECTURE": "architecture",
+research/AutoResearch/audit_history_execution.py:109:    if key == "ARCHITECTURE" or key == "OPTIMIZER":
+research/AutoResearch/audit_history_execution.py:132:    if family_name and "ARCHITECTURE" not in env:
+research/AutoResearch/audit_history_execution.py:133:        env["ARCHITECTURE"] = str(family_name)
+research/AutoResearch/compatibility.py:104:    architecture: str,
+research/AutoResearch/compatibility.py:124:        f"architecture='{architecture}'",
+research/AutoResearch/compatibility.py:138:cls = _get_sae_class('{architecture}')
+research/AutoResearch/compatibility.py:160:_COST_TABLE_ARCHITECTURES = [
+research/AutoResearch/compatibility.py:169:    architectures: list[str] | None = None,
+research/AutoResearch/compatibility.py:175:    """Batch-compute selection costs for (architecture, EF) combinations.
+research/AutoResearch/compatibility.py:184:    archs = architectures or _COST_TABLE_ARCHITECTURES
+research/AutoResearch/compatibility.py:199:        lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
+research/AutoResearch/compatibility.py:252:            cfg.get("family_name") or entry.get("architecture") or ""
+research/AutoResearch/compatibility.py:280:            str(entry.get("architecture") or cfg.get("architecture") or "topk"),
+sparsify/sparse_coder.py:164:        """Factory: load any SAE variant by reading architecture from cfg.json."""
+sparsify/sparse_coder.py:170:        architecture = cfg_dict.get("architecture", "topk")
+sparsify/sparse_coder.py:171:        cls = _get_sae_class(architecture)
+sparsify/sparse_coder.py:383:def _get_sae_class(architecture: str) -> type:
+sparsify/sparse_coder.py:384:    """Return the SparseCoder subclass for the given architecture string."""
+sparsify/sparse_coder.py:385:    if architecture == "topk":
+sparsify/sparse_coder.py:387:    if architecture == "batch_topk":
+sparsify/sparse_coder.py:389:    if architecture == "adaptive_budget_topk":
+sparsify/sparse_coder.py:391:    if architecture == "bucketed_topk":
+sparsify/sparse_coder.py:393:    if architecture == "codebook_topk":
+sparsify/sparse_coder.py:395:    if architecture == "residual_vq":
+sparsify/sparse_coder.py:397:    if architecture == "two_code_residual_vq":
+sparsify/sparse_coder.py:399:    if architecture == "lowrank_residual_vq":
+sparsify/sparse_coder.py:401:    if architecture == "whitened_topk":
+sparsify/sparse_coder.py:403:    if architecture == "jumprelu":
+sparsify/sparse_coder.py:405:    if architecture == "gated":
+sparsify/sparse_coder.py:407:    if architecture == "routed":
+sparsify/sparse_coder.py:409:    if architecture == "group_topk":
+sparsify/sparse_coder.py:411:    if architecture == "factorized_topk":
+sparsify/sparse_coder.py:413:    if architecture == "lowrank_residual":
+sparsify/sparse_coder.py:415:    if architecture == "lowrank_two_stage_residual":
+sparsify/sparse_coder.py:417:    if architecture == "routed_lowrank_two_stage_residual":
+sparsify/sparse_coder.py:419:    if architecture == "bucketed_lowrank_residual":
+sparsify/sparse_coder.py:421:    if architecture == "whitened_lowrank_residual":
+sparsify/sparse_coder.py:423:    if architecture == "lowrank_adaptive_budget_residual":
+sparsify/sparse_coder.py:425:    if architecture == "lowrank_gated_residual":
+sparsify/sparse_coder.py:427:    if architecture == "lowrank_jumprelu_residual":
+sparsify/sparse_coder.py:429:    if architecture == "lowrank_multi_branch_residual":
+sparsify/sparse_coder.py:431:    if architecture == "lowrank_factorized_residual":
+sparsify/sparse_coder.py:433:    if architecture == "lowrank_soft_codebook_residual":
+sparsify/sparse_coder.py:435:    if architecture == "lowrank_gated_soft_codebook_residual":
+sparsify/sparse_coder.py:437:    if architecture == "lowrank_grouped_soft_codebook_residual":
+sparsify/sparse_coder.py:439:    if architecture == "lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:441:    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:443:    if architecture == "whitened_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:445:    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:447:    if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:449:    if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:451:    if architecture == "whitened_lowrank_gated_residual":
+sparsify/sparse_coder.py:453:    if architecture == "lowrank_grouped_residual":
+sparsify/sparse_coder.py:455:    if architecture == "two_stage_residual":
+sparsify/sparse_coder.py:457:    if architecture == "multi_branch_gated":
+sparsify/sparse_coder.py:459:    raise ValueError(f"Unknown architecture: {architecture!r}")
+sparsify/sparse_coder.py:3473:        # ensuring the architecture is observably distinct from plain residual gating.
+
+exec
+/bin/bash -lc "sed -n '1,240p' research/AutoResearch/override_registry.py" in /root/sparsify-ascend
+exec
+/bin/bash -lc "sed -n '1,240p' research/AutoResearch/compatibility.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+"""Override validation and baseline resolution for the autoresearch loop."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .types import BASE_ENV_DEFAULTS
+
+
+COMMON_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
+    "NUM_GROUPS",
+    "ACTIVE_GROUPS",
+    "ORTHO_LAMBDA",
+    "RESIDUAL_FROM",
+    "MATRYOSHKA_KS",
+    "MATRYOSHKA_WEIGHTS",
+}
+
+_LOWRANK_KEYS = {"TRUNK_RANK"}
+_TWOSTAGE_KEYS = {"TRUNK_RANK", "STAGE1_RATIO"}
+_SOFT_CODEBOOK_TWOSTAGE_KEYS = {"TRUNK_RANK", "NUM_CODES", "STAGE1_RATIO"}
+
+ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
+    "topk": set(),
+    "jumprelu": {
+        "JUMPRELU_INIT_THRESHOLD",
+        "JUMPRELU_BANDWIDTH",
+    },
+    "gated": {
+        "GATED_TEMPERATURE",
+        "GATED_INIT_LOGIT",
+    },
+    "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+    "lowrank_residual": _LOWRANK_KEYS,
+    "lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+    "lowrank_grouped_residual": _LOWRANK_KEYS,
+    "lowrank_adaptive_budget_residual": _LOWRANK_KEYS,
+    "bucketed_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_multi_branch_residual": _LOWRANK_KEYS,
+    "lowrank_factorized_residual": {"TRUNK_RANK", "FACTORIZED_HIDDEN_DIM"},
+    "lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "lowrank_residual_vq": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_grouped_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_gated_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "bucketed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "whitened_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+}
+
+STRUCTURAL_OVERRIDE_KEYS = {
+    "ARCHITECTURE",
+    "K",
+    "EXPANSION_FACTOR",
+    "NUM_GROUPS",
+    "ACTIVE_GROUPS",
+    "MATRYOSHKA_KS",
+    "RESIDUAL_FROM",
+    "TRUNK_RANK",
+    "NUM_CODES",
+    "STAGE1_RATIO",
+    "FACTORIZED_HIDDEN_DIM",
+}
+
+DYNAMIC_OVERRIDE_KEYS = {
+    "LR",
+    "AUXK_ALPHA",
+    "JUMPRELU_INIT_THRESHOLD",
+    "JUMPRELU_BANDWIDTH",
+    "GATED_TEMPERATURE",
+    "GATED_INIT_LOGIT",
+    "ORTHO_LAMBDA",
+    "MATRYOSHKA_WEIGHTS",
+}
+
+CONFIG_JSON_TO_ENV = {
+    "architecture": "ARCHITECTURE",
+    "expansion_factor": "EXPANSION_FACTOR",
+    "k": "K",
+    "optimizer": "OPTIMIZER",
+    "lr": "LR",
+    "hookpoints": "HOOKPOINTS",
+    "batch_size": "BATCH_SIZE",
+    "grad_acc_steps": "GRAD_ACC_STEPS",
+    "micro_acc_steps": "MICRO_ACC_STEPS",
+    "auxk_alpha": "AUXK_ALPHA",
+    "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
+    "use_hadamard": "USE_HADAMARD",
+    "jumprelu_init_threshold": "JUMPRELU_INIT_THRESHOLD",
+    "jumprelu_bandwidth": "JUMPRELU_BANDWIDTH",
+    "gated_temperature": "GATED_TEMPERATURE",
+    "gated_init_logit": "GATED_INIT_LOGIT",
+    "num_groups": "NUM_GROUPS",
+    "active_groups": "ACTIVE_GROUPS",
+    "ortho_lambda": "ORTHO_LAMBDA",
+    "residual_from": "RESIDUAL_FROM",
+    "matryoshka_ks": "MATRYOSHKA_KS",
+    "matryoshka_weights": "MATRYOSHKA_WEIGHTS",
+    "trunk_rank": "TRUNK_RANK",
+    "num_codes": "NUM_CODES",
+    "stage1_ratio": "STAGE1_RATIO",
+    "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+}
+
+
+def _iter_overrides(overrides: list | dict) -> list[tuple[str, str]]:
+    if isinstance(overrides, dict):
+        return [(str(key), str(value)) for key, value in overrides.items()]
+    pairs: list[tuple[str, str]] = []
+    for item in overrides:
+        key = item.get("key")
+        if not key:
+            continue
+        pairs.append((str(key), str(item.get("value", ""))))
+    return pairs
+
+
+def resolve_architecture_from_overrides(overrides: list | dict, fallback: str = "topk") -> str:
+    for key, value in _iter_overrides(overrides):
+        if key == "ARCHITECTURE" and value:
+            return value.lower()
+    return fallback.lower()
+
+
+def allowed_override_keys_for_architecture(architecture: str) -> set[str]:
+    return COMMON_OVERRIDE_KEYS | ARCHITECTURE_OVERRIDE_KEYS.get(architecture.lower(), set())
+
+
+def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+    architecture = resolve_architecture_from_overrides(overrides, fallback=fallback_architecture)
+    allowed = allowed_override_keys_for_architecture(architecture)
+    rejected: list[str] = []
+    for key, _ in _iter_overrides(overrides):
+        if key not in allowed:
+            rejected.append(key)
+    return rejected
+
+
+def config_from_overrides(overrides: list | dict, base_config: dict[str, str] | None = None) -> dict[str, str]:
+    config = dict(base_config or BASE_ENV_DEFAULTS)
+    for key, value in _iter_overrides(overrides):
+        config[key] = value
+    return config
+
+
+def env_config_from_runtime_config(config_json: dict[str, Any]) -> dict[str, str]:
+    config = dict(BASE_ENV_DEFAULTS)
+    for key, env_key in CONFIG_JSON_TO_ENV.items():
+        if key not in config_json:
+            continue
+        value = config_json[key]
+        if value is None:
+            continue
+        if env_key == "USE_HADAMARD":
+            config[env_key] = "1" if bool(value) else "0"
+        elif isinstance(value, list):
+            config[env_key] = ",".join(str(v) for v in value)
+        else:
+            config[env_key] = str(value)
+    return config
+
+
+def changed_override_keys(overrides: list | dict, baseline_config: dict[str, str]) -> set[str]:
+    changed: set[str] = set()
+    for key, value in _iter_overrides(overrides):
+        if value != str(baseline_config.get(key, "")):
+            changed.add(key)
+    return changed
+
+
+def determine_parameter_behavior(change_type: str, changed_keys: set[str]) -> str:
+    if change_type == "edit_perf_code":
+        return "implementation"
+    if changed_keys & STRUCTURAL_OVERRIDE_KEYS:
+        return "structural"
+    if changed_keys & DYNAMIC_OVERRIDE_KEYS:
+        return "dynamic"
+    return "default"
+
+ succeeded in 0ms:
+"""Compatibility parsing and filtering for LUTurbo-oriented AutoResearch."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from typing import Any, Iterable
+
+from .git_ops import REPO_ROOT
+from .target_profile import budget_accesses, default_target_profile, profile_matches, resolve_target_profile
+
+DIRECT_COMPATIBLE = "direct_compatible"
+EXTENDED_COMPATIBLE = "extended_compatible"
+INCOMPATIBLE = "incompatible"
+UNKNOWN_COMPATIBILITY = "unknown"
+
+_LABEL_MAP = {
+    "直接兼容": DIRECT_COMPATIBLE,
+    "扩展兼容": EXTENDED_COMPATIBLE,
+    "不兼容": INCOMPATIBLE,
+    DIRECT_COMPATIBLE: DIRECT_COMPATIBLE,
+    EXTENDED_COMPATIBLE: EXTENDED_COMPATIBLE,
+    INCOMPATIBLE: INCOMPATIBLE,
+}
+
+
+def normalize_compatibility_label(label: str | None) -> str:
+    if not label:
+        return UNKNOWN_COMPATIBILITY
+    cleaned = str(label).strip().strip("`")
+    return _LABEL_MAP.get(cleaned, UNKNOWN_COMPATIBILITY)
+
+
+def is_compatible_label(label: str | None) -> bool:
+    normalized = normalize_compatibility_label(label)
+    return normalized in {DIRECT_COMPATIBLE, EXTENDED_COMPATIBLE}
+
+
+def parse_compatibility_registry(prior_text: str) -> dict[str, str]:
+    """Parse family compatibility labels from markdown tables in prior history.
+
+    Expected row shape:
+    | `family` | ... | 直接兼容 | ... |
+    """
+    registry: dict[str, str] = {}
+    if not prior_text:
+        return registry
+
+    for raw_line in prior_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("|"):
+            continue
+        if "---" in line:
+            continue
+
+        cols = [part.strip() for part in line.split("|")[1:-1]]
+        if len(cols) < 5:
+            continue
+
+        family = _normalize_family_name(cols[0])
+        if not family:
+            continue
+
+        compat = normalize_compatibility_label(cols[4])
+        if compat == UNKNOWN_COMPATIBILITY:
+            continue
+
+        registry[family] = compat
+
+    return registry
+
+
+def summarize_registry_counts(registry: dict[str, str]) -> str:
+    direct = sum(1 for v in registry.values() if v == DIRECT_COMPATIBLE)
+    extended = sum(1 for v in registry.values() if v == EXTENDED_COMPATIBLE)
+    incompatible = sum(1 for v in registry.values() if v == INCOMPATIBLE)
+    return (
+        f"兼容性注册表：直接兼容 {direct} 个，"
+        f"扩展兼容 {extended} 个，不兼容 {incompatible} 个。"
+    )
+
+
+def compatibility_hard_rules() -> str:
+    """Short rules that must appear in every prompt."""
+    profile = default_target_profile()
+    return "\n".join([
+        "LUTurbo 兼容性硬约束：",
+        "1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。",
+        "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
+        "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
+        "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        f"当前 target：训练 hookpoint 为 {profile.training_hookpoint}。",
+        f"成本 proxy：{profile.cost_model_label}。",
+        "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
+        "   超过此阈值的配置将被 policy 拦截。",
+        "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。",
+        "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
+    ])
+
+
+def compute_selection_cost(
+    architecture: str,
+    k: int = 128,
+    ef: int = 12,
+    d_in: int | None = None,
+    n_output: int | None = None,
+    extra_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute encoder-side selection cost by instantiating the model.
+
+    Uses subprocess to avoid import-time GPU issues, similar to
+    ``policy.behavioral_diff_test()``.
+    """
+    if d_in is None or n_output is None:
+        profile = default_target_profile()
+        if d_in is None:
+            d_in = profile.d_in
+        if n_output is None:
+            n_output = profile.n_output
+
+    cfg_parts = [
+        f"architecture='{architecture}'",
+        f"k={k}",
+        f"expansion_factor={ef}",
+    ]
+    if extra_config:
+        for key, value in extra_config.items():
+            if value is not None:
+                cfg_parts.append(f"{key}={value!r}")
+
+    code = f"""\
+import sys, json; sys.path.insert(0, '.')
+from sparsify.sparse_coder import _get_sae_class
+from sparsify.config import SparseCoderConfig
+cfg = SparseCoderConfig({', '.join(cfg_parts)})
+cls = _get_sae_class('{architecture}')
+m = cls({d_in}, cfg, device='cpu')
+print("COST:" + json.dumps(m.selection_cost_estimate({int(n_output)})))
+"""
+    try:
+        result = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.startswith("COST:"):
+                return json.loads(line[5:])
+        return {"error": "parse_failed", "stderr": result.stderr[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_COST_TABLE_ARCHITECTURES = [
+    "topk", "gated", "factorized_topk",
+    "lowrank_residual", "lowrank_soft_codebook_residual",
+    "lowrank_two_stage_soft_codebook_residual",
+]
+_COST_TABLE_EF_VALUES = [2, 3, 4, 6, 8, 12]
+
+
+def compute_selection_cost_table(
+    architectures: list[str] | None = None,
+    ef_values: list[int] | None = None,
+    k: int = 32,
+    d_in: int | None = None,
+    n_output: int | None = None,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Batch-compute selection costs for (architecture, EF) combinations.
+
+    Uses a single subprocess to avoid N separate invocations.
+    Returns {(arch, ef): cost_dict} where cost_dict has keys:
+    ratio, feasible, total_accesses, etc.
+    """
+    profile = default_target_profile()
+    d_in = profile.d_in if d_in is None else d_in
+    n_output = profile.n_output if n_output is None else n_output
+    archs = architectures or _COST_TABLE_ARCHITECTURES
+    efs = ef_values or _COST_TABLE_EF_VALUES
+
+    combos = [(arch, ef) for arch in archs for ef in efs]
+    if not combos:
+        return {}
+
+    # Build a single subprocess that computes all costs
+    lines = [
+        "import sys, json; sys.path.insert(0, '.')",
+        "from sparsify.sparse_coder import _get_sae_class",
+        "from sparsify.config import SparseCoderConfig",
+    ]
+    for arch, ef in combos:
+        lines.append(f"try:")
+        lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
+        lines.append(f"    _cls = _get_sae_class('{arch}')")
+        lines.append(f"    _m = _cls({d_in}, _cfg, device='cpu')")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate({int(n_output)})))")
+        lines.append(f"except Exception as _e:")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps({{'error': str(_e)}}))")
+
+    code = "\n".join(lines)
+    results: dict[tuple[str, int], dict[str, Any]] = {}
+    try:
+        proc = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        for line in (proc.stdout + proc.stderr).splitlines():
+            if not line.startswith("COST:"):
+                continue
+            parts = line[5:].split("|", 2)
+            if len(parts) == 3:
+                arch_name, ef_str, payload = parts
+                try:
+                    results[(arch_name, int(ef_str))] = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+
+    return results
+
+
+def frontier_has_feasible_entry(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    d_in: int | None = None,
+    n_output: int | None = None,
+) -> bool:
+    """Check if frontier has at least one feasible entry within total cost budget.
+
+    Feasible means: total_cost / original_matmul_accesses <= 1.5
+
+exec
+/bin/bash -lc "sed -n '1,220p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+from dataclasses import dataclass
+from pathlib import Path
+
+from simple_parsing import Serializable, list_field
+
+
+@dataclass
+class SparseCoderConfig(Serializable):
+    """Configuration for a sparse coder (SAE) architecture."""
+
+    expansion_factor: int = 32
+    """Multiple of the input dimension to use as the sparse coder dimension."""
+
+    normalize_decoder: bool = True
+    """Normalize the decoder weights to have unit norm."""
+
+    num_latents: int = 0
+    """Number of latents to use. If 0, use `expansion_factor`."""
+
+    k: int = 32
+    """Number of nonzero features."""
+
+    # Architecture selection
+    architecture: str = "topk"
+    """Encoding architecture."""
+
+    jumprelu_init_threshold: float = 0.0
+    """Initial per-latent JumpReLU threshold before softplus."""
+
+    jumprelu_bandwidth: float = 0.1
+    """Bandwidth for the smooth JumpReLU gate surrogate."""
+
+    gated_temperature: float = 1.0
+    """Temperature for the sigmoid gate in gated encoders."""
+
+    gated_init_logit: float = 2.0
+    """Initial bias logit for gated encoders."""
+
+    group_topk_size: int = 4
+    """Number of latents per local competition group for group-topk encoders."""
+
+    # Architecture-specific structural parameters (None = auto-computed)
+    trunk_rank: int | None = None
+    """Rank of the dense low-rank trunk. None = auto: min(d_in, max(k*2, d_in//4))."""
+
+    num_codes: int | None = None
+    """Number of soft/hard codebook entries. None = auto: min(256, max(32, k*2))."""
+
+    stage1_ratio: float | None = None
+    """Fraction of K budget for stage 1 in two-stage architectures. None = 0.5."""
+
+    factorized_hidden_dim: int | None = None
+    """Hidden dimension for factorized encoders. None = auto."""
+
+
+# Support different naming conventions for the same configuration
+SaeConfig = SparseCoderConfig
+
+
+@dataclass
+class TrainConfig(Serializable):
+    sae: SparseCoderConfig
+
+    batch_size: int = 32
+    """Batch size measured in sequences."""
+
+    grad_acc_steps: int = 1
+    """Number of steps over which to accumulate gradients."""
+
+    micro_acc_steps: int = 1
+    """Chunk the activations into this number of microbatches for training."""
+
+    max_tokens: int | None = None
+    """Maximum number of tokens to train on. Training stops when this limit is reached."""
+
+    lr: float | None = None
+    """Base LR. If None, it is automatically chosen based on the number of latents."""
+
+    auxk_alpha: float = 0.0
+    """Weight of the auxiliary loss term."""
+
+    dead_feature_threshold: int = 10_000_000
+    """Number of tokens after which a feature is considered dead."""
+
+    # Exceed evaluation metrics
+    exceed_alphas: list[float] = list_field(0.05, 0.10, 0.25, 0.50)
+    """List of alpha coefficients for exceed metrics (error > alpha * elbow_value)."""
+
+    elbow_threshold_path: str | None = None
+    """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
+
+    # Hookpoint selection
+    hookpoints: list[str] = list_field()
+    """List of hookpoints to train sparse coders on."""
+
+    init_seeds: list[int] = list_field(0)
+    """List of random seeds to use for initialization. If more than one, train a sparse
+    coder for each seed."""
+
+    layers: list[int] = list_field()
+    """List of layer indices to train sparse coders on."""
+
+    layer_stride: int = 1
+    """Stride between layers to train sparse coders on."""
+
+    # Tiling
+    num_tiles: int = 1
+    """Number of tiles to split input activations. Each tile trains a separate SAE.
+    d_in must be divisible by num_tiles. Set to 1 (default) for standard training."""
+
+    global_topk: bool = False
+    """Use global top-k selection across all tiles instead of per-tile top-k.
+    Only effective when num_tiles > 1."""
+
+    input_mixing: bool = False
+    """Apply learnable T×T mixing matrix on tile dimension before encoding.
+    Only effective when num_tiles > 1."""
+
+    # Hadamard rotation
+    use_hadamard: bool = False
+    """Apply block-diagonal Hadamard rotation to activations before SAE."""
+
+    hadamard_block_size: int = 128
+    """Block size for Hadamard transform (must be power of 2)."""
+
+    hadamard_seed: int = 0
+    """Random seed for Hadamard permutation."""
+
+    hadamard_use_perm: bool = True
+    """Whether to use random permutation before Hadamard transform."""
+
+    # Compilation
+    compile_model: bool = False
+    """Compile transformer layers with torch.compile to fuse small kernels.
+    Reduces kernel launch overhead from elementwise/layernorm/dtype ops."""
+
+    # Saving & logging
+    save_every: int = 1000
+    """Save sparse coders every `save_every` steps."""
+
+    save_best: bool = False
+    """Save the best checkpoint found for each hookpoint."""
+
+    save_dir: str = "checkpoints"
+
+    log_to_wandb: bool = True
+    run_name: str | None = None
+    wandb_project: str | None = None
+    """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
+    wandb_log_frequency: int = 1
+
+    # Lifecycle
+    finetune: str | None = None
+    """Finetune the sparse coders from a pretrained checkpoint."""
+
+    # Optimizer selection
+    optimizer: str = "signum"
+    """Optimizer: 'signum' | 'adam'."""
+
+    # Matryoshka multi-K training
+    matryoshka_ks: list[int] = list_field()
+    """List of K values for Matryoshka multi-K loss. Empty = disabled."""
+
+    matryoshka_weights: list[float] = list_field()
+    """Weights for each Matryoshka K. Must match len(matryoshka_ks). Empty = uniform."""
+
+    # Orthogonality regularization
+    ortho_lambda: float = 0.0
+    """Weight for orthogonality regularization on active decoder columns."""
+
+    # Residual SAE training
+    residual_from: str | None = None
+    """Level 1 SAE checkpoint path. When set, trains Level 2 SAE on residual."""
+
+    # Local metrics saving
+    save_metrics_jsonl: bool = True
+    """Save per-step metrics to JSONL file alongside W&B."""
+
+    def __post_init__(self):
+        """Validate the configuration."""
+        if self.layers and self.layer_stride != 1:
+            raise ValueError("Cannot specify both `layers` and `layer_stride`.")
+
+        if not self.init_seeds:
+            raise ValueError("Must specify at least one random seed.")
+
+        if self.exceed_alphas and not all(alpha > 0 for alpha in self.exceed_alphas):
+            raise ValueError("All exceed_alphas must be positive.")
+
+        if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
+            raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        if self.compile_model:
+            from .device import get_device_type
+            if get_device_type() != "cuda":
+                self.compile_model = False
+
+        if self.use_hadamard:
+            bs = self.hadamard_block_size
+            if bs <= 0 or (bs & (bs - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+
+exec
+/bin/bash -lc "sed -n '220,340p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+            "lowrank_gated_residual",
+            "lowrank_jumprelu_residual",
+            "lowrank_multi_branch_residual",
+            "lowrank_factorized_residual",
+            "lowrank_soft_codebook_residual",
+            "lowrank_gated_soft_codebook_residual",
+            "lowrank_grouped_soft_codebook_residual",
+            "lowrank_two_stage_soft_codebook_residual",
+            "bucketed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_two_stage_soft_codebook_residual",
+            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_gated_residual",
+            "lowrank_grouped_residual",
+            "whitened_topk",
+            "two_stage_residual",
+            "multi_branch_gated",
+        )
+        if self.sae.architecture not in valid_archs:
+            raise ValueError(
+                f"Unknown architecture: {self.sae.architecture!r}. "
+                f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.jumprelu_bandwidth <= 0:
+            raise ValueError(
+                "jumprelu_bandwidth must be positive, "
+                f"got {self.sae.jumprelu_bandwidth}"
+            )
+        if self.sae.jumprelu_init_threshold < 0:
+            raise ValueError(
+                "jumprelu_init_threshold must be non-negative, "
+                f"got {self.sae.jumprelu_init_threshold}"
+            )
+        if self.sae.gated_temperature <= 0:
+            raise ValueError(
+                "gated_temperature must be positive, "
+                f"got {self.sae.gated_temperature}"
+            )
+        if self.sae.group_topk_size <= 0:
+            raise ValueError(
+                "group_topk_size must be positive, "
+                f"got {self.sae.group_topk_size}"
+            )
+
+        # Optimizer validation
+        valid_opts = ("signum", "adam")
+        if self.optimizer not in valid_opts:
+            raise ValueError(
+                f"Unknown optimizer: {self.optimizer!r}. Must be one of {valid_opts}"
+            )
+
+        # Matryoshka validation
+        if self.matryoshka_ks:
+            for mk in self.matryoshka_ks:
+                if mk <= 0 or mk > self.sae.k:
+                    raise ValueError(
+                        f"Each matryoshka K must be in (0, sae.k={self.sae.k}], got {mk}"
+                    )
+        if self.matryoshka_ks and self.matryoshka_weights:
+            if len(self.matryoshka_ks) != len(self.matryoshka_weights):
+                raise ValueError(
+                    "matryoshka_ks and matryoshka_weights must have same length"
+                )
+
+exec
+/bin/bash -lc "sed -n '360,520p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+        eps = torch.finfo(self.W_dec.dtype).eps
+        norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
+        self.W_dec.data /= norm + eps
+
+    @torch.no_grad()
+    def remove_gradient_parallel_to_decoder_directions(self):
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        if self.W_dec.grad is None:
+            return
+
+        parallel_component = einops.einsum(
+            self.W_dec.grad,
+            self.W_dec.data,
+            "d_sae d_in, d_sae d_in -> d_sae",
+        )
+        self.W_dec.grad -= einops.einsum(
+            parallel_component,
+            self.W_dec.data,
+            "d_sae, d_sae d_in -> d_sae d_in",
+        )
+
+
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "group_topk":
+        return GroupTopKSparseCoder
+    if architecture == "factorized_topk":
+        return FactorizedTopKSparseCoder
+    if architecture == "lowrank_residual":
+        return LowRankResidualSparseCoder
+    if architecture == "lowrank_two_stage_residual":
+        return LowRankTwoStageResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_residual":
+        return RoutedLowRankTwoStageResidualSparseCoder
+    if architecture == "bucketed_lowrank_residual":
+        return BucketedLowRankResidualSparseCoder
+    if architecture == "whitened_lowrank_residual":
+        return WhitenedLowRankResidualSparseCoder
+    if architecture == "lowrank_adaptive_budget_residual":
+        return LowRankAdaptiveBudgetResidualSparseCoder
+    if architecture == "lowrank_gated_residual":
+        return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_jumprelu_residual":
+        return LowRankJumpReLUResidualSparseCoder
+    if architecture == "lowrank_multi_branch_residual":
+        return LowRankMultiBranchResidualSparseCoder
+    if architecture == "lowrank_factorized_residual":
+        return LowRankFactorizedResidualSparseCoder
+    if architecture == "lowrank_soft_codebook_residual":
+        return LowRankSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_gated_soft_codebook_residual":
+        return LowRankGatedSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_grouped_soft_codebook_residual":
+        return LowRankGroupedSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_two_stage_soft_codebook_residual":
+        return LowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
+        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "whitened_lowrank_two_stage_soft_codebook_residual":
+        return WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+        return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "whitened_lowrank_gated_residual":
+        return WhitenedLowRankGatedResidualSparseCoder
+    if architecture == "lowrank_grouped_residual":
+        return LowRankGroupedResidualSparseCoder
+    if architecture == "two_stage_residual":
+        return TwoStageResidualSparseCoder
+    if architecture == "multi_branch_gated":
+        return MultiBranchGatedSparseCoder
+    raise ValueError(f"Unknown architecture: {architecture!r}")
+
+
+# Allow for alternate naming conventions
+Sae = SparseCoder
+
+
+class WhitenedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with normalized low-rank input preconditioning."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        hidden_dim = min(d_in, max(cfg.k * 2, d_in // 4))
+        self.preconditioner_down = nn.Linear(
+            d_in, hidden_dim, bias=False, device=device, dtype=dtype
+        )
+        self.preconditioner_up = nn.Linear(
+            hidden_dim, d_in, bias=False, device=device, dtype=dtype
+        )
+
+        # Keep the family close to a stable normalized identity map while
+        # still making step-0 behavior observably different from plain top-k.
+        self.preconditioner_down.weight.data.zero_()
+        self.preconditioner_up.weight.data.zero_()
+        diagonal = min(d_in, hidden_dim)
+        self.preconditioner_down.weight.data[:diagonal, :diagonal] = torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+        self.preconditioner_up.weight.data[:diagonal, :diagonal] = 0.05 * torch.eye(
+            diagonal, device=device, dtype=dtype
+        )
+
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("preconditioner_down", self.preconditioner_down), ("preconditioner_up", self.preconditioner_up)]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        centered = x - x.mean(dim=-1, keepdim=True)
+        rms = centered.pow(2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
+        normalized = centered * rms
+        correction = self.preconditioner_up(self.preconditioner_down(normalized))
+        mixed = normalized + 0.25 * torch.roll(normalized, shifts=1, dims=-1)
+        whitened = mixed + correction
+        return fused_encoder(
+            whitened, self.encoder.weight, self.encoder.bias, self.cfg.k
+        )
+
+
+class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+    """Allocate a fixed batch-level feature budget across samples dynamically."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+exec
+/bin/bash -lc "rg -n \"selection_cost_estimate\\(|def selection_cost_estimate\" sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+225:    def selection_cost_estimate(self, n_output: int | None = None) -> dict:
+
+exec
+/bin/bash -lc "sed -n '200,320p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    # ------------------------------------------------------------------
+    # Selection cost estimation (for LUTurbo deployment feasibility)
+    # ------------------------------------------------------------------
+
+    def _encoder_linear_layers(self) -> list[tuple[str, "nn.Linear"]]:
+        """Return all nn.Linear layers on the encode path. Override in subclasses."""
+        return [("encoder", self.encoder)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        """Return extra encode-path accesses not captured by linear layers.
+
+        Each entry: (name, num_accesses, shape_description).
+        Override in subclasses with codebook matmuls, etc.
+        """
+        return []
+
+    def _deployment_lookup_accesses(self, n_output: int) -> list[tuple[str, int, str]]:
+        """Return deployment-side memory accesses for LUTurbo lookup phase.
+
+        These represent the cost of producing W @ x_hat via lookup tables:
+        for each static vector library, count × n_output accesses.
+        Override in subclasses that add trunk / codebook / extra libraries.
+        """
+        return [("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}")]
+
+    def selection_cost_estimate(self, n_output: int | None = None) -> dict:
+        """Estimate encoder-side, deployment-side, and combined memory accesses.
+
+        Args:
+            n_output: output dim of original weight matrix. Default 4*d_in.
+
+        Returns:
+            dict with three sets of metrics:
+            - Encoder (selection): total_accesses, ratio, budget_ratio, feasible
+            - Deployment (lookup): deployment_accesses, deployment_ratio
+            - Combined (total): combined_accesses, combined_ratio,
+              combined_budget_ratio, combined_feasible
+        """
+        if n_output is None:
+            n_output = 4 * self.d_in
+        original = self.d_in * n_output
+        budget = 1.5 * original
+
+        breakdown = []
+        total = 0
+        for name, layer in self._encoder_linear_layers():
+            acc = layer.in_features * layer.out_features
+            breakdown.append({
+                "name": name,
+                "accesses": acc,
+                "shape": f"{layer.in_features}x{layer.out_features}",
+            })
+            total += acc
+        for name, acc, shape in self._extra_encode_accesses():
+            breakdown.append({"name": name, "accesses": acc, "shape": shape})
+            total += acc
+
+        ratio = total / original if original > 0 else float("inf")
+        budget_ratio = total / budget if budget > 0 else float("inf")
+
+        # Deployment-side lookup cost
+        deploy_breakdown = []
+        deploy_total = 0
+        for name, acc, shape in self._deployment_lookup_accesses(n_output):
+            deploy_breakdown.append({"name": name, "accesses": acc, "shape": shape})
+            deploy_total += acc
+        deploy_ratio = deploy_total / original if original > 0 else float("inf")
+
+        # Combined (encoder + deployment)
+        combined = total + deploy_total
+        combined_ratio = combined / original if original > 0 else float("inf")
+        combined_budget_ratio = combined / budget if budget > 0 else float("inf")
+
+        return {
+            # --- encoder-only (selection) ---
+            "total_accesses": total,
+            "original_matmul_accesses": original,
+            "ratio": round(ratio, 2),
+            "budget_ratio": round(budget_ratio, 2),
+            "feasible": budget_ratio <= 1.0,
+            "breakdown": breakdown,
+            # --- deployment (lookup) ---
+            "deployment_accesses": deploy_total,
+            "deployment_ratio": round(deploy_ratio, 2),
+            "deployment_breakdown": deploy_breakdown,
+            # --- combined = encoder + deployment ---
+            "combined_accesses": combined,
+            "combined_ratio": round(combined_ratio, 2),
+            "combined_budget_ratio": round(combined_budget_ratio, 2),
+            "combined_feasible": combined_budget_ratio <= 1.0,
+        }
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        """Encode the input and select the top-k latents."""
+        x = x - self.b_dec
+        return fused_encoder(x, self.encoder.weight, self.encoder.bias, self.cfg.k)
+
+    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+
+        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        return y + self.b_dec
+
+    # Wrapping the forward in bf16 autocast improves performance by almost 2x
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        top_acts, top_indices, pre_acts = self.encode(x)
+
+        # If we aren't given a distinct target, we're autoencoding
+        if y is None:
+            y = x
+
+        # Decode
+        sae_out = self.decode(top_acts, top_indices)
+
+        # Compute the residual
+        e = y - sae_out
+
+        # Used as a denominator for putting everything on a reasonable scale
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+cases = [
+    ('topk',128,1,{}),
+    ('topk',64,1,{}),
+    ('topk',32,1,{}),
+    ('factorized_topk',128,1,{}),
+    ('factorized_topk',64,1,{}),
+    ('factorized_topk',32,1,{}),
+    ('lowrank_residual',128,1,{'trunk_rank':128}),
+    ('lowrank_residual',64,1,{'trunk_rank':128}),
+    ('gated',128,1,{}),
+]
+for arch,k,ef,extra in cases:
+    res = compute_selection_cost(arch,k=k,ef=ef,extra_config=extra)
+    print(arch,k,ef,extra,res)
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost_table
+archs=['topk','gated','factorized_topk','lowrank_residual','lowrank_soft_codebook_residual','lowrank_two_stage_soft_codebook_residual']
+res = compute_selection_cost_table(architectures=archs, ef_values=[1,2,3,4], k=128)
+for key in sorted(res):
+    print(key, res[key])
+PY" in /root/sparsify-ascend
+ succeeded in 4575ms:
+('factorized_topk', 1) {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+('factorized_topk', 2) {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '512x2048'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2097152, 'combined_ratio': 0.5, 'combined_budget_ratio': 0.33, 'combined_feasible': True}
+('factorized_topk', 3) {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 1572864, 'shape': '512x3072'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2621440, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+('factorized_topk', 4) {'total_accesses': 2621440, 'original_matmul_accesses': 4194304, 'ratio': 0.62, 'budget_ratio': 0.42, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 2097152, 'shape': '512x4096'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3145728, 'combined_ratio': 0.75, 'combined_budget_ratio': 0.5, 'combined_feasible': True}
+('gated', 1) {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'gate_encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2621440, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+('gated', 2) {'total_accesses': 4194304, 'original_matmul_accesses': 4194304, 'ratio': 1.0, 'budget_ratio': 0.67, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 2097152, 'shape': '1024x2048'}, {'name': 'gate_encoder', 'accesses': 2097152, 'shape': '1024x2048'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 4718592, 'combined_ratio': 1.12, 'combined_budget_ratio': 0.75, 'combined_feasible': True}
+('gated', 3) {'total_accesses': 6291456, 'original_matmul_accesses': 4194304, 'ratio': 1.5, 'budget_ratio': 1.0, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 3145728, 'shape': '1024x3072'}, {'name': 'gate_encoder', 'accesses': 3145728, 'shape': '1024x3072'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 6815744, 'combined_ratio': 1.62, 'combined_budget_ratio': 1.08, 'combined_feasible': False}
+('gated', 4) {'total_accesses': 8388608, 'original_matmul_accesses': 4194304, 'ratio': 2.0, 'budget_ratio': 1.33, 'feasible': False, 'breakdown': [{'name': 'encoder', 'accesses': 4194304, 'shape': '1024x4096'}, {'name': 'gate_encoder', 'accesses': 4194304, 'shape': '1024x4096'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 8912896, 'combined_ratio': 2.12, 'combined_budget_ratio': 1.42, 'combined_feasible': False}
+('lowrank_residual', 1) {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3145728, 'combined_ratio': 0.75, 'combined_budget_ratio': 0.5, 'combined_feasible': True}
+('lowrank_residual', 2) {'total_accesses': 2621440, 'original_matmul_accesses': 4194304, 'ratio': 0.62, 'budget_ratio': 0.42, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 2097152, 'shape': '1024x2048'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 4194304, 'combined_ratio': 1.0, 'combined_budget_ratio': 0.67, 'combined_feasible': True}
+('lowrank_residual', 3) {'total_accesses': 3670016, 'original_matmul_accesses': 4194304, 'ratio': 0.88, 'budget_ratio': 0.58, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 3145728, 'shape': '1024x3072'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 5242880, 'combined_ratio': 1.25, 'combined_budget_ratio': 0.83, 'combined_feasible': True}
+('lowrank_residual', 4) {'total_accesses': 4718592, 'original_matmul_accesses': 4194304, 'ratio': 1.12, 'budget_ratio': 0.75, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 4194304, 'shape': '1024x4096'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 6291456, 'combined_ratio': 1.5, 'combined_budget_ratio': 1.0, 'combined_feasible': True}
+('lowrank_soft_codebook_residual', 1) {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 4718592, 'combined_ratio': 1.12, 'combined_budget_ratio': 0.75, 'combined_feasible': True}
+('lowrank_soft_codebook_residual', 2) {'total_accesses': 3145728, 'original_matmul_accesses': 4194304, 'ratio': 0.75, 'budget_ratio': 0.5, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'encoder', 'accesses': 2097152, 'shape': '1024x2048'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 5767168, 'combined_ratio': 1.38, 'combined_budget_ratio': 0.92, 'combined_feasible': True}
+('lowrank_soft_codebook_residual', 3) {'total_accesses': 4194304, 'original_matmul_accesses': 4194304, 'ratio': 1.0, 'budget_ratio': 0.67, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'encoder', 'accesses': 3145728, 'shape': '1024x3072'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 6815744, 'combined_ratio': 1.62, 'combined_budget_ratio': 1.08, 'combined_feasible': False}
+('lowrank_soft_codebook_residual', 4) {'total_accesses': 5242880, 'original_matmul_accesses': 4194304, 'ratio': 1.25, 'budget_ratio': 0.83, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'encoder', 'accesses': 4194304, 'shape': '1024x4096'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 7864320, 'combined_ratio': 1.88, 'combined_budget_ratio': 1.25, 'combined_feasible': False}
+('lowrank_two_stage_soft_codebook_residual', 1) {'total_accesses': 3145728, 'original_matmul_accesses': 4194304, 'ratio': 0.75, 'budget_ratio': 0.5, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'residual_encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 5767168, 'combined_ratio': 1.38, 'combined_budget_ratio': 0.92, 'combined_feasible': True}
+('lowrank_two_stage_soft_codebook_residual', 2) {'total_accesses': 5242880, 'original_matmul_accesses': 4194304, 'ratio': 1.25, 'budget_ratio': 0.83, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 2097152, 'shape': '1024x2048'}, {'name': 'residual_encoder', 'accesses': 2097152, 'shape': '1024x2048'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 7864320, 'combined_ratio': 1.88, 'combined_budget_ratio': 1.25, 'combined_feasible': False}
+('lowrank_two_stage_soft_codebook_residual', 3) {'total_accesses': 7340032, 'original_matmul_accesses': 4194304, 'ratio': 1.75, 'budget_ratio': 1.17, 'feasible': False, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 3145728, 'shape': '1024x3072'}, {'name': 'residual_encoder', 'accesses': 3145728, 'shape': '1024x3072'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 9961472, 'combined_ratio': 2.38, 'combined_budget_ratio': 1.58, 'combined_feasible': False}
+('lowrank_two_stage_soft_codebook_residual', 4) {'total_accesses': 9437184, 'original_matmul_accesses': 4194304, 'ratio': 2.25, 'budget_ratio': 1.5, 'feasible': False, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 4194304, 'shape': '1024x4096'}, {'name': 'residual_encoder', 'accesses': 4194304, 'shape': '1024x4096'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 12058624, 'combined_ratio': 2.88, 'combined_budget_ratio': 1.92, 'combined_feasible': False}
+('topk', 1) {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+('topk', 2) {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 2097152, 'shape': '1024x2048'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2621440, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+('topk', 3) {'total_accesses': 3145728, 'original_matmul_accesses': 4194304, 'ratio': 0.75, 'budget_ratio': 0.5, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 3145728, 'shape': '1024x3072'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3670016, 'combined_ratio': 0.88, 'combined_budget_ratio': 0.58, 'combined_feasible': True}
+('topk', 4) {'total_accesses': 4194304, 'original_matmul_accesses': 4194304, 'ratio': 1.0, 'budget_ratio': 0.67, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 4194304, 'shape': '1024x4096'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 4718592, 'combined_ratio': 1.12, 'combined_budget_ratio': 0.75, 'combined_feasible': True}
+
+2026-03-28T14:30:53.255724Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+for k in (32,64,128):
+    res = compute_selection_cost('topk',k=k,ef=1)
+    print(k, res['combined_ratio'], res['deployment_ratio'], res['ratio'], res['combined_feasible'])
+PY" in /root/sparsify-ascend
+ succeeded in 12850ms:
+32 0.28 0.03 0.25 True
+64 0.31 0.06 0.25 True
+128 0.38 0.12 0.25 True
+
+ succeeded in 37402ms:
+topk 128 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+topk 64 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+topk 32 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 1179648, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+factorized_topk 128 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+factorized_topk 64 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+factorized_topk 32 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 1179648, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+lowrank_residual 128 1 {'trunk_rank': 128} {'total_accesses': 1310720, 'original_matmul_accesses': 4194304, 'ratio': 0.31, 'budget_ratio': 0.21, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'trunk_decoder', 'accesses': 131072, 'shape': '128x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 1048576, 'deployment_ratio': 0.25, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 524288, 'shape': 'r=128×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2359296, 'combined_ratio': 0.56, 'combined_budget_ratio': 0.38, 'combined_feasible': True}
+lowrank_residual 64 1 {'trunk_rank': 128} {'total_accesses': 1310720, 'original_matmul_accesses': 4194304, 'ratio': 0.31, 'budget_ratio': 0.21, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'trunk_decoder', 'accesses': 131072, 'shape': '128x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 786432, 'deployment_ratio': 0.19, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 524288, 'shape': 'r=128×n=4096'}, {'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 2097152, 'combined_ratio': 0.5, 'combined_budget_ratio': 0.33, 'combined_feasible': True}
+gated 128 1 {} {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'gate_encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 2621440, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from sparsify.sparse_coder import SparseCoder
+from sparsify.config import SparseCoderConfig
+for k in (32,64,128):
+    m=SparseCoder(1024,SparseCoderConfig(architecture='topk',k=k,expansion_factor=1),device='cpu')
+    print('topk',k,m.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from sparsify.sparse_coder import FactorizedTopKSparseCoder
+from sparsify.config import SparseCoderConfig
+for k in (128,):
+    m=FactorizedTopKSparseCoder(1024,SparseCoderConfig(architecture='factorized_topk',k=k,expansion_factor=1),device='cpu')
+    print('factorized_topk',k,m.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+ succeeded in 4069ms:
+Using fused decoder on CUDA.
+factorized_topk 128 {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+
+ succeeded in 4227ms:
+Using fused decoder on CUDA.
+topk 32 {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 1179648, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+topk 64 {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+topk 128 {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 524288, 'deployment_ratio': 0.12, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 1572864, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.25, 'combined_feasible': True}
+
+codex
+{"command":"run","hypothesis":"选择直接兼容 family `topk`，其最终重构公式为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo 时，`{b_i}` 是静态向量库，在线仅做 top-64 选择、系数计算、查表 `W b_i`、加权求和，并保留现有选择性补偿接口。相对 cold-start baseline 仅把 `K` 从 128 降到 64，可把 combined total_cost 从约 `0.38x` 降到约 `0.31x`，先在 `<0.5x` 区域建立可解释 cost anchor。","summary":"兼容性判断：`topk` 为直接兼容。选择 `K=64` 是单变量、低接线风险、最贴合当前 round 1 成本探索目标的动作；在 `d_in=1024, n=4096, EF=1` 下，encoder ratio 约 `0.25x`，deployment ratio 约 `0.06x`，combined ratio 约 `0.31x`，明显低于 `1.5x` 硬预算，也比 baseline `K=128` 的约 `0.38x` 更接近低成本前沿。","change_type":"param_only","experiment_tier":"proxy","expected_win":"lower_cost","family_name":"topk","family_stage":"mainline","self_review":"遵守冷启动单变量原则：`reference_round=null`，仅修改一个 env 参数 `K`。该提案不依赖新增 tunable 参数，也不引入不兼容 family。主要风险是 FVU 可能因 `K` 减半而上升，但这正是当前 target 需要先测清的低成本锚点。","needs_sanity":false,"env_overrides":[{"key":"K","value":"64"}],"touched_files":[],"notes_to_memory":["`topk` 直接兼容 LUTurbo：`x_hat = Σ α_i b_i`，可直接导出为静态向量库查表加权和。","cold-start 首轮优先建立 `<0.5x` 低成本 anchor；`K=64, EF=1` 的 topk combined cost 约 `0.31x`。"],"next_hypotheses":["如果 `K=64` 的 FVU 仍可接受，下一轮继续向 `K=32` 压缩以补足更低成本区。","如果 `K=64` 的 FVU 退化过大，再回到同量级成本附近测试 `factorized_topk` 或恢复更高 `K`。"],"reference_round":null}
+tokens used
+44,733
