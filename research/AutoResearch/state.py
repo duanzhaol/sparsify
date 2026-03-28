@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .compatibility import parse_compatibility_registry
-from .config_resolution import resolve_action_configs
+from .config_resolution import resolve_action_configs, summary_invalid_reason
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -449,6 +449,7 @@ class StateManager:
     def _load(self) -> None:
         """Load state.json and memory.json from disk."""
         self._state = _load_json(self.history_dir / "state.json", {})
+        frontier_before = json.dumps(self._state.get("frontier", {}), sort_keys=True)
 
         # Ensure agent sub-dict with defaults
         agent = self._state.setdefault("agent", {})
@@ -464,10 +465,119 @@ class StateManager:
         # Migrate legacy frontier keys to new format
         frontier = self._state.get("frontier", {})
         self._migrate_frontier_keys(frontier)
+        from .controller import compact_frontier
+        compacted_frontier = compact_frontier(frontier)
+        if compacted_frontier != frontier:
+            self._state["frontier"] = compacted_frontier
 
         self._memory = _load_json(self.history_dir / "memory.json", dict(_DEFAULT_MEMORY))
         for k, v in _DEFAULT_MEMORY.items():
             self._memory.setdefault(k, v)
+        frontier_after = json.dumps(self._state.get("frontier", {}), sort_keys=True)
+        memory_changed = self._sanitize_memory_against_invalid_rounds()
+        if frontier_after != frontier_before:
+            self._save_state()
+        if memory_changed:
+            self._save_memory()
+
+    def _sanitize_memory_against_invalid_rounds(self) -> bool:
+        invalid_rounds: set[int] = set()
+        latest_valid_summary: dict[str, Any] | None = None
+        latest_summary_invalid = False
+        latest_valid_by_family: dict[str, dict[str, Any]] = {}
+
+        for path in sorted((self.history_dir / "round_summaries").glob("round_*.json")):
+            summary = _load_json(path, {})
+            if not isinstance(summary, dict):
+                continue
+            round_id = _safe_int(summary.get("round"))
+            invalid = summary_invalid_reason(summary) is not None
+            if round_id is not None and invalid:
+                invalid_rounds.add(round_id)
+            latest_summary_invalid = invalid
+            if invalid:
+                continue
+            latest_valid_summary = summary
+            family_name = str(
+                summary.get("family_name")
+                or summary.get("action", {}).get("family_name")
+                or summary.get("result", {}).get("architecture")
+                or ""
+            ).lower()
+            if family_name:
+                latest_valid_by_family[family_name] = summary
+
+        if not invalid_rounds:
+            return False
+
+        changed = False
+        round_needles = tuple(f"r{rid}" for rid in sorted(invalid_rounds))
+
+        def _mentions_invalid_round(text: Any) -> bool:
+            s = str(text or "")
+            return any(needle in s for needle in round_needles)
+
+        recent_rounds = self._memory.get("recent_rounds", [])
+        filtered_recent = [
+            entry for entry in recent_rounds
+            if _safe_int(entry.get("round") if isinstance(entry, dict) else None) not in invalid_rounds
+        ]
+        if filtered_recent != recent_rounds:
+            self._memory["recent_rounds"] = filtered_recent
+            changed = True
+
+        for key in ("recent_training_failures", "recent_sanity_failures", "failure_patterns"):
+            rows = self._memory.get(key, [])
+            filtered_rows = [
+                entry for entry in rows
+                if _safe_int(entry.get("round") if isinstance(entry, dict) else entry.get("last_round") if isinstance(entry, dict) else None) not in invalid_rounds
+            ]
+            if filtered_rows != rows:
+                self._memory[key] = filtered_rows
+                changed = True
+
+        insights = self._memory.get("recent_insights", [])
+        filtered_insights = [entry for entry in insights if not _mentions_invalid_round(entry)]
+        if filtered_insights != insights:
+            self._memory["recent_insights"] = filtered_insights
+            changed = True
+
+        families = self._memory.get("architecture_families", {})
+        for family_name, family in families.items():
+            if not isinstance(family, dict):
+                continue
+            tested = family.get("tested_configs", [])
+            filtered_tested = [
+                entry for entry in tested
+                if _safe_int(entry.get("round") if isinstance(entry, dict) else None) not in invalid_rounds
+            ]
+            if filtered_tested != tested:
+                family["tested_configs"] = filtered_tested
+                changed = True
+
+            latest_valid = latest_valid_by_family.get(str(family_name).lower())
+            if latest_valid is not None:
+                valid_round = _safe_int(latest_valid.get("round"))
+                if valid_round is not None and family.get("last_round") != valid_round:
+                    family["last_round"] = valid_round
+                    changed = True
+                action = latest_valid.get("action", {}) if isinstance(latest_valid.get("action"), dict) else {}
+                hypothesis = action.get("hypothesis")
+                if hypothesis and family.get("design_hypothesis") != hypothesis:
+                    family["design_hypothesis"] = hypothesis
+                    changed = True
+                next_steps = list(action.get("next_hypotheses", []))[:8]
+                if next_steps and family.get("next_steps") != next_steps:
+                    family["next_steps"] = next_steps
+                    changed = True
+
+        if latest_summary_invalid and latest_valid_summary is not None:
+            valid_next = list((latest_valid_summary.get("action", {}) or {}).get("next_hypotheses", []))[:12]
+            if valid_next and self._memory.get("next_hypotheses") != valid_next:
+                self._memory["next_hypotheses"] = valid_next
+                changed = True
+
+        return changed
 
     def _migrate_frontier_keys(self, frontier: dict[str, Any]) -> None:
         """Migrate legacy frontier key formats to new round-based keys.
@@ -635,7 +745,8 @@ class StateManager:
             failures.append(training_failure)
             m["recent_training_failures"] = failures[-12:]
 
-        m["next_hypotheses"] = action.next_hypotheses[:12]
+        if not _is_invalid_runtime_result(result):
+            m["next_hypotheses"] = action.next_hypotheses[:12]
 
     def _update_family(
         self,
@@ -656,6 +767,13 @@ class StateManager:
             "best_fvu": None,
             "last_round": None,
         })
+
+        if _is_invalid_runtime_result(result):
+            family.setdefault("known_issues", []).append(
+                f"round {round_id}: invalid result ignored | {result.error_summary or result.termination_reason}"
+            )
+            family["known_issues"] = family["known_issues"][-20:]
+            return
 
         family["last_round"] = round_id
         family["design_hypothesis"] = action.hypothesis
@@ -825,3 +943,16 @@ def _safe_float(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_int(v: Any) -> int | None:
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_invalid_runtime_result(result: Result) -> bool:
+    return str(result.error_type or "") == "config_mismatch"

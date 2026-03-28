@@ -211,6 +211,64 @@ def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
     return pareto
 
 
+def compact_frontier(frontier: dict[str, Any]) -> dict[str, Any]:
+    """Compact a stored frontier using the same semantics as live updates.
+
+    This removes:
+    - malformed entries that cannot be interpreted as (total_cost, fvu)
+    - near-duplicate archive-like points within current tolerance
+    - points dominated by earlier kept points
+
+    The surviving representative entry keeps its original stored metadata.
+    Entries are replayed in round-key order so the result matches live
+    controller behavior as closely as possible.
+    """
+    compacted: dict[str, Any] = {}
+    for key, entry in sorted(frontier.items(), key=lambda kv: _frontier_sort_key(kv[0])):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            candidate = _entry_to_point(entry)
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+
+        duplicate = False
+        kept_points: list[tuple[str, dict[str, Any]]] = []
+        for kept_key, kept_entry in compacted.items():
+            try:
+                kept_pt = _entry_to_point(kept_entry)
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+            kept_points.append((kept_key, kept_pt))
+            cost_close = (
+                abs(kept_pt["total_cost"] - candidate["total_cost"])
+                / max(candidate["total_cost"], 1)
+                <= COST_REL_TOL
+            )
+            fvu_close = abs(kept_pt["fvu"] - candidate["fvu"]) <= FVU_TOL
+            if cost_close and fvu_close:
+                if candidate["fvu"] < kept_pt["fvu"] - FVU_TOL:
+                    break
+                duplicate = True
+                break
+        if duplicate:
+            continue
+
+        if any(_pareto_dominates(kept_pt, candidate) for _, kept_pt in kept_points):
+            continue
+
+        compacted[key] = dict(entry)
+        to_remove = [
+            kept_key
+            for kept_key, kept_pt in kept_points
+            if _pareto_dominates(candidate, kept_pt)
+        ]
+        for kept_key in to_remove:
+            compacted.pop(kept_key, None)
+
+    return compacted
+
+
 def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract {total_cost, fvu} from all frontier entries."""
     points: list[dict[str, Any]] = []
@@ -253,6 +311,16 @@ def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
         or (a["fvu"] < b["fvu"] - FVU_TOL)
     )
     return cost_ok and fvu_ok and strictly_better
+
+
+def _frontier_sort_key(key: str) -> tuple[int, int, str]:
+    """Sort round-based keys chronologically, then keep legacy keys last."""
+    if key.startswith("r") and key[1:].isdigit():
+        return (0, int(key[1:]), key)
+    m = re.search(r"(\d+)$", key)
+    if m:
+        return (1, int(m.group(1)), key)
+    return (2, 0, key)
 
 
 # ---------------------------------------------------------------------------

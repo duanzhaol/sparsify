@@ -19,7 +19,7 @@ from .compatibility import (
     parse_compatibility_registry,
 )
 from .config_resolution import config_from_round_summary, summary_invalid_reason
-from .controller import frontier_key, _extract_extra_config
+from .controller import compact_frontier, frontier_key, _extract_extra_config
 from .types import BASE_ENV_DEFAULTS, HISTORY_DIR
 
 
@@ -127,11 +127,13 @@ def rebuild_runtime_state(
             "last_round": round_id,
             "compatibility": compat_label,
         })
-        family["last_round"] = round_id
-        family["design_hypothesis"] = action.get("hypothesis", family.get("design_hypothesis", ""))
-        family["next_steps"] = list(action.get("next_hypotheses", []))[:8]
         family["compatibility"] = compat_label
         invalid_reason = summary_invalid_reason(summary)
+
+        if invalid_reason is None:
+            family["last_round"] = round_id
+            family["design_hypothesis"] = action.get("hypothesis", family.get("design_hypothesis", ""))
+            family["next_steps"] = list(action.get("next_hypotheses", []))[:8]
 
         if invalid_reason is None and result.get("decision") != "policy_reject":
             family["tested_configs"].append({
@@ -215,23 +217,9 @@ def rebuild_runtime_state(
             new_entry["metric_version"] = "total_cost_v1"
             frontier[key] = new_entry
 
-    # Pareto cleanup: remove dominated points
-    from .controller import _pareto_dominates, _entry_to_point
-    keys_to_remove = []
-    frontier_items = list(frontier.items())
-    for i, (ki, ei) in enumerate(frontier_items):
-        if not isinstance(ei, dict):
-            continue
-        pi = _entry_to_point(ei)
-        for j, (kj, ej) in enumerate(frontier_items):
-            if i == j or not isinstance(ej, dict):
-                continue
-            pj = _entry_to_point(ej)
-            if _pareto_dominates(pj, pi):
-                keys_to_remove.append(ki)
-                break
-    for k in keys_to_remove:
-        frontier.pop(k, None)
+    # Replay frontier entries through the same near-duplicate + dominance
+    # semantics used by the live controller, so rebuilt state matches runtime.
+    frontier = compact_frontier(frontier)
 
     for entry in frontier.values():
         family_name = str(entry.get("config", {}).get("family_name") or entry.get("architecture") or "").lower()
