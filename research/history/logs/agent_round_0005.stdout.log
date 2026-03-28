@@ -1,0 +1,471 @@
+{"command":"run","hypothesis":"切到直接兼容 family `jumprelu`，最终重构公式仍为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo/Lottable 时，`{b_i}` 仍是单个静态向量库；在线链路仍是先形成支持集 `S(x)`、再计算系数、查表 `W b_i`、加权求和，阈值门控只改变支持形成方式，不改变静态库导出形式。本轮相对 r1 仅修改 `ARCHITECTURE`，在保持 `K=64, EXPANSION_FACTOR=1` 不变的同成本槽位下，测试 JumpReLU 的阈值化支持选择能否优于 plain top-k。","summary":"兼容性判断：`jumprelu` 为直接兼容。`factorized_topk` 在同成本带已经给出负结果，继续围绕它微调信息增量不高；下一步最干净的是换到另一个同成本、同部署开销、但支持形成机制不同的直接兼容 family。按当前本地成本估计，`jumprelu@K=64,EF=1` 的 total_cost 仍约 `0.31x`（selection `0.25x` + deployment `0.06x`），与当前最佳 `topk@K=64` 完全同槽位，适合做 matched architecture probe。","change_type":"param_only","experiment_tier":"proxy","expected_win":"lower_fvu","family_name":"jumprelu","family_stage":"mainline","self_review":"遵守单变量原则，基于 `reference_round=1` 仅修改 `ARCHITECTURE`。这轮回答的问题很单一：在不改变 cost band、不引入额外部署复杂度的前提下，阈值化支持形成是否比 plain top-k 更适合当前 hookpoint。若仍无改进，说明当前 low-cost 区的直接兼容单库 family 已经出现连续负信号，后续应更积极转向其他结构槽位或高优先级未验证方向。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"jumprelu"}],"touched_files":[],"notes_to_memory":["`jumprelu` 直接兼容 LUTurbo：最终形式仍是单静态向量库上的有限加权和 `Σ α_i b_i`，阈值只影响支持形成。","本地成本估计显示 `jumprelu@K=64,EF=1` 与 `topk@K=64,EF=1` 同为约 `0.31x` total_cost，适合做 matched probe。"],"next_hypotheses":["如果 `jumprelu@64` 优于 `topk@64`，下一轮可在该 family 内做 `K` 邻域或带宽相关探索。","如果 `jumprelu@64` 仍不优于 `topk@64`，下一轮应优先切到新的结构槽位，例如 `whitened_topk` 的更高但仍 `<0.5x` 成本带，或开始准备轻量 expert 子库方向的最小实现。"],"reference_round":1}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d34da-1651-7630-8146-70ed02d7f807
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 5。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 5 策略模式：主线推进
+原因：当前没有连续 crash，主线仍应继续推进。
+当前主线 family：topk
+当前主线参考配方：ARCHITECTURE=topk K=64 EXPANSION_FACTOR=1 OPTIMIZER=signum LR=8e-4
+当前主线完整配置（source=frontier_best）：
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 只有在当前 target 已经出现可解释的本地 baseline 后，才默认围绕某个 family 做局部推进。
+2. 优先保持归因清晰：先确认 total_cost 所在区间与结构槽位，再做少量 recipe 调整。
+   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。
+3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+4. 每轮只回答一个问题；如果当前 family 迟迟不给新信息，应换到其他兼容 family、其他成本带，或高优先级未验证方向如轻量 expert 子库 / MoE-like。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。
+
+兼容性注册表：直接兼容 8 个，扩展兼容 21 个，不兼容 3 个。
+
+Agent 状态：round=4, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=0
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前高优先级未充分验证方向：
+  1. 轻量 expert 子库 / MoE-like 路由。
+     只有在 router 足够轻、ACTIVE_EXPERTS 很小、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. 如果已实现 family 持续不能给出满意结果，不要只继续微调旧 family；应优先抽出一部分轮次去补这些未充分验证方向。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.28x (sel=0.25x + deploy=0.03x)  fvu=0.2905533015727997  arch=topk  K=32 EF=1  lr=8e-4 opt=signum [FEASIBLE]
+  total=0.3x (sel=0.25x + deploy=0.05x)  fvu=0.2710183560848236  arch=topk  K=48 EF=1  lr=8e-4 opt=signum [FEASIBLE]
+  total=0.31x (sel=0.25x + deploy=0.06x)  fvu=0.2561602294445038  arch=topk  K=64 EF=1  lr=8e-4 opt=signum [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=64, EF=1) [FEASIBLE]:
+    总成本: 0.31x | 预算比率: 0.21x | encoder: 0.25x | 部署: 0.06x | FVU: 0.2561602294445038
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r1 topk param_only -> keep fvu=0.2561602294445038 341s | 选择直接兼容 family `topk`，其最终重构公式为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo ...
+  r2 topk param_only -> keep fvu=0.2905533015727997 283s | 选择直接兼容 family `topk`，最终重构公式仍为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo/...
+  r3 topk param_only -> keep fvu=0.2710183560848236 274s | 继续使用直接兼容 family `topk`，最终重构公式为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo...
+  r4 factorized_topk param_only -> discard fvu=0.2834637761116028 268s | 切到直接兼容 family `factorized_topk`，最终重构公式仍为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导...
+
+最近可用 reference_round 的完整配置：
+  r3 topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=48
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r4 factorized_topk (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=factorized_topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r2 topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r1 topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=signum
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | scorer mixture 仍可导出为静态库和 | 扩展兼容 |
+| `whitened_lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 扩展兼容 |
+| `whitened_lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理 + gated residual 需要 fresh validation | 扩展兼容 |
+| `two_stage_residual` | multi-stage sparse sum | candidate | staged residual 仍是静态库和 | 扩展兼容 |
+| `lowrank_two_stage_residual` | trunk + two-stage sparse sum | candidate | staged residual path | 扩展兼容 |
+| `routed_lowrank_two_stage_residual` | trunk + routed two-stage sparse sum | candidate | route 只在选择链路 | 扩展兼容 |
+| `codebook_topk` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | coarse codebook + sparse residual | 扩展兼容 |
+| `residual_vq` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | hard codebook coarse branch | 扩展兼容 |
+| `two_code_residual_vq` | multi-codebook + sparse residual | candidate | 更深 coarse path，结构更复杂 | 扩展兼容 |
+| `lowrank_residual_vq` | trunk + codebook + sparse residual | candidate | trunk + codebook +
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+继续第 5 轮决策。我先对候选兼容 family 的成本槽位做一次本地核对，优先找一个仍落在 `<0.5x` 且能提供新信息的单变量 probe。
+exec
+/bin/bash -lc 'rg -n "class (JumpReLU|GroupTopK|Routed|WhitenedTopK|Gated).*SparseCoder|def _encoder_linear_layers|def _extra_encode_accesses|def _deployment_lookup_accesses" sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+204:    def _encoder_linear_layers(self) -> list[tuple[str, "nn.Linear"]]:
+208:    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+216:    def _deployment_lookup_accesses(self, n_output: int) -> list[tuple[str, int, str]]:
+466:class WhitenedTopKSparseCoder(SparseCoder):
+499:    def _encoder_linear_layers(self):
+634:    def _encoder_linear_layers(self):
+689:    def _encoder_linear_layers(self):
+692:    def _extra_encode_accesses(self):
+695:    def _deployment_lookup_accesses(self, n_output):
+802:    def _encoder_linear_layers(self):
+805:    def _extra_encode_accesses(self):
+808:    def _deployment_lookup_accesses(self, n_output):
+898:    def _encoder_linear_layers(self):
+901:    def _extra_encode_accesses(self):
+907:    def _deployment_lookup_accesses(self, n_output):
+989:class JumpReLUSparseCoder(SparseCoder):
+1027:class GatedSparseCoder(SparseCoder):
+1046:    def _encoder_linear_layers(self):
+1060:class RoutedSparseCoder(SparseCoder):
+1082:    def _encoder_linear_layers(self):
+1102:class GroupTopKSparseCoder(SparseCoder):
+1172:    def _encoder_linear_layers(self):
+1224:    def _encoder_linear_layers(self):
+1227:    def _deployment_lookup_accesses(self, n_output):
+1417:    def _encoder_linear_layers(self):
+1511:class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCoder):
+1536:    def _encoder_linear_layers(self):
+1730:    def _encoder_linear_layers(self):
+1817:    def _encoder_linear_layers(self):
+1820:    def _extra_encode_accesses(self):
+1823:    def _deployment_lookup_accesses(self, n_output):
+1938:    def _encoder_linear_layers(self):
+2056:    def _encoder_linear_layers(self):
+2059:    def _deployment_lookup_accesses(self, n_output):
+2145:    def _encoder_linear_layers(self):
+2148:    def _extra_encode_accesses(self):
+2151:    def _deployment_lookup_accesses(self, n_output):
+2333:    def _encoder_linear_layers(self):
+2460:    def _encoder_linear_layers(self):
+2473:    def _extra_encode_accesses(self):
+2476:    def _deployment_lookup_accesses(self, n_output):
+2667:    def _encoder_linear_layers(self):
+2678:    def _extra_encode_accesses(self):
+2845:    def _encoder_linear_layers(self):
+2975:class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+3002:    def _encoder_linear_layers(self):
+3158:class RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+3199:    def _encoder_linear_layers(self):
+3382:    def _encoder_linear_layers(self):
+3486:    def _encoder_linear_layers(self):
+3678:    def _encoder_linear_layers(self):
+3806:    def _encoder_linear_layers(self):
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+cands=[('jumprelu',64,1,{}),('group_topk',64,1,{}),('routed',64,1,{}),('whitened_topk',64,1,{}),('gated',64,1,{})]
+for arch,k,ef,extra in cands:
+    res=compute_selection_cost(arch,k=k,ef=ef,extra_config=extra)
+    print(arch,res)
+PY" in /root/sparsify-ascend
+codex
+候选直接兼容 family 的成本估计已经在跑。我同时核对了本地实现位置，重点盯 `routed/jumprelu/group_topk/whitened_topk` 这几个不需要新接线、但可能在同成本带给出新信息的 family。
+exec
+/bin/bash -lc "sed -n '989,1138p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+class JumpReLUSparseCoder(SparseCoder):
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+
+        threshold = torch.full(
+            (self.num_latents,),
+            cfg.jumprelu_init_threshold,
+            device=self.device,
+            dtype=self.dtype,
+        ).clamp_min(torch.finfo(self.dtype).tiny)
+        init = torch.full(
+            (self.num_latents,), 0.0, device=self.device, dtype=self.dtype
+        )
+        init.copy_(torch.log(torch.expm1(threshold)))
+        self.log_threshold = nn.Parameter(init)
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid((positive - self.threshold) / self.cfg.jumprelu_bandwidth)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class GatedSparseCoder(SparseCoder):
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        # Start close to plain ReLU top-k, then let the gate branch learn support.
+        self.gate_encoder.weight.data.zero_()
+        self.gate_encoder.bias.data.fill_(cfg.gated_init_logit)
+
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("gate_encoder", self.gate_encoder)]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+        acts = positive * gate
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class RoutedSparseCoder(SparseCoder):
+    """Gated SAE with a separate router used only for support selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.gate_encoder = nn.Linear(
+            d_in, self.num_latents, device=device, dtype=dtype
+        )
+
+        # Initialize the router independently so routed support is observably
+        # different from plain top-k at step 0.
+        nn.init.kaiming_uniform_(self.gate_encoder.weight, a=5**0.5)
+        self.gate_encoder.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("gate_encoder", self.gate_encoder)]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        pre_acts = F.linear(x, self.encoder.weight, self.encoder.bias)
+        positive = F.relu(pre_acts)
+        gate_logits = self.gate_encoder(x) / self.cfg.gated_temperature
+        gate = torch.sigmoid(gate_logits)
+
+        # Use the router to perturb support selection directly while decoding
+        # with gated magnitudes, so routing is not a monotone rescaling of the
+        # base activations.
+        acts = positive * gate
+        scores = acts + 0.1 * torch.tanh(gate_logits)
+        _, top_indices = torch.topk(scores, self.cfg.k, dim=-1, sorted=False)
+        top_acts = acts.gather(-1, top_indices)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class GroupTopKSparseCoder(SparseCoder):
+    """Select one winner per local group before the global top-k competition."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        acts = F.relu(F.linear(x, self.encoder.weight, self.encoder.bias))
+
+        group_size = self.cfg.group_topk_size
+        if self.num_latents % group_size != 0:
+            raise ValueError(
+                "group_topk requires num_latents divisible by group_topk_size, "
+                f"got num_latents={self.num_latents} and "
+                f"group_topk_size={group_size}"
+            )
+
+        num_groups = self.num_latents // group_size
+        if self.cfg.k > num_groups:
+            raise ValueError(
+                "group_topk requires k <= number of groups, "
+                f"got k={self.cfg.k} and num_groups={num_groups}"
+            )
+
+        grouped = acts.view(*acts.shape[:-1], num_groups, group_size)
+        winner_acts, winner_offsets = grouped.max(dim=-1)
+        top_group_acts, top_group_indices = torch.topk(
+            winner_acts, self.cfg.k, dim=-1, sorted=False
+        )
+
+        top_offsets = winner_offsets.gather(-1, top_group_indices)
+        top_indices = top_group_indices * group_size + top_offsets
+        return EncoderOutput(top_group_acts, top_indices, acts)
+
+
+class FactorizedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with a low-rank ReLU mixing stage before latent scoring."""
+
+    def __init__(
+
+codex
+`routed` 的本地实现确认是“双线性头”：一个主 encoder 加一个 router，因此 encoder 侧开销大概率接近 `gated` 而不是 `topk`。如果成本估计证实这一点，它就不适合当前这轮低成本主线。
+ succeeded in 20610ms:
+jumprelu {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+group_topk {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+routed {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'gate_encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 2359296, 'combined_ratio': 0.56, 'combined_budget_ratio': 0.38, 'combined_feasible': True}
+whitened_topk {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'preconditioner_down', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'preconditioner_up', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1835008, 'combined_ratio': 0.44, 'combined_budget_ratio': 0.29, 'combined_feasible': True}
+gated {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'gate_encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 2359296, 'combined_ratio': 0.56, 'combined_budget_ratio': 0.38, 'combined_feasible': True}
+
+codex
+{"command":"run","hypothesis":"切到直接兼容 family `jumprelu`，最终重构公式仍为 `x_hat = Σ_{i in S(x)} α_i(x) b_i`。导出到 LUTurbo/Lottable 时，`{b_i}` 仍是单个静态向量库；在线链路仍是先形成支持集 `S(x)`、再计算系数、查表 `W b_i`、加权求和，阈值门控只改变支持形成方式，不改变静态库导出形式。本轮相对 r1 仅修改 `ARCHITECTURE`，在保持 `K=64, EXPANSION_FACTOR=1` 不变的同成本槽位下，测试 JumpReLU 的阈值化支持选择能否优于 plain top-k。","summary":"兼容性判断：`jumprelu` 为直接兼容。`factorized_topk` 在同成本带已经给出负结果，继续围绕它微调信息增量不高；下一步最干净的是换到另一个同成本、同部署开销、但支持形成机制不同的直接兼容 family。按当前本地成本估计，`jumprelu@K=64,EF=1` 的 total_cost 仍约 `0.31x`（selection `0.25x` + deployment `0.06x`），与当前最佳 `topk@K=64` 完全同槽位，适合做 matched architecture probe。","change_type":"param_only","experiment_tier":"proxy","expected_win":"lower_fvu","family_name":"jumprelu","family_stage":"mainline","self_review":"遵守单变量原则，基于 `reference_round=1` 仅修改 `ARCHITECTURE`。这轮回答的问题很单一：在不改变 cost band、不引入额外部署复杂度的前提下，阈值化支持形成是否比 plain top-k 更适合当前 hookpoint。若仍无改进，说明当前 low-cost 区的直接兼容单库 family 已经出现连续负信号，后续应更积极转向其他结构槽位或高优先级未验证方向。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"jumprelu"}],"touched_files":[],"notes_to_memory":["`jumprelu` 直接兼容 LUTurbo：最终形式仍是单静态向量库上的有限加权和 `Σ α_i b_i`，阈值只影响支持形成。","本地成本估计显示 `jumprelu@K=64,EF=1` 与 `topk@K=64,EF=1` 同为约 `0.31x` total_cost，适合做 matched probe。"],"next_hypotheses":["如果 `jumprelu@64` 优于 `topk@64`，下一轮可在该 family 内做 `K` 邻域或带宽相关探索。","如果 `jumprelu@64` 仍不优于 `topk@64`，下一轮应优先切到新的结构槽位，例如 `whitened_topk` 的更高但仍 `<0.5x` 成本带，或开始准备轻量 expert 子库方向的最小实现。"],"reference_round":1}
+tokens used
+114,271
