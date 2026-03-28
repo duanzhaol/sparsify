@@ -445,6 +445,8 @@ def _check_param_only_single_variable(
     """只对 param_only 做轻量单变量校验。"""
     if action.change_type != "param_only":
         return True, ""
+    if action.reference_round is None:
+        return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮只改一个主轴"
 
     candidate = _candidate_config(action)
     reference = _resolve_reference_config(action, state)
@@ -552,10 +554,17 @@ def _resolve_reference_config(
     """给单变量校验选择一个清晰的参考配方。
 
     规则：
-    1. 如果 action 的 family 就是当前主线 family → 用主线 snapshot（和 prompt 展示一致）
-    2. 如果 action 的 family 不同 → 尝试从 frontier 找同 family best entry
-    3. 都找不到 → fallback 到主线 snapshot
+    1. 如果 action 显式给了 reference_round → 优先使用该轮真实配方
+    2. 如果 action 的 family 就是当前主线 family → 用主线 snapshot（和 prompt 展示一致）
+    3. 如果 action 的 family 不同 → 优先找同 family 最近一次成功运行的配方
+    4. 再找同 family frontier 中最佳可行 entry
+    5. 都找不到 → fallback 到主线 snapshot
     """
+    if action.reference_round is not None:
+        explicit = _config_from_round_summary(state, action.reference_round)
+        if explicit is not None:
+            return explicit
+
     mainline = _resolve_mainline_snapshot(state)
     action_family = (action.family_name or "").lower()
     mainline_family = mainline["family_name"]
@@ -564,7 +573,12 @@ def _resolve_reference_config(
     if action_family == mainline_family or not action_family:
         return dict(mainline["config"])
 
-    # Different family: try to find its best feasible frontier entry as reference
+    # Different family: first try the most recent successful run in that family.
+    recent_family_cfg = _latest_successful_family_config(state, action_family)
+    if recent_family_cfg is not None:
+        return recent_family_cfg
+
+    # Then try the best feasible frontier entry in that family.
     registry = state.load_compatibility_registry()
     family_best = _best_frontier_entry(
         state.frontier,
@@ -577,6 +591,61 @@ def _resolve_reference_config(
 
     # Fallback to mainline
     return dict(mainline["config"])
+
+
+def _config_from_round_summary(state: Any, round_id: int) -> dict[str, str] | None:
+    """Recover env-style config from a specific historical round summary."""
+    summary = state.load_round_summary(round_id)
+    if not summary:
+        return None
+
+    action = summary.get("action", {})
+    family_name = str(
+        summary.get("family_name")
+        or action.get("family_name")
+        or ""
+    ).lower()
+    if not family_name:
+        return None
+
+    config = dict(BASE_ENV_DEFAULTS)
+    for item in action.get("env_overrides", []) or []:
+        key = item.get("key")
+        value = item.get("value")
+        if key is not None and value is not None:
+            config[str(key)] = str(value)
+    if family_name:
+        config["ARCHITECTURE"] = family_name
+    return config
+
+
+def _latest_successful_family_config(
+    state: Any,
+    family_name: str,
+) -> dict[str, str] | None:
+    """Find the latest non-rejected, non-crash config for the given family."""
+    target = (family_name or "").lower()
+    if not target:
+        return None
+
+    for summary in reversed(state.recent_round_summaries(limit=50)):
+        if not isinstance(summary, dict):
+            continue
+        summary_family = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or ""
+        ).lower()
+        if summary_family != target:
+            continue
+        decision = str(summary.get("result", {}).get("decision") or "")
+        if decision in {"policy_reject", "crash"}:
+            continue
+        cfg = _config_from_round_summary(state, int(summary.get("round", 0) or 0))
+        if cfg is not None:
+            return cfg
+    return None
 
 
 def _resolve_mainline_snapshot(state: Any) -> dict[str, Any]:

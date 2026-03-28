@@ -87,8 +87,9 @@
 
 ### Variable Isolation（单变量原则）
 
-每轮只改一个主维度：architecture / optimizer / K / code_edit。
-LR 和 optimizer 可以耦合改（换优化器通常需要调 LR）。
+每轮只改一个主维度：architecture / optimizer / lr / K / expansion_factor / code_edit。
+如果 `change_type=param_only`，必须显式写 `reference_round`，表示“我是相对哪一轮的配方只改一个轴”。
+不要再默认允许 `optimizer + lr` 耦合修改；如果确实要同时改两者，应改为新架构探针或明确的非 `param_only` 轮次。
 
 **教训**：多变量同时改导致无法归因结果，浪费轮次。
 

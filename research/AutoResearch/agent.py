@@ -83,6 +83,7 @@ class Agent:
                 )
 
         action = Action.from_dict(raw)
+        action = self._normalize_proposed_action(action, state)
         return action, stdout_path
 
     def request_repair(
@@ -298,10 +299,32 @@ class Agent:
         )
         coerced["needs_sanity"] = True
         coerced["primary_variable"] = "code_fix"
+        coerced["reference_round"] = base_action.reference_round
         notes = list(repair_dict.get("notes_to_memory") or [])
         notes.append(f"repair attempt {repair_attempt}: constrained to original experiment target")
         coerced["notes_to_memory"] = notes[-12:]
         return Action.from_dict(coerced)
+
+    @staticmethod
+    def _normalize_proposed_action(
+        action: Action,
+        state: Any,  # StateManager
+    ) -> Action:
+        """Fill in small runtime defaults to reduce avoidable policy rejects."""
+        if action.change_type != "param_only" or action.reference_round is not None:
+            return action
+
+        family_name = (action.family_name or action.effective_config().get("ARCHITECTURE") or "").lower()
+        if not family_name:
+            return action
+
+        reference_round = _infer_reference_round(state, family_name)
+        if reference_round is None:
+            return action
+
+        normalized = action.to_dict()
+        normalized["reference_round"] = reference_round
+        return Action.from_dict(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +350,34 @@ def _extract_json(text: str) -> dict[str, Any]:
 def _extract_session_id(output: str) -> str | None:
     match = re.search(r"session id:\s*([0-9a-fA-F-]{8,})", output)
     return match.group(1) if match else None
+
+
+def _infer_reference_round(state: Any, family_name: str) -> int | None:
+    """Choose the latest successful round in the same family as param-only anchor."""
+    target = (family_name or "").lower()
+    if not target:
+        return None
+
+    for summary in reversed(state.recent_round_summaries(limit=50)):
+        if not isinstance(summary, dict):
+            continue
+        summary_family = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or ""
+        ).lower()
+        if summary_family != target:
+            continue
+        decision = str(summary.get("result", {}).get("decision") or "")
+        if decision in {"policy_reject", "crash"}:
+            continue
+        try:
+            return int(summary.get("round"))
+        except (TypeError, ValueError):
+            return None
+
+    return None
 
 
 

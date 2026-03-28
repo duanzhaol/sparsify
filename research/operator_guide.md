@@ -1,6 +1,6 @@
 # SAE Auto Research Idea Bank
 
-> 目标：给自动研究 Agent 提供一组可发散的思路，用于探索 **如何在更小的 TopK 下训练出更好的 SAE**，并服务于 **CPU 上基于查表/LUT 的推理加速**。
+> 目标：给自动研究 Agent 提供一组可发散的思路，用于探索 **如何在更低 total_cost 下训练出更好的可部署表示**，并服务于 **CPU 上基于查表/LUT 的推理加速**。
 >
 > 这不是操作手册，也不是固定 recipe，而是一个 **idea bank / search space**。  
 > Agent 可以从中抽取方向，组合成新的实验假设。
@@ -474,7 +474,10 @@ Agent 不应只看：
 ## 4. Agent 应该如何发散，而不是只做局部调参
 
 ### 4.1 不只做单变量 ablation
-除了“只改一个超参”的局部搜索，也应允许组合搜索：
+高层结构思路可以来自多个想法的组合，但**单轮 action 仍必须只回答一个主问题**。
+也就是说，可以在跨多轮搜索里逐步把两个想法拼起来；不要在同一轮 `param_only` 里同时改多个主轴。
+
+可跨轮组合的方向示例：
 
 - 预处理 + 稀疏机制
 - 稀疏机制 + 多目标 loss
@@ -483,6 +486,7 @@ Agent 不应只看：
 - coarse VQ + residual SAE
 
 很多有效方案未必来自某一个单独改动，而是来自两个思想的组合。
+正确做法是：先建立一个清晰的 `reference_round` 锚点，再沿单变量路径逐步把组合搭出来。
 
 ---
 
@@ -497,7 +501,7 @@ Agent 不应只看：
 Agent 应考虑不是继续调参，而是切换问题表述，例如：
 
 - 从 pure SAE 改成 low-rank + sparse residual
-- 从 fixed TopK 改成 BatchTopK / JumpReLU
+- 从 fixed TopK 改成单样本可导出的变体（如 JumpReLU 或轻量门控）
 - 从 sparse coding 改成 residual VQ / additive quantization
 - 从 global dictionary 改成 mixture / bucketed dictionaries
 
@@ -531,7 +535,7 @@ Agent 应考虑不是继续调参，而是切换问题表述，例如：
 
 ### 模板 C：稀疏机制替换
 - 认为问题主要来自 TopK 本身
-- 搜索 BatchTopK / JumpReLU / soft-to-hard
+- 搜索单样本可导出的稀疏机制，如 JumpReLU / soft-to-hard / 轻量门控变体
 
 ### 模板 D：结构重写
 - 从单层稀疏字典改成 coarse-to-fine
@@ -602,10 +606,10 @@ Agent 不应该被限制在“经典 SAE 调参”里。
    - 目标错位  
 3. 对这个任务，**更适合部署的表示** 可能比 **更标准的 SAE 表示** 更重要。  
 4. 如果纯 TopK SAE 长期无法达到目标，不要犹豫切换到：
-   - BatchTopK
    - JumpReLU
    - low-rank + sparse residual
    - residual VQ / additive quantization
+   - 轻量多子库 / 多专家方案（前提是单样本可导出且 router 足够轻）
 5. 真正值得追求的是：
    - 小而规则的在线成本
    - 保住下游输出

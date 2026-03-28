@@ -74,10 +74,14 @@ EDIT_RULES = """\
 - 纯参数实验必须使用 env_overrides
 - 每一轮只允许一个主假设
 - 必须设置 primary_variable，明确本轮主变化维度
+- 如果 change_type=param_only，必须显式给出 reference_round，表示“我是相对哪一轮的配方只改一个轴”
 - 不要返回 command="stop"
 - 最终必须返回一个符合 action schema 的 JSON 对象"""
 
-SINGLE_VARIABLE_PRINCIPLE = "单变量原则：每一轮只改变一个主维度。"
+SINGLE_VARIABLE_PRINCIPLE = (
+    "单变量原则：每一轮只改变一个主维度。"
+    "param_only 必须锚定一个 reference_round，并保持其余核心配方不变。"
+)
 
 HARD_CONSTRAINT_REMINDER = (
     "提醒：每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
@@ -882,4 +886,3 @@ def _truncate(s: str, limit: int) -> str:
     if not isinstance(s, str):
         return str(s)[:limit]
     return s if len(s) <= limit else s[:limit - 3] + "..."
-

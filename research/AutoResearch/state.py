@@ -377,6 +377,11 @@ class StateManager:
         paths = sorted(summaries_dir.glob("round_*.json"))[-limit:]
         return [_load_json(p, {}) for p in paths]
 
+    def load_round_summary(self, round_id: int) -> dict[str, Any]:
+        """Load a specific round summary by round id."""
+        path = self.history_dir / "round_summaries" / f"round_{round_id:04d}.json"
+        return _load_json(path, {})
+
     def recent_round_summaries_trimmed(self, limit: int = 3) -> list[str]:
         """Compact round summaries as one-liners for prompts."""
         lines: list[str] = []

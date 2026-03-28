@@ -122,6 +122,7 @@ class Action:
     notes_to_memory: list[str]
     next_hypotheses: list[str]
     primary_variable: str  # architecture | optimizer | lr | k | ... | code_fix
+    reference_round: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Action:
@@ -153,10 +154,11 @@ class Action:
             notes_to_memory=d.get("notes_to_memory", []),
             next_hypotheses=d.get("next_hypotheses", []),
             primary_variable=d.get("primary_variable", "other_param"),
+            reference_round=int(d["reference_round"]) if d.get("reference_round") not in (None, "") else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "command": self.command,
             "hypothesis": self.hypothesis,
             "summary": self.summary,
@@ -172,6 +174,9 @@ class Action:
             "next_hypotheses": self.next_hypotheses,
             "primary_variable": self.primary_variable,
         }
+        if self.reference_round is not None:
+            data["reference_round"] = self.reference_round
+        return data
 
     @property
     def is_code_edit(self) -> bool:
