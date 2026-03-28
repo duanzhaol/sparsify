@@ -1,0 +1,219 @@
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -216,6 +216,7 @@
+             "gated",
+             "routed",
+             "expert_topk",
++            "lowrank_expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -408,6 +408,8 @@
+         return RoutedSparseCoder
+     if architecture == "expert_topk":
+         return ExpertTopKSparseCoder
++    if architecture == "lowrank_expert_topk":
++        return LowRankExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1211,6 +1213,196 @@
+         )
+ 
+ 
++class LowRankExpertTopKSparseCoder(SparseCoder):
++    """Low-rank trunk followed by expert-local sparse residual selection."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "lowrank_expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("router", self.router),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self.trunk_encoder.out_features * n_output,
++                f"r={self.trunk_encoder.out_features}×n={n_output}",
++            ),
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _encode_residual(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(
++            hard_expert_idx, num_classes=self.num_experts
++        ).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        return EncoderOutput(*self._encode_residual(residual))
++
++    def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        top_acts, top_indices, full_acts = self._encode_residual(residual)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], full_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
