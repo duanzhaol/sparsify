@@ -215,6 +215,7 @@ class TrainConfig(Serializable):
             "jumprelu",
             "gated",
             "routed",
+            "expert_topk",
             "group_topk",
             "factorized_topk",
             "lowrank_residual",

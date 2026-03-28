@@ -1,0 +1,1991 @@
+{"command":"run","hypothesis":"保持原始实验假设不变：最终重构公式为 x_hat = Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，prototype 当前固定 |E(x)|=1。在线侧先用轻量 router 选 1 个 expert 子库，再只在该静态子库内做局部 top-k，最后走 LUTurbo/Lottable 的查表 + 加权求和 + 选择性补偿链路，因此兼容性仍为扩展兼容。此次 repair 只修复工程阻塞：补全 `expert_topk` 的 config whitelist、factory dispatch 与最小可训练实现，使原始实验能通过 parse/construct/forward/backward。","summary":"修复 `Unknown architecture: 'expert_topk'` 的注册链阻塞。已在 `sparsify/config.py` 把 `expert_topk` 加入合法 architecture 白名单，在 `sparsify/sparse_coder.py` 增加 `_get_sae_class()` dispatch，并实现最小 `ExpertTopKSparseCoder` 原型；随后用失败时相同的 `architecture=expert_topk, K=64, EF=1` 完成 instantiate/forward/backward smoke test，通过。","change_type":"edit_sae_code","expected_win":"explore_unknown","family_name":"expert_topk","family_stage":"prototype","self_review":"这次失败确认为纯注册链 bug，不是 trainer 或优化器问题。repair 后 smoke 已通过，说明 parse/dispatch/forward/backward 链路闭合；如果下一次真实训练仍失败，应按新的失败模式继续修实现，而不是再把问题归因到 architecture 未注册。","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"expert_topk"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["`expert_topk` 的注册链已补全：config whitelist + `_get_sae_class` dispatch + concrete class。","按架构集成清单对相同失败目标做了 smoke test：`expert_topk`, `K=64`, `EF=1` 已能 instantiate、forward、backward。","smoke 结果的成本估计：selection≈0.06x，deployment≈0.06x，combined≈0.13x；当前 prototype 处于超低成本区。","本轮未新增 tunable 参数，也未改 `research/AutoResearch/` 或 `scripts/`；阻塞不在参数接线。"],"next_hypotheses":["如果真实训练已不再在 parse/dispatch 阶段崩溃，就收集该 prototype 的首个有效 FVU 信号，再决定是否继续该 family。","如果真实训练切换到新的实现级错误，下一轮只修 `expert_topk` 本身，不改实验设计和 env_overrides。"],"reference_round":10}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3530-6530-7691-923b-8fe9f6814ab2
+--------
+user
+Round 23 进入 repair 模式。
+
+上一轮代码修改遇到了工程性阻塞。
+不要重新设计实验，不要修改 family_name 或 env_overrides。
+你的任务是补丁修复实现，让原始实验能够跑通。
+默认只改最小必要文件；若阻塞原因是 tunable 参数未接通，可同步修复 research/AutoResearch/ 与 scripts/autoresearch_test.sh 中的必要 wiring。
+当前是第 1 / 5 次 repair 尝试。
+最终返回一个符合 action schema 的 JSON 对象。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+Repair 上下文：
+{
+  "round": 23,
+  "repair_attempt": 1,
+  "max_repair_attempts": 5,
+  "failure_kind": "training_crash",
+  "base_action": {
+    "family_name": "expert_topk",
+    "family_stage": "prototype",
+    "change_type": "edit_sae_code",
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "expert_topk"
+      }
+    ],
+    "summary": "新增一个轻量 MoE-like family `expert_topk`，不引入新 tunable 参数，先用固定原型：4 个静态 expert 子库、每个 token 仅激活 1 个 expert、在被选 expert 内执行 top-k。相对 r10 的 K=64/EF=1/adam 配方，只通过 `ARCHITECTURE=expert_topk` 启动该新 family，并在 `sparsify/config.py` 与 `sparsify/sparse_coder.py` 中完成最小实现与成本估计接入。",
+    "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 prototype 先固定 |E(x)|=1：router 先从若干静态 expert 子库中选 1 个子库，再只在该子库内做局部 top-k。在线导出时，LUTurbo/Lottable 只需执行“轻量 router 选 expert 子库 + 在该静态子库内查表 + 加权求和 + 选择性补偿”，仍然是一个或多个静态向量库上的有限加权和，因此兼容性判断为扩展兼容。主假设：相比继续在已验证 family 上局部打磨，一个固定 4-expert、单激活路径的 `expert_topk` 原型有机会把全字典选择改成局部子库选择，在 K=64 的低成本区显著压低 selection cost，并为 <0.28x 区域提供新的有效信号。"
+  },
+  "failure_payload": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1774715582",
+    "k": "64",
+    "architecture": "expert_topk",
+    "expansion_factor": "1",
+    "run_health": "crash",
+    "termination_reason": "completed",
+    "experiment_id": "r23_1774715582",
+    "head_commit": "04ca83baa39f3ca469fbed9264840998a78ceea6",
+    "description": "新增一个轻量 MoE-like family `expert_topk`，不引入新 tunable 参数，先用固定原型：4 个静态 expert 子库、每个 token 仅激活 1 个 expert、在被选 expert 内执行 top-k。相对 r10 的 K=64/EF=1/adam 配方，只通过 `ARCHITECTURE=expert_topk` 启动该新 family，并在 `sparsify/config.py` 与 `sparsify/sparse_coder.py` 中完成最小实现与成本估计接入。",
+    "self_review": "这是一次有意偏向高优先级未充分验证方向的结构探索，而不是继续挤压 factorized_topk 的局部参数。主要风险有两个：一是 prototype 若训练时用全 expert 计算、部署时只按单激活路径计成本，必须显式覆盖 `selection_cost_estimate`，否则预算判断会失真；二是固定 4 expert/1 active 可能过于僵硬，但先用无新参数原型能把接线与归因范围控制在 `sparsify/` 内。",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0023_standard_1774715552.log",
+    "error_type": "ValueError",
+    "error_summary": "ValueError: Unknown architecture: 'expert_topk'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')",
+    "traceback_excerpt": "[rank1]: Traceback (most recent call last):\n[rank1]: ValueError: Unknown architecture: 'expert_topk'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 334, in <module>\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 269, in run\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 246, in __post_init__\n[rank0]: ValueError: Unknown architecture: 'expert_topk'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\nRoot Cause (first observed failure):",
+    "log_excerpt": "[rank1]:     parsed_args = self._postprocessing(parsed_args)\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank1]:     parsed_args = self._instantiate_dataclasses(\n[rank1]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank1]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank1]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank1]:     return constructor(**constructor_args)\n[rank1]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank1]:   File \"<string>\", line 51, in __init__\n[rank1]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 246, in __post_init__\n[rank1]:     raise ValueError(\n[rank1]: ValueError: Unknown architecture: 'expert_topk'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]: Traceback (most recent call last):\n[rank0]:   File \"<frozen runpy>\", line 198, in _run_module_as_main\n[rank0]:   File \"<frozen runpy>\", line 88, in _run_code\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 334, in <module>\n[rank0]:     run()\n[rank0]:   File \"/root/sparsify-ascend/sparsify/__main__.py\", line 269, in run\n[rank0]:     args = parse(RunConfig)\n[rank0]:            ^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1046, in parse\n[rank0]:     parsed_args = parser.parse_args(args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/argparse.py\", line 1904, in parse_args\n[rank0]:     args, argv = self.parse_known_args(args, namespace)\n[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 362, in parse_known_args\n[rank0]:     parsed_args = self._postprocessing(parsed_args)\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 594, in _postprocessing\n[rank0]:     parsed_args = self._instantiate_dataclasses(\n[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 863, in _instantiate_dataclasses\n[rank0]:     value_for_dataclass_field = _create_dataclass_instance(\n[rank0]:                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/simple_parsing/parsing.py\", line 1163, in _create_dataclass_instance\n[rank0]:     return constructor(**constructor_args)\n[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n[rank0]:   File \"<string>\", line 51, in __init__\n[rank0]:   File \"/root/sparsify-ascend/sparsify/config.py\", line 246, in __post_init__\n[rank0]:     raise ValueError(\n[rank0]: ValueError: Unknown architecture: 'expert_topk'. Must be one of ('topk', 'batch_topk', 'adaptive_budget_topk', 'bucketed_topk', 'codebook_topk', 'residual_vq', 'two_code_residual_vq', 'lowrank_residual_vq', 'jumprelu', 'gated', 'routed', 'group_topk', 'factorized_topk', 'lowrank_residual', 'lowrank_two_stage_residual', 'routed_lowrank_two_stage_residual', 'bucketed_lowrank_residual', 'whitened_lowrank_residual', 'lowrank_adaptive_budget_residual', 'lowrank_gated_residual', 'lowrank_jumprelu_residual', 'lowrank_multi_branch_residual', 'lowrank_factorized_residual', 'lowrank_soft_codebook_residual', 'lowrank_gated_soft_codebook_residual', 'lowrank_grouped_soft_codebook_residual', 'lowrank_two_stage_soft_codebook_residual', 'bucketed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_two_stage_soft_codebook_residual', 'lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_asymmetric_two_stage_soft_codebook_residual', 'routed_lowrank_two_stage_soft_codebook_residual', 'whitened_lowrank_gated_residual', 'lowrank_grouped_residual', 'whitened_topk', 'two_stage_residual', 'multi_branch_gated')\n[rank0]:[W329 00:32:38.550321775 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())\nW0329 00:32:39.630000 90463 site-packages/torch/distributed/elastic/multiprocessing/api.py:908] Sending process 90506 closing signal SIGTERM\nE0329 00:32:39.662000 90463 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 1 (pid: 90507) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12\nTraceback (most recent call last):\n  File \"/root/miniconda3/envs/sparsify-ascend/bin/torchrun\", line 6, in <module>\n    sys.exit(main())\n             ^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py\", line 357, in wrapper\n    return f(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 936, in main\n    run(args)\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py\", line 927, in run\n    elastic_launch(\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 156, in __call__\n    return launch_agent(self._config, self._entrypoint, list(args))\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py\", line 293, in launch_agent\n    raise ChildFailedError(\ntorch.distributed.elastic.multiprocessing.errors.ChildFailedError:\n============================================================\nsparsify FAILED\n------------------------------------------------------------\nFailures:\n  <NO_OTHER_FAILURES>\n------------------------------------------------------------\nRoot Cause (first observed failure):\n[0]:\n  time      : 2026-03-29_00:32:39\n  host      : iZuf6cmwgapdeot4ojlegeZ\n  rank      : 1 (local_rank: 1)\n  exitcode  : 1 (pid: 90507)\n  error_file: <N/A>\n  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html\n============================================================",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "30000000",
+    "resume_stage_count": "1",
+    "continuation_stop_reason": "missing_step_records",
+    "continued_from_checkpoint": "false"
+  }
+}
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+按 repair 模式处理这次阻塞。我先按架构集成清单核对 `expert_topk` 的注册链，然后做最小补丁并用失败时相同的 `architecture=expert_topk, K=64, EF=1` 做 smoke test。
+exec
+/bin/bash -lc "sed -n '1,220p' /root/.codex/skills/sae-architecture-integration/SKILL.md" in /root/sparsify-ascend
+ succeeded in 0ms:
+---
+name: sae-architecture-integration
+description: Use when adding a new SAE architecture family in sparsify-ascend, or when a run fails with Unknown architecture, missing factory dispatch, or other architecture-registration issues. This skill gives a repo-specific checklist for wiring new sparse coder families into sparsify/config.py and sparsify/sparse_coder.py, plus the exact smoke-validation sequence to run before declaring the family runnable.
+---
+
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/state.json
+ M research/history/timeline.jsonl
+?? research/history/logs/agent_action_0023.json
+?? research/history/logs/agent_round_0023.stdout.log
+?? research/history/logs/round0023_standard_1774715552.config.json
+?? research/history/logs/round0023_standard_1774715552.log
+
+exec
+/bin/bash -lc 'rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder|expert_topk" sparsify/config.py sparsify/sparse_coder.py -S' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/sparse_coder.py:38:class SparseCoder(nn.Module):
+sparsify/sparse_coder.py:171:        cls = _get_sae_class(architecture)
+sparsify/sparse_coder.py:383:def _get_sae_class(architecture: str) -> type:
+sparsify/sparse_coder.py:459:    raise ValueError(f"Unknown architecture: {architecture!r}")
+sparsify/sparse_coder.py:466:class WhitenedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:515:class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:562:class BatchTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:588:class BucketedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:653:class CodebookTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:766:class ResidualVQSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:877:class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
+sparsify/sparse_coder.py:989:class JumpReLUSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1027:class GatedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1060:class RoutedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1102:class GroupTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1135:class FactorizedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1185:class LowRankResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1288:class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1384:class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1511:class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCoder):
+sparsify/sparse_coder.py:1677:class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1797:class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:1899:class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2011:class LowRankFactorizedResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:2125:class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:2222:class LowRankGroupedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2312:class LowRankGatedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2409:class LowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2609:class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2813:class WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2953:class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:2975:class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3158:class RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:3177:class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3262:class LowRankJumpReLUResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3349:class WhitenedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3447:class WhitenedLowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3558:class LowRankGroupedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3639:class TwoStageResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3751:class MultiBranchGatedSparseCoder(SparseCoder):
+sparsify/config.py:8:class SparseCoderConfig(Serializable):
+sparsify/config.py:206:        valid_archs = (
+sparsify/config.py:245:        if self.sae.architecture not in valid_archs:
+sparsify/config.py:247:                f"Unknown architecture: {self.sae.architecture!r}. "
+sparsify/config.py:248:                f"Must be one of {valid_archs}"
+
+codex
+阻塞点目前很明确，就是注册链没闭合：`config` 白名单和 `_get_sae_class` 都还没有 `expert_topk`。我接下来补最小实现到 `sparsify/`，然后按同一个 `expert_topk, K=64, EF=1` 做 instantiate/forward/backward smoke。
+exec
+/bin/bash -lc "sed -n '200,265p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            if bs <= 0 or (bs & (bs - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+            "lowrank_gated_residual",
+            "lowrank_jumprelu_residual",
+            "lowrank_multi_branch_residual",
+            "lowrank_factorized_residual",
+            "lowrank_soft_codebook_residual",
+            "lowrank_gated_soft_codebook_residual",
+            "lowrank_grouped_soft_codebook_residual",
+            "lowrank_two_stage_soft_codebook_residual",
+            "bucketed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_two_stage_soft_codebook_residual",
+            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_gated_residual",
+            "lowrank_grouped_residual",
+            "whitened_topk",
+            "two_stage_residual",
+            "multi_branch_gated",
+        )
+        if self.sae.architecture not in valid_archs:
+            raise ValueError(
+                f"Unknown architecture: {self.sae.architecture!r}. "
+                f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.jumprelu_bandwidth <= 0:
+            raise ValueError(
+                "jumprelu_bandwidth must be positive, "
+                f"got {self.sae.jumprelu_bandwidth}"
+            )
+        if self.sae.jumprelu_init_threshold < 0:
+            raise ValueError(
+                "jumprelu_init_threshold must be non-negative, "
+                f"got {self.sae.jumprelu_init_threshold}"
+            )
+        if self.sae.gated_temperature <= 0:
+            raise ValueError(
+                "gated_temperature must be positive, "
+                f"got {self.sae.gated_temperature}"
+            )
+
+exec
+/bin/bash -lc "sed -n '360,470p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+        eps = torch.finfo(self.W_dec.dtype).eps
+        norm = torch.norm(self.W_dec.data, dim=1, keepdim=True)
+        self.W_dec.data /= norm + eps
+
+    @torch.no_grad()
+    def remove_gradient_parallel_to_decoder_directions(self):
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        if self.W_dec.grad is None:
+            return
+
+        parallel_component = einops.einsum(
+            self.W_dec.grad,
+            self.W_dec.data,
+            "d_sae d_in, d_sae d_in -> d_sae",
+        )
+        self.W_dec.grad -= einops.einsum(
+            parallel_component,
+            self.W_dec.data,
+            "d_sae, d_sae d_in -> d_sae d_in",
+        )
+
+
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "group_topk":
+        return GroupTopKSparseCoder
+    if architecture == "factorized_topk":
+        return FactorizedTopKSparseCoder
+    if architecture == "lowrank_residual":
+        return LowRankResidualSparseCoder
+    if architecture == "lowrank_two_stage_residual":
+        return LowRankTwoStageResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_residual":
+        return RoutedLowRankTwoStageResidualSparseCoder
+    if architecture == "bucketed_lowrank_residual":
+        return BucketedLowRankResidualSparseCoder
+    if architecture == "whitened_lowrank_residual":
+        return WhitenedLowRankResidualSparseCoder
+    if architecture == "lowrank_adaptive_budget_residual":
+        return LowRankAdaptiveBudgetResidualSparseCoder
+    if architecture == "lowrank_gated_residual":
+        return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_jumprelu_residual":
+        return LowRankJumpReLUResidualSparseCoder
+    if architecture == "lowrank_multi_branch_residual":
+        return LowRankMultiBranchResidualSparseCoder
+    if architecture == "lowrank_factorized_residual":
+        return LowRankFactorizedResidualSparseCoder
+    if architecture == "lowrank_soft_codebook_residual":
+        return LowRankSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_gated_soft_codebook_residual":
+        return LowRankGatedSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_grouped_soft_codebook_residual":
+        return LowRankGroupedSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_two_stage_soft_codebook_residual":
+        return LowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
+        return BucketedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "whitened_lowrank_two_stage_soft_codebook_residual":
+        return WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+        return RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+        return RoutedLowRankTwoStageSoftCodebookResidualSparseCoder
+    if architecture == "whitened_lowrank_gated_residual":
+        return WhitenedLowRankGatedResidualSparseCoder
+    if architecture == "lowrank_grouped_residual":
+        return LowRankGroupedResidualSparseCoder
+    if architecture == "two_stage_residual":
+        return TwoStageResidualSparseCoder
+    if architecture == "multi_branch_gated":
+        return MultiBranchGatedSparseCoder
+    raise ValueError(f"Unknown architecture: {architecture!r}")
+
+
+# Allow for alternate naming conventions
+Sae = SparseCoder
+
+
+class WhitenedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with normalized low-rank input preconditioning."""
+
+    def __init__(
+        self,
+
+exec
+/bin/bash -lc "sed -n '1,200p' sparsify/__init__.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+__version__ = "2.0.0"
+
+from .config import SaeConfig, SparseCoderConfig, TrainConfig
+from .sparse_coder import Sae, SparseCoder
+from .trainer import SaeTrainer, Trainer
+
+__all__ = [
+    "Sae",
+    "SaeConfig",
+    "SaeTrainer",
+    "SparseCoder",
+    "SparseCoderConfig",
+    "Trainer",
+    "TrainConfig",
+]
+
+exec
+/bin/bash -lc "rg -n \"_get_sae_class\\(|architecture=.*SparseCoderConfig|SparseCoder\\(\" sparsify -g '"'!sparsify/sparse_coder.py'"' -S" in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/trainer.py:101:                    self.saes[name] = TiledSparseCoder(
+sparsify/trainer.py:111:                    sae_cls = _get_sae_class(cfg.sae.architecture)
+sparsify/tiled_sparse_coder.py:17:class TiledSparseCoder(nn.Module):
+sparsify/tiled_sparse_coder.py:59:            SparseCoder(self.tile_size, tile_cfg, device, dtype)
+
+codex
+准备打补丁：只动 `sparsify/config.py` 和 `sparsify/sparse_coder.py`。修复点是把 `expert_topk` 加入 whitelist、dispatch，并补一个最小可训练的单-active-expert 原型，让这轮原始 `ARCHITECTURE=expert_topk` 能通过 parse/construct/forward/backward。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/config.py
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..8461944a29d4cf7cd38414f65d8864196bd213d1
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = flat_x.new_zeros(flat_x.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..8461944a29d4cf7cd38414f65d8864196bd213d1
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = flat_x.new_zeros(flat_x.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+exec
+/bin/bash -lc 'rg -n "expert_topk|ExpertTopKSparseCoder" sparsify/config.py sparsify/sparse_coder.py -S' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/sparse_coder.py:409:    if architecture == "expert_topk":
+sparsify/sparse_coder.py:410:        return ExpertTopKSparseCoder
+sparsify/sparse_coder.py:1104:class ExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1126:                "expert_topk requires k <= latents_per_expert, "
+sparsify/config.py:218:            "expert_topk",
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'expert_topk'
+k = 64
+ef = 1
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae_cls = _get_sae_class(arch)
+sae = sae_cls(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+print('selection_cost', sae.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..8461944a29d4cf7cd38414f65d8864196bd213d1
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = flat_x.new_zeros(flat_x.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+ exited 1 in 4658ms:
+Using fused decoder on CUDA.
+Traceback (most recent call last):
+  File "<stdin>", line 22, in <module>
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/sparsify-ascend/sparsify/device.py", line 115, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/root/sparsify-ascend/sparsify/sparse_coder.py", line 308, in forward
+    top_acts, top_indices, pre_acts = self.encode(x)
+                                      ^^^^^^^^^^^^^^
+  File "/root/sparsify-ascend/sparsify/sparse_coder.py", line 1203, in encode
+    full_acts.scatter_(1, full_indices, acts)
+RuntimeError: scatter(): Expected self.dtype to be equal to src.dtype
+
+codex
+注册链已经补上，正在跑同失败配置的 smoke。这里只验证 `expert_topk / K=64 / EF=1` 的 instantiate、forward、backward 和成本估计，不改实验定义。
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..8461944a29d4cf7cd38414f65d8864196bd213d1
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = flat_x.new_zeros(flat_x.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+codex
+注册问题已经过去，新的 blocker 是 `expert_topk.encode()` 在 autocast 下 `scatter_` 的 dtype 不一致。这个属于实现内的小修复，我直接改成按 `acts.dtype` 分配缓冲，再重跑同一 smoke。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..605c4d7abc3a25ffcac7031b898fcb99beba917c
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..605c4d7abc3a25ffcac7031b898fcb99beba917c
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'expert_topk'
+k = 64
+ef = 1
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae_cls = _get_sae_class(arch)
+sae = sae_cls(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+print('selection_cost', sae.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..605c4d7abc3a25ffcac7031b898fcb99beba917c
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+ succeeded in 4495ms:
+Using fused decoder on CUDA.
+integration_smoke: OK expert_topk 64 1 cuda
+selection_cost {'total_accesses': 266240, 'original_matmul_accesses': 4194304, 'ratio': 0.06, 'budget_ratio': 0.04, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 4096, 'shape': '1024x4'}, {'name': 'active_expert_encoder', 'accesses': 262144, 'shape': 'active=1×1024x256'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 528384, 'combined_ratio': 0.13, 'combined_budget_ratio': 0.08, 'combined_feasible': True}
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..605c4d7abc3a25ffcac7031b898fcb99beba917c
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+codex
+{"command":"run","hypothesis":"保持原始实验假设不变：最终重构公式为 x_hat = Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，prototype 当前固定 |E(x)|=1。在线侧先用轻量 router 选 1 个 expert 子库，再只在该静态子库内做局部 top-k，最后走 LUTurbo/Lottable 的查表 + 加权求和 + 选择性补偿链路，因此兼容性仍为扩展兼容。此次 repair 只修复工程阻塞：补全 `expert_topk` 的 config whitelist、factory dispatch 与最小可训练实现，使原始实验能通过 parse/construct/forward/backward。","summary":"修复 `Unknown architecture: 'expert_topk'` 的注册链阻塞。已在 `sparsify/config.py` 把 `expert_topk` 加入合法 architecture 白名单，在 `sparsify/sparse_coder.py` 增加 `_get_sae_class()` dispatch，并实现最小 `ExpertTopKSparseCoder` 原型；随后用失败时相同的 `architecture=expert_topk, K=64, EF=1` 完成 instantiate/forward/backward smoke test，通过。","change_type":"edit_sae_code","expected_win":"explore_unknown","family_name":"expert_topk","family_stage":"prototype","self_review":"这次失败确认为纯注册链 bug，不是 trainer 或优化器问题。repair 后 smoke 已通过，说明 parse/dispatch/forward/backward 链路闭合；如果下一次真实训练仍失败，应按新的失败模式继续修实现，而不是再把问题归因到 architecture 未注册。","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"expert_topk"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["`expert_topk` 的注册链已补全：config whitelist + `_get_sae_class` dispatch + concrete class。","按架构集成清单对相同失败目标做了 smoke test：`expert_topk`, `K=64`, `EF=1` 已能 instantiate、forward、backward。","smoke 结果的成本估计：selection≈0.06x，deployment≈0.06x，combined≈0.13x；当前 prototype 处于超低成本区。","本轮未新增 tunable 参数，也未改 `research/AutoResearch/` 或 `scripts/`；阻塞不在参数接线。"],"next_hypotheses":["如果真实训练已不再在 parse/dispatch 阶段崩溃，就收集该 prototype 的首个有效 FVU 信号，再决定是否继续该 family。","如果真实训练切换到新的实现级错误，下一轮只修 `expert_topk` 本身，不改实验设计和 env_overrides。"],"reference_round":10}
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 5e022c58733278d742c09c5443d60c195ee30924..93dd5c659662566c1c698ceff9e2b0c6015aabc6
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -215,6 +215,7 @@
+             "jumprelu",
+             "gated",
+             "routed",
++            "expert_topk",
+             "group_topk",
+             "factorized_topk",
+             "lowrank_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 94bd3386a2980db3f991266316c7062599a4d3ca..605c4d7abc3a25ffcac7031b898fcb99beba917c
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -406,6 +406,8 @@
+         return GatedSparseCoder
+     if architecture == "routed":
+         return RoutedSparseCoder
++    if architecture == "expert_topk":
++        return ExpertTopKSparseCoder
+     if architecture == "group_topk":
+         return GroupTopKSparseCoder
+     if architecture == "factorized_topk":
+@@ -1099,6 +1101,116 @@
+         return EncoderOutput(top_acts, top_indices, acts)
+ 
+ 
++class ExpertTopKSparseCoder(SparseCoder):
++    """Route each token to one expert-local dictionary before local top-k."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        self.num_experts = 4
++        self.active_experts = 1
++        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
++        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.latents_per_expert:
++            raise ValueError(
++                "expert_topk requires k <= latents_per_expert, "
++                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.d_in * self.latents_per_expert,
++                f"active=1×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        router_probs = torch.softmax(router_logits, dim=-1)
++        hard_expert_idx = router_probs.argmax(dim=-1)
++        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
++        expert_gate = hard_gate + router_probs - router_probs.detach()
++
++        selected_weight = torch.einsum(
++            "be,eld->bld", expert_gate, self.expert_encoders
++        )
++        selected_bias = torch.einsum(
++            "be,el->bl", expert_gate, self.expert_encoder_bias
++        )
++        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
++
++        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
++        top_indices = local_indices + expert_offsets
++
++        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).unsqueeze(0)
++        full_indices = expert_offsets + local_offsets
++        full_acts.scatter_(1, full_indices, acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class GroupTopKSparseCoder(SparseCoder):
+     """Select one winner per local group before the global top-k competition."""
+ 
+
+tokens used
+202,250
