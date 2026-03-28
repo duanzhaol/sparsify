@@ -5,9 +5,10 @@
 2. 根据最近的 crash / no-improve 情况判定当前策略模式
 3. 把策略模式渲染成一段简洁的 prompt 引导文字
 
-当前 policy 只有三种模式：
+当前 policy 只有四种模式：
 - engineering_repair: 最近连续 crash，优先修最近失败实现
-- mainline: 默认模式，围绕当前主线 family 推进
+- low_cost_exploration: 当前阶段优先补全 <0.5x total_cost 区域
+- mainline: 默认模式，在已进入的低成本 family 上做局部推进
 - architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
 
 这里刻意不做"恢复到默认主线"的强制回退。
@@ -154,8 +155,11 @@ def detect_stagnation(
     consecutive_no_improve: int,
     consecutive_crashes: int,
     has_feasible_frontier: bool = True,
+    frontier: dict[str, Any] | None = None,
+    registry: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """把当前轮次归入四种策略模式之一。"""
+    """把当前轮次归入五种策略模式之一。"""
+    low_cost_status = _low_cost_frontier_status(frontier or {}, registry or {})
     if consecutive_crashes >= CRASH_STREAK_FOR_ENGINEERING_REPAIR:
         mode = "engineering_repair"
         reason = (
@@ -168,6 +172,9 @@ def detect_stagnation(
             "当前 frontier 没有成本可行的点（均超过 1.5×h×n 预算）。"
             "首要目标是找到可行配置。"
         )
+    elif low_cost_status["needs_expansion"]:
+        mode = "low_cost_exploration"
+        reason = low_cost_status["reason"]
     elif consecutive_no_improve >= NO_IMPROVE_STREAK_FOR_ARCH_PROBE:
         mode = "architecture_probe"
         reason = (
@@ -190,6 +197,7 @@ def detect_stagnation(
         "consecutive_no_improve": consecutive_no_improve,
         "consecutive_crashes": consecutive_crashes,
         "has_feasible_frontier": has_feasible_frontier,
+        "low_cost_status": low_cost_status,
     }
 
 
@@ -238,6 +246,23 @@ def build_policy_guidance(
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
 
+    if mode == "low_cost_exploration":
+        return "\n".join([
+            f"Round {round_id} 策略模式：低开销探索",
+            f"原因：{reason}",
+            f"当前参考 family：{mainline['family_name']}",
+            f"当前参考配方：{recipe_line}",
+            "本轮要求：",
+            "1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。",
+            "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
+            "3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。",
+            "4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。",
+            "5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。",
+            "6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。",
+            "",
+            "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
+        ])
+
     if mode == "architecture_probe":
         return "\n".join([
             f"Round {round_id} 策略模式：架构探针",
@@ -257,15 +282,79 @@ def build_policy_guidance(
         f"当前主线 family：{mainline['family_name']}",
         f"当前主线参考配方：{recipe_line}",
         "本轮要求：",
-        "1. 默认继续围绕同一个 family 推进，不要新开 family。",
-        "2. 推荐顺序：先确认 EF 在成本预算内（≤1.5x），再补 clean baseline，再调学习率，再换优化器，再看 loss/preprocess，最后才动 K。",
+        "1. 只有在已经进入某个低成本 family 后，才默认围绕该 family 做局部推进。",
+        "2. 推荐顺序：先确认 total_cost 落在目标区间，再做必要的 clean baseline，然后调学习率，再换优化器，再看 loss/preprocess。",
         "   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。",
         "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
-        "4. 每轮只回答一个问题。",
+        "4. 每轮只回答一个问题；如果当前 family 无法逼近低成本目标，应优先切去更便宜的结构。",
         "",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",
     ])
+
+
+def _low_cost_frontier_status(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    threshold_ratio: float = 0.5,
+    d_in: int = 1024,
+) -> dict[str, Any]:
+    """Summarize whether the <threshold_ratio total_cost region is underexplored."""
+    original = d_in * 4 * d_in
+    low_cost_points: list[dict[str, Any]] = []
+    feasible_points: list[dict[str, Any]] = []
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        entry_family = str(
+            entry.get("config", {}).get("family_name")
+            or entry.get("architecture")
+            or ""
+        ).lower()
+        if registry and not is_compatible_label(registry.get(entry_family)):
+            continue
+        try:
+            fvu = float(entry.get("fvu", float("inf")))
+        except (TypeError, ValueError):
+            continue
+        tc = entry.get("total_cost")
+        if tc is None:
+            sel = entry.get("selection_cost")
+            deploy = entry.get("deployment_accesses", 0) or 0
+            tc = (float(sel) + float(deploy)) if sel is not None else None
+        if tc is None:
+            continue
+        ratio = float(tc) / original if original > 0 else float("inf")
+        point = {"entry": entry, "fvu": fvu, "ratio": ratio}
+        if ratio <= 1.5:
+            feasible_points.append(point)
+        if ratio < threshold_ratio:
+            low_cost_points.append(point)
+
+    best_feasible_fvu = min((p["fvu"] for p in feasible_points), default=float("inf"))
+    best_low_cost_fvu = min((p["fvu"] for p in low_cost_points), default=float("inf"))
+    needs_expansion = False
+    if len(low_cost_points) < 2:
+        needs_expansion = True
+        reason = f"当前 frontier 在 <{threshold_ratio}x total_cost 区域只有 {len(low_cost_points)} 个点，低开销前沿明显欠覆盖。"
+    elif best_feasible_fvu < float("inf") and best_low_cost_fvu > 2.0 * best_feasible_fvu:
+        needs_expansion = True
+        reason = (
+            f"当前 <{threshold_ratio}x 区域最佳 FVU={best_low_cost_fvu:.4f}，"
+            f"明显落后于当前最佳可行点 FVU={best_feasible_fvu:.4f}，需要定向补低开销前沿。"
+        )
+    else:
+        reason = f"当前 <{threshold_ratio}x total_cost 区域已有可用前沿点。"
+
+    return {
+        "threshold_ratio": threshold_ratio,
+        "low_cost_count": len(low_cost_points),
+        "best_low_cost_fvu": None if best_low_cost_fvu == float('inf') else best_low_cost_fvu,
+        "best_feasible_fvu": None if best_feasible_fvu == float('inf') else best_feasible_fvu,
+        "needs_expansion": needs_expansion,
+        "reason": reason,
+    }
 
 
 # ---------------------------------------------------------------------------

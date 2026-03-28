@@ -50,11 +50,16 @@ PROXY_OBJECTIVE = """\
 - 维护并改善 (total_cost, FVU) 的 2D Pareto frontier
 - total_cost = encoder 选择成本 + 部署查表成本，两者加和后与 FVU 做 Pareto 权衡
 - 用尽可能低的 total_cost 达到尽可能低的 FVU
+- 当前阶段重点探索区域：total_cost < 0.5x；首要任务是在这个区域内尽量降低 FVU
+- 0.5x-1.0x 区间可作为质量锚点或过渡对照，但不应继续作为默认主战场
+- >1.0x 区间只保留少量高质量参考点，不应继续主导搜索注意力
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
 - encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
 - 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
-- 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）"""
+- 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
+- 可优先尝试天然低成本方向：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案
+- 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得优先尝试"""
 
 EXECUTION_LAYER = """\
 执行层是固定的：
@@ -140,6 +145,8 @@ def section_frontier(
     if cost_cache is None:
         cost_cache = {}
     entries: list[tuple[float, str]] = []
+    low_cost_count = 0
+    low_cost_best_fvu = float("inf")
 
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
@@ -199,6 +206,12 @@ def section_frontier(
                 total_cost_val = 0
 
         combined_feasible = isinstance(combined_ratio, (int, float)) and combined_ratio <= 1.5
+        if isinstance(combined_ratio, (int, float)) and combined_ratio < 0.5:
+            low_cost_count += 1
+            try:
+                low_cost_best_fvu = min(low_cost_best_fvu, float(fvu))
+            except (TypeError, ValueError):
+                pass
         tag = " [FEASIBLE]" if combined_feasible else " [OVER BUDGET]"
         entries.append((
             float(total_cost_val),
@@ -215,6 +228,13 @@ def section_frontier(
             parts.append(line)
         if feasible_count == 0:
             parts.append("  !! 当前 frontier 所有点均超出总成本预算（>1.5x）。首要任务：找到成本可行的配置。")
+        if low_cost_count == 0:
+            parts.append("  !! <0.5x 低开销区域暂无 frontier 点，建议定向探索简单/更小/更稀疏的结构。")
+        elif low_cost_count <= 2:
+            if low_cost_best_fvu < float('inf'):
+                parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，当前最佳 FVU={low_cost_best_fvu:.4f}，仍明显欠覆盖。")
+            else:
+                parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，仍可进一步探索。")
     else:
         parts.append("  （暂无条目）")
 
@@ -225,14 +245,17 @@ def section_selection_cost_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
 ) -> str:
-    """Show cost status for best feasible point and global best FVU point."""
+    """Show cost status for best <0.5x point, then feasible/global references."""
     best_global: dict[str, Any] | None = None
     best_global_fvu = float("inf")
     best_feasible: dict[str, Any] | None = None
     best_feasible_fvu = float("inf")
+    best_low_cost: dict[str, Any] | None = None
+    best_low_cost_fvu = float("inf")
 
     d_in = 1024
     budget = 1.5 * d_in * 4 * d_in
+    low_cost_budget = 0.5 * d_in * 4 * d_in
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
@@ -256,6 +279,9 @@ def section_selection_cost_status(
         if tc is not None and float(tc) <= budget and fvu < best_feasible_fvu:
             best_feasible_fvu = fvu
             best_feasible = entry
+        if tc is not None and float(tc) < low_cost_budget and fvu < best_low_cost_fvu:
+            best_low_cost_fvu = fvu
+            best_low_cost = entry
 
     if best_global is None:
         return ""
@@ -318,12 +344,42 @@ def section_selection_cost_status(
             true_feasible_fvu = fvu
             true_feasible_cost = cost
 
-    # Show best feasible first (this is what the agent should focus on)
-    if true_feasible is not None and true_feasible_cost is not None:
-        _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
+    # Prefer the best true <0.5x point if one exists
+    true_low_cost: dict[str, Any] | None = None
+    true_low_cost_cost: dict | None = None
+    true_low_cost_fvu = float("inf")
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+        if not is_compatible_label(registry.get(family_name)):
+            continue
+        try:
+            fvu = float(entry.get("fvu", float("inf")))
+        except (TypeError, ValueError):
+            continue
+        if fvu >= true_low_cost_fvu:
+            continue
+        cost = global_cost if entry is best_global and global_cost is not None else _cost_for_entry(entry)
+        if cost is not None and float(cost.get("combined_accesses", float("inf"))) < low_cost_budget:
+            true_low_cost = entry
+            true_low_cost_fvu = fvu
+            true_low_cost_cost = cost
 
-    # Show global best only if different from feasible
-    if best_global is not true_feasible and global_cost is not None:
+    shown_feasible = False
+    if true_low_cost is not None and true_low_cost_cost is not None:
+        _format_entry(true_low_cost, true_low_cost_cost, "当前最佳 <0.5x 点 →")
+        # Show feasible separately only if it's a different entry
+        if true_feasible is not None and true_feasible_cost is not None and true_feasible is not true_low_cost:
+            _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
+            shown_feasible = True
+    elif true_feasible is not None and true_feasible_cost is not None:
+        _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
+        shown_feasible = True
+
+    # Show global best only if different from already shown points
+    if best_global is not None and global_cost is not None and best_global is not true_low_cost and best_global is not true_feasible:
         _format_entry(best_global, global_cost, "全局最低 FVU →")
 
     if true_feasible is None:
@@ -826,5 +882,4 @@ def _truncate(s: str, limit: int) -> str:
     if not isinstance(s, str):
         return str(s)[:limit]
     return s if len(s) <= limit else s[:limit - 3] + "..."
-
 

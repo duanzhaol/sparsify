@@ -131,6 +131,8 @@ def _run_round(
         state.consecutive_no_improve,
         state.consecutive_crashes,
         has_feasible_frontier=has_feasible,
+        frontier=state.frontier,
+        registry=registry,
     )
 
     # Auto-archive stale families
