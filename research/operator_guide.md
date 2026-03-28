@@ -55,6 +55,22 @@
    - 在 resume / runtime validation 中覆盖该字段
    - 第一轮先做“参数生效确认”，不要直接把结果当成架构证据
 
+### Current Architecture Agenda
+
+当前阶段不是继续证明 plain selector 的 K-FVU 曲线，也不是继续把 `EF=1` old-family 局部扫点当成默认主线。
+
+当前更重要的问题是：
+
+- `expert_topk / MoE-like` 是否能在保持部署可导出的前提下形成新的低成本前沿段
+- `lowrank + expert` 是否能把平滑主干与局部子库分开处理，从而改善同成本下的 FVU
+- `lowrank + expert + residual` 或 `two-stage residual expert` 是否能在中等成本带带来新的 Pareto 段
+
+因此：
+
+- plain `EF=1` selector 结果主要作为 cost anchor / matched baseline
+- 如果没有 blocker，优先回答“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”
+- 如果一个候选只是 old-family 的轻微换皮，它的优先级应低于真正新的分解结构
+
 ---
 
 ## 0. 问题重述

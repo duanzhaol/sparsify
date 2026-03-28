@@ -7,8 +7,8 @@
 
 当前 policy 只有四种模式：
 - engineering_repair: 最近连续 crash，优先修最近失败实现
-- low_cost_exploration: 当前阶段优先补全 <0.5x total_cost 区域
-- mainline: 默认模式，在已进入的低成本 family 上做局部推进
+- low_cost_exploration: 在低到中成本带补结构性前沿，而不是重复细扫旧 family
+- mainline: 默认模式；当前 mainline 更偏向结构扩展，而不是默认继续旧 family 局部推进
 - architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
 
 这里刻意不做"恢复到默认主线"的强制回退。
@@ -241,7 +241,7 @@ def build_policy_guidance(
             "3. 选 K 时需权衡 FVU 改善与部署查表开销（K×n），K 过大会推高 total_cost。",
             "4. 参考成本速查表选择可行的 (架构, EF) 组合。",
             "5. 可以尝试不同架构；不要因为旧位置结论预先排斥简单结构、低秩结构或更复杂结构。",
-            "6. 如果已实现 family 长时间都不给满意结果，可以优先抽少量轮次去实现或接线高优先级未验证方向，例如轻量 expert 子库 / MoE-like 路由。",
+            "6. 如果需要新的结构信息，优先考虑 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert` 这些方向。",
             "7. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
@@ -255,13 +255,13 @@ def build_policy_guidance(
             f"{recipe_label}：{recipe_line}",
             f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
-            "1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。",
+            "1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。",
             "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
-            "3. 优先补充低开销样本，但不要把某个 family 预设为唯一主线；简单结构、低秩结构、分阶段结构都可以给出新信息。",
-            "4. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。",
-            "5. 在高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由应被优先考虑，而不是一直停留在旧 family 的局部打磨。",
+            "3. plain `EF=1` selector 结果现在主要作为 cost anchor；除 matched baseline 外，不应继续占用大部分搜索预算。",
+            "4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。",
+            "5. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。",
             "6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
-            "7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让它重新主导搜索注意力。",
+            "7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -276,8 +276,8 @@ def build_policy_guidance(
             "本轮要求：",
             "1. 只允许做 1 个 matched architecture probe。",
             "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
-            "3. 这个 probe 只回答一个问题：该架构本身值不值得继续。",
-            "4. probe 完成后下一轮回到主线，不要连续开多个新 family。",
+            "3. probe 应优先用于结构信息增量高的 family，例如 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`；不要优先再做 plain selector family 之间的重复对照。",
+            "4. 这个 probe 只回答一个问题：该结构槽位本身值不值得继续。",
         ])
 
     return "\n".join([
@@ -287,11 +287,12 @@ def build_policy_guidance(
         f"{recipe_label}：{recipe_line}",
         f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
         "本轮要求：",
-        "1. 只有在当前 target 已经出现可解释的本地 baseline 后，才默认围绕某个 family 做局部推进。",
-        "2. 优先保持归因清晰：先确认 total_cost 所在区间与结构槽位，再做少量 recipe 调整。",
+        "1. 当前 mainline 配方首先是 reference anchor，不等于后续必须继续围绕它做局部推进。",
+        "2. 如果 plain selector family 与 K 轴已经提供足够局部信息，主线应转为结构扩展，而不是继续 recipe 打磨。",
+        "3. 优先保持归因清晰：先确认 total_cost 所在区间与结构槽位，再做少量 recipe 或结构参数调整。",
         "   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。",
-        "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
-        "4. 每轮只回答一个问题；如果当前 family 迟迟不给新信息，应换到其他兼容 family、其他成本带，或高优先级未验证方向如轻量 expert 子库 / MoE-like。",
+        "4. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
+        "5. 当前优先的结构方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`；plain `EF=1` selector 只保留作 matched baseline 或 sanity。",
         "",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",

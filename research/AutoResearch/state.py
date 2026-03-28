@@ -74,10 +74,9 @@ _DEFAULT_AGENT_STATE: dict[str, Any] = {
 
 _DEFAULT_MEMORY: dict[str, Any] = {
     "current_focus": (
-        "Track a Pareto frontier across reconstruction quality and sparsity/cost. "
-        "Treat K=128 as one anchor point, not the only success criterion. "
-        "Prefer experiments that add non-dominated tradeoff points, including smaller-K runs "
-        "that accept some FVU increase when they improve the overall frontier."
+        "Track a Pareto frontier across total_cost and FVU. "
+        "Treat plain EF=1 selector runs as cost anchors and matched baselines, not as the default long-run search path. "
+        "Prefer experiments that add structurally new non-dominated tradeoff points, especially expert/MoE, low-rank, and residual combinations."
     ),
     "architecture_findings": [],
     "performance_findings": [],
@@ -89,9 +88,9 @@ _DEFAULT_MEMORY: dict[str, Any] = {
     "recent_sanity_failures": [],
     "recent_training_failures": [],
     "next_hypotheses": [
-        "Maintain a Pareto frontier over FVU and K rather than optimizing only the single best FVU point.",
-        "Probe smaller K values even when FVU rises, as long as the new point may improve the tradeoff frontier.",
-        "Use K=128 quality anchors to calibrate tradeoffs, not to suppress lower-K exploration.",
+        "Maintain a Pareto frontier over total_cost and FVU rather than optimizing only the single best FVU point.",
+        "Use plain EF=1 selector results as anchors and matched baselines, not as the only mainline family.",
+        "Prioritize structurally new families such as expert/MoE, low-rank + expert, and residual combinations once anchors are established.",
     ],
 }
 

@@ -17,6 +17,17 @@
 - 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
 - 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
 
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
+- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
+- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
+- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+
+一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+
 ## 2. LUTurbo/Lottable 兼容性约束
 
 硬约束：
@@ -122,6 +133,9 @@ Agent 应把这些当成未决问题，而不是已有答案。
 下面这些方向目前不应被当成“已经可直接跑的 family”，但在探索优先级上应被抬高：
 
 - 轻量 expert 子库 / MoE-like 路由
+- `lowrank + expert`
+- `lowrank + expert + residual`
+- `two-stage residual expert`
 - 多子库 + 局部 sparse residual
 - 先轻量 router，再在局部字典内 top-k 的结构
 
@@ -136,6 +150,7 @@ Agent 应把这些当成未决问题，而不是已有答案。
 - `ACTIVE_EXPERTS` 很小，例如 1 或 2
 - router 足够轻，不要把省下来的选择成本重新吃掉
 - 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- 如果引入 low-rank trunk，优先让 trunk 吃掉平滑主干，再让 expert / residual 处理剩余结构
 - 最终形式仍能写成若干静态子库上的有限加权和
 
 一句话：MoE-like 目前不是已验证主线，但应被视为高优先级未验证方向，而不是长期压后。
@@ -147,5 +162,6 @@ Agent 应把这些当成未决问题，而不是已有答案。
 - 先建立当前 target 自己的可解释 baseline 和 cost anchors
 - 再根据当前 target 的 frontier 形状决定下一步往哪里扩
 - 优先选择归因清晰、接线风险低、能补充新信息的实验
-- 如果已实现 family 持续不能给出满意结果，应优先抽出一部分预算转向高优先级未验证方向，尤其是轻量 expert 子库 / MoE-like
+- 当 plain selector family 已经给出足够 anchor 后，默认应转向结构扩展，而不是继续在 `topk / jumprelu / factorized_topk` 上做局部邻域扫描
+- 如果已实现 family 持续不能给出满意结果，应优先抽出一部分预算转向高优先级未验证方向，尤其是 `expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`
 - 不要让旧位置的主线故事替代当前 target 的新证据
