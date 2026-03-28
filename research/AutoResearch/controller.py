@@ -3,8 +3,9 @@
 Replaces the old controller.py CLI.  Called as Python functions, not
 as a subprocess.  No proxy/full tier distinction — single frontier.
 
-The frontier is a 2D Pareto front over (selection_cost, FVU).
-Lower selection_cost and lower FVU are both better.
+The frontier is a 2D Pareto front over (total_cost, FVU).
+total_cost = encoder selection cost + deployment lookup cost.
+Lower total_cost and lower FVU are both better.
 """
 
 from __future__ import annotations
@@ -73,11 +74,11 @@ def parse_log(log_path: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Decision logic — 2D Pareto front: (selection_cost, FVU)
+# Decision logic — 2D Pareto front: (total_cost, FVU)
 # ---------------------------------------------------------------------------
 
 FVU_TOL = 0.001
-COST_REL_TOL = 0.05  # 5% relative tolerance for selection_cost near-duplicate
+COST_REL_TOL = 0.05  # 5% relative tolerance for total_cost near-duplicate
 D_IN_DEFAULT = 1024   # default d_in for cost estimation (fallback)
 
 # Known hookpoint → d_in mapping for quick lookup
@@ -99,8 +100,9 @@ def decide(
 ) -> str:
     """Compare a training result against the 2D Pareto frontier.
 
-    The frontier is two-dimensional: **(selection_cost, FVU)**.
-    Lower selection_cost and lower FVU are both better.
+    The frontier is two-dimensional: **(total_cost, FVU)**.
+    total_cost = encoder selection cost + deployment lookup cost.
+    Lower total_cost and lower FVU are both better.
 
     Returns one of: "keep", "crash", "archive", "discard".
     - keep:    result is Pareto non-dominated (expands or improves frontier)
@@ -114,8 +116,8 @@ def decide(
     if status != "ok" or fvu is None:
         return "crash"
 
-    sel_cost = _compute_candidate_cost(parsed, config)
-    candidate = {"selection_cost": sel_cost, "fvu": fvu}
+    total_cost = _compute_candidate_total_cost(parsed, config)
+    candidate = {"total_cost": total_cost, "fvu": fvu}
 
     points = _frontier_points(frontier)
     if not points:
@@ -124,7 +126,7 @@ def decide(
     # Check for near-duplicate (both dimensions within tolerance)
     for pt in points:
         cost_close = (
-            abs(pt["selection_cost"] - sel_cost) / max(sel_cost, 1) <= COST_REL_TOL
+            abs(pt["total_cost"] - total_cost) / max(total_cost, 1) <= COST_REL_TOL
         )
         fvu_close = abs(pt["fvu"] - fvu) <= FVU_TOL
         if cost_close and fvu_close:
@@ -158,9 +160,12 @@ def update_frontier(
     ef = parsed.get("expansion_factor")
     full_cost = _compute_candidate_cost_full(parsed, config)
     sel_cost = float(full_cost["total_accesses"])
+    deploy_accesses = full_cost.get("deployment_accesses", 0)
+    combined = float(full_cost.get("combined_accesses", sel_cost + (deploy_accesses or 0)))
 
     key = frontier_key(round_id or "unknown")
     frontier[key] = {
+        "total_cost": combined,
         "selection_cost": sel_cost,
         "fvu": fvu,
         "k": int(k) if k is not None else None,
@@ -170,12 +175,13 @@ def update_frontier(
         "config": config,
         "checkpoint": parsed.get("checkpoint"),
         "peak_memory_gb": parsed.get("peak_memory_gb"),
-        "deployment_accesses": full_cost.get("deployment_accesses"),
+        "deployment_accesses": deploy_accesses,
         "deployment_ratio": full_cost.get("deployment_ratio"),
+        "metric_version": "total_cost_v1",
     }
 
     # Remove points dominated by the new entry
-    new_pt = {"selection_cost": sel_cost, "fvu": fvu}
+    new_pt = {"total_cost": combined, "fvu": fvu}
     to_remove = [
         fk
         for fk, entry in frontier.items()
@@ -186,7 +192,7 @@ def update_frontier(
 
 
 # ---------------------------------------------------------------------------
-# Pareto helpers — 2D (selection_cost, FVU)
+# Pareto helpers — 2D (total_cost, FVU)
 # ---------------------------------------------------------------------------
 
 
@@ -201,12 +207,12 @@ def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if not dominated:
             pareto.append(candidate)
-    pareto.sort(key=lambda x: x["selection_cost"])
+    pareto.sort(key=lambda x: x["total_cost"])
     return pareto
 
 
 def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract {selection_cost, fvu} from all frontier entries."""
+    """Extract {total_cost, fvu} from all frontier entries."""
     points: list[dict[str, Any]] = []
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
@@ -219,25 +225,31 @@ def _frontier_points(frontier: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _entry_to_point(entry: dict[str, Any]) -> dict[str, Any]:
-    """Convert a frontier entry to a {selection_cost, fvu} point."""
+    """Convert a frontier entry to a {total_cost, fvu} point."""
     fvu = float(entry["fvu"])
-    # Prefer stored selection_cost; fall back to estimation
+    # Prefer stored total_cost
+    tc = entry.get("total_cost")
+    if tc is not None:
+        return {"total_cost": float(tc), "fvu": fvu}
+    # Backward compat: selection_cost + deployment_accesses
     sel_cost = entry.get("selection_cost")
-    if sel_cost is None:
-        sel_cost = _estimate_cost_from_entry(entry)
-    return {"selection_cost": float(sel_cost), "fvu": fvu}
+    deploy = entry.get("deployment_accesses", 0) or 0
+    if sel_cost is not None:
+        return {"total_cost": float(sel_cost) + float(deploy), "fvu": fvu}
+    # Last resort: recompute
+    return {"total_cost": _estimate_total_cost_from_entry(entry), "fvu": fvu}
 
 
 def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """Return True if point a dominates point b in 2D (selection_cost, FVU).
+    """Return True if point a dominates point b in 2D (total_cost, FVU).
 
     a dominates b if a is at least as good in both dimensions and strictly
     better in at least one.
     """
-    cost_ok = a["selection_cost"] <= b["selection_cost"]
+    cost_ok = a["total_cost"] <= b["total_cost"]
     fvu_ok = a["fvu"] <= b["fvu"] + FVU_TOL
     strictly_better = (
-        (a["selection_cost"] < b["selection_cost"])
+        (a["total_cost"] < b["total_cost"])
         or (a["fvu"] < b["fvu"] - FVU_TOL)
     )
     return cost_ok and fvu_ok and strictly_better
@@ -252,7 +264,7 @@ def _compute_candidate_cost_full(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Compute full cost dict (encoder + deployment) for a candidate result."""
+    """Compute full cost dict (encoder + deployment + combined) for a candidate."""
     cfg = config or {}
     arch = parsed.get("architecture") or cfg.get("architecture", "topk")
     k = int(parsed.get("k") or cfg.get("k") or 128)
@@ -264,18 +276,23 @@ def _compute_candidate_cost_full(
     if "error" not in cost:
         return cost
 
-    # Fallback: rough estimate
+    # Fallback: rough estimate (encoder-only, no deployment info)
     fallback = float(d_in * d_in * ef)
-    return {"total_accesses": fallback, "error": "fallback"}
+    return {"total_accesses": fallback, "combined_accesses": fallback, "error": "fallback"}
 
 
-def _compute_candidate_cost(
+def _compute_candidate_total_cost(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
 ) -> float:
-    """Compute selection_cost for a candidate result."""
+    """Compute total_cost (encoder + deployment) for a candidate result."""
     cost = _compute_candidate_cost_full(parsed, config)
-    return float(cost["total_accesses"])
+    if "combined_accesses" in cost:
+        return float(cost["combined_accesses"])
+    # Fallback: encoder + deployment if available
+    sel = float(cost.get("total_accesses", 0))
+    deploy = float(cost.get("deployment_accesses", 0) or 0)
+    return sel + deploy
 
 
 def _extract_extra_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -300,8 +317,8 @@ def _extract_extra_config(config: dict[str, Any]) -> dict[str, Any]:
     return extra
 
 
-def _estimate_cost_from_entry(entry: dict[str, Any]) -> float:
-    """Estimate selection_cost from a legacy frontier entry without stored cost."""
+def _estimate_total_cost_from_entry(entry: dict[str, Any]) -> float:
+    """Estimate total_cost (encoder + deployment) from a frontier entry."""
     cfg = entry.get("config", {})
     arch = str(
         entry.get("architecture")
@@ -316,7 +333,11 @@ def _estimate_cost_from_entry(entry: dict[str, Any]) -> float:
     extra_config = _extract_extra_config(cfg)
     cost = compute_selection_cost(arch, k=k, ef=ef, d_in=d_in, extra_config=extra_config or None)
     if "error" not in cost:
-        return float(cost["total_accesses"])
+        if "combined_accesses" in cost:
+            return float(cost["combined_accesses"])
+        sel = float(cost.get("total_accesses", 0))
+        deploy = float(cost.get("deployment_accesses", 0) or 0)
+        return sel + deploy
 
     return float(d_in * d_in * ef)
 

@@ -47,14 +47,14 @@ MODULE_CONTRACT = """\
 
 PROXY_OBJECTIVE = """\
 训练侧代理目标：
-- 维护并改善 (selection_cost, FVU) 的 2D Pareto frontier
-- 用尽可能少的 encoder 选择访存量达到尽可能低的 FVU
+- 维护并改善 (total_cost, FVU) 的 2D Pareto frontier
+- total_cost = encoder 选择成本 + 部署查表成本，两者加和后与 FVU 做 Pareto 权衡
+- 用尽可能低的 total_cost 达到尽可能低的 FVU
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
-- 成本有两个独立维度：encoder 选择成本（由 EF 主导）和部署查表成本（由 K、trunk_rank、NUM_CODES 主导）
-- K 不影响 encoder 选择成本，但每增加 K 就多 K×n 次查表访存（K=128 约 +12% 原始 matmul）
-- 降低 encoder 选择成本主要靠降低 EXPANSION_FACTOR
-- 不同架构在相同 EF 下的成本差异很大（见成本速查表）"""
+- encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
+- 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
+- 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）"""
 
 EXECUTION_LAYER = """\
 执行层是固定的：
@@ -76,7 +76,7 @@ SINGLE_VARIABLE_PRINCIPLE = "单变量原则：每一轮只改变一个主维度
 
 HARD_CONSTRAINT_REMINDER = (
     "提醒：每轮只改一个主变量；只能编辑 sparsify/；最终返回 JSON。"
-    "Frontier 基于 (selection_cost, FVU) 2D Pareto front。"
+    "Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment。"
 )
 
 ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
@@ -136,7 +136,7 @@ def section_frontier(
     limit: int = 10,
     cost_cache: dict[str, dict] | None = None,
 ) -> str:
-    """按 selection_cost 排序的 2D Pareto frontier (selection_cost, FVU)。"""
+    """按 total_cost 排序的 2D Pareto frontier (total_cost, FVU)。"""
     if cost_cache is None:
         cost_cache = {}
     entries: list[tuple[float, str]] = []
@@ -156,63 +156,65 @@ def section_frontier(
         if not is_compatible_label(registry.get(family_name)):
             continue
 
-        # Use stored selection_cost or compute it
-        sel_cost = entry.get("selection_cost")
+        # Get cost components: prefer stored, fallback to compute
+        sel_ratio = None
         deploy_ratio = entry.get("deployment_ratio")
+        combined_ratio = None
+        total_cost_val = entry.get("total_cost")
+
         extra_config = _extract_cost_params(cfg)
         extra_key = "|".join(f"{ck}={cv}" for ck, cv in sorted(extra_config.items())) if extra_config else ""
         cost_key = f"{arch}|{k}|{ef}|{extra_key}"
 
-        if sel_cost is None:
+        def _ensure_cost_cache() -> dict:
             if cost_key not in cost_cache:
                 cost_cache[cost_key] = compute_selection_cost(
                     str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
                     extra_config=extra_config or None,
                 )
-            cost = cost_cache[cost_key]
-            if "error" not in cost:
-                sel_cost = cost["total_accesses"]
-                ratio = cost.get("ratio", "?")
-                if deploy_ratio is None:
-                    deploy_ratio = cost.get("deployment_ratio", "?")
-            else:
-                sel_cost = 0
-                ratio = "?"
-        else:
-            d_in = 1024
-            n_out = 4 * d_in
-            original = d_in * n_out
-            ratio = round(sel_cost / original, 2) if original > 0 else "?"
-            # Compute deployment_ratio if not stored
-            if deploy_ratio is None and cost_key not in cost_cache:
-                cost_cache[cost_key] = compute_selection_cost(
-                    str(arch), k=int(k) if k != "?" else 128, ef=int(ef) if ef != "?" else 12,
-                    extra_config=extra_config or None,
-                )
-            if deploy_ratio is None:
-                cached = cost_cache.get(cost_key)
-                if cached and "error" not in cached:
-                    deploy_ratio = cached.get("deployment_ratio", "?")
-                else:
-                    deploy_ratio = "?"
+            return cost_cache[cost_key]
 
-        feasible = isinstance(ratio, (int, float)) and ratio <= 1.5
-        tag = " [FEASIBLE]" if feasible else " [OVER BUDGET]"
+        if total_cost_val is not None:
+            # Have stored total_cost
+            d_in = 1024
+            original = d_in * 4 * d_in
+            sel_cost = entry.get("selection_cost")
+            sel_ratio = round(sel_cost / original, 2) if sel_cost and original > 0 else "?"
+            combined_ratio = round(float(total_cost_val) / original, 2) if original > 0 else "?"
+            if deploy_ratio is None:
+                cost = _ensure_cost_cache()
+                deploy_ratio = cost.get("deployment_ratio", "?") if "error" not in cost else "?"
+        else:
+            # No stored total_cost — compute
+            cost = _ensure_cost_cache()
+            if "error" not in cost:
+                sel_ratio = cost.get("ratio", "?")
+                deploy_ratio = cost.get("deployment_ratio", "?")
+                combined_ratio = cost.get("combined_ratio", "?")
+                total_cost_val = cost.get("combined_accesses", 0)
+            else:
+                sel_ratio = "?"
+                deploy_ratio = "?"
+                combined_ratio = "?"
+                total_cost_val = 0
+
+        combined_feasible = isinstance(combined_ratio, (int, float)) and combined_ratio <= 1.5
+        tag = " [FEASIBLE]" if combined_feasible else " [OVER BUDGET]"
         entries.append((
-            float(sel_cost),
-            f"  sel={ratio}x  deploy={deploy_ratio}x  fvu={fvu:<12}  arch={arch}  K={k} EF={ef}  lr={lr} opt={opt}{tag}",
-            feasible,
+            float(total_cost_val),
+            f"  total={combined_ratio}x (sel={sel_ratio}x + deploy={deploy_ratio}x)  fvu={fvu:<12}  arch={arch}  K={k} EF={ef}  lr={lr} opt={opt}{tag}",
+            combined_feasible,
         ))
 
     entries.sort()
 
-    parts = ["训练代理 frontier（2D Pareto: selection_cost vs FVU）："]
+    parts = ["训练代理 frontier（2D Pareto: total_cost vs FVU）："]
     if entries:
         feasible_count = sum(1 for _, _, f in entries[:limit] if f)
         for _, line, _ in entries[:limit]:
             parts.append(line)
         if feasible_count == 0:
-            parts.append("  !! 当前 frontier 所有点均超出成本预算（>1.5x）。首要任务：找到成本可行的配置。")
+            parts.append("  !! 当前 frontier 所有点均超出总成本预算（>1.5x）。首要任务：找到成本可行的配置。")
     else:
         parts.append("  （暂无条目）")
 
@@ -223,9 +225,14 @@ def section_selection_cost_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
 ) -> str:
-    """Show encoder-side selection cost for the best frontier architecture."""
-    best_entry: dict[str, Any] | None = None
-    best_fvu = float("inf")
+    """Show cost status for best feasible point and global best FVU point."""
+    best_global: dict[str, Any] | None = None
+    best_global_fvu = float("inf")
+    best_feasible: dict[str, Any] | None = None
+    best_feasible_fvu = float("inf")
+
+    d_in = 1024
+    budget = 1.5 * d_in * 4 * d_in
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
@@ -235,56 +242,98 @@ def section_selection_cost_status(
         if not is_compatible_label(registry.get(family_name)):
             continue
         fvu = float(entry.get("fvu", float("inf")))
-        if fvu < best_fvu:
-            best_fvu = fvu
-            best_entry = entry
 
-    if best_entry is None:
+        if fvu < best_global_fvu:
+            best_global_fvu = fvu
+            best_global = entry
+
+        # Check feasibility
+        tc = entry.get("total_cost")
+        if tc is None:
+            sel = entry.get("selection_cost")
+            deploy = entry.get("deployment_accesses", 0) or 0
+            tc = (float(sel) + float(deploy)) if sel is not None else None
+        if tc is not None and float(tc) <= budget and fvu < best_feasible_fvu:
+            best_feasible_fvu = fvu
+            best_feasible = entry
+
+    if best_global is None:
         return ""
 
-    arch = best_entry.get("architecture", "?")
-    k = int(best_entry.get("k", 128))
-    ef = int(best_entry.get("ef", 12))
-    cfg = best_entry.get("config", {})
-    extra_config = _extract_cost_params(cfg)
-    cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+    parts = ["成本状态："]
 
-    if "error" in cost:
-        return ""
+    def _cost_for_entry(entry: dict) -> dict | None:
+        arch = entry.get("architecture", "?")
+        k = int(entry.get("k", 128))
+        ef = int(entry.get("ef", 12))
+        cfg = entry.get("config", {})
+        extra_config = _extract_cost_params(cfg)
+        cost = compute_selection_cost(arch, k=k, ef=ef, extra_config=extra_config or None)
+        return cost if "error" not in cost else None
 
-    parts = ["选择成本状态："]
-    parts.append(f"  当前最优 {arch} (K={k}, EF={ef}):")
+    def _format_entry(entry: dict, cost: dict, label: str) -> None:
+        arch = entry.get("architecture", "?")
+        k = int(entry.get("k", 128))
+        ef = int(entry.get("ef", 12))
+        combined_ratio = cost.get("combined_ratio", "?")
+        combined_budget = cost.get("combined_budget_ratio", "?")
+        feasible_tag = " [FEASIBLE]" if cost.get("combined_feasible", False) else " [OVER BUDGET]"
+
+        parts.append(f"  {label} {arch} (K={k}, EF={ef}){feasible_tag}:")
+        parts.append(
+            f"    总成本: {combined_ratio}x | "
+            f"预算比率: {combined_budget}x | "
+            f"encoder: {cost['ratio']}x | 部署: {cost.get('deployment_ratio', '?')}x | "
+            f"FVU: {entry.get('fvu', '?')}"
+        )
+
+    # Re-check feasibility with fresh computation (stored values may be stale)
+    true_feasible: dict[str, Any] | None = None
+    true_feasible_fvu = float("inf")
+    true_feasible_cost: dict | None = None
+    global_cost: dict | None = None
+
+    # Compute cost for global best
+    if best_global is not None:
+        global_cost = _cost_for_entry(best_global)
+
+    # Find true best feasible using fresh combined_feasible
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = entry.get("config", {})
+        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+        if not is_compatible_label(registry.get(family_name)):
+            continue
+        fvu = float(entry.get("fvu", float("inf")))
+        if fvu >= true_feasible_fvu:
+            continue
+        # Reuse global_cost if same entry
+        if entry is best_global and global_cost is not None:
+            cost = global_cost
+        else:
+            cost = _cost_for_entry(entry)
+        if cost is not None and cost.get("combined_feasible", False):
+            true_feasible = entry
+            true_feasible_fvu = fvu
+            true_feasible_cost = cost
+
+    # Show best feasible first (this is what the agent should focus on)
+    if true_feasible is not None and true_feasible_cost is not None:
+        _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
+
+    # Show global best only if different from feasible
+    if best_global is not true_feasible and global_cost is not None:
+        _format_entry(best_global, global_cost, "全局最低 FVU →")
+
+    if true_feasible is None:
+        parts.append("  !! 当前无可行点（所有 frontier 点的 total_cost > 1.5x）")
+
     parts.append(
-        f"    encoder 成本: {cost['ratio']}x 原始矩阵 | "
-        f"预算比率: {cost['budget_ratio']}x (需 ≤1.0x, 即 ≤1.5×h×n)"
+        "  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM"
     )
-
-    breakdown_strs = []
-    for item in cost.get("breakdown", []):
-        acc = item["accesses"]
-        if acc >= 1_000_000:
-            breakdown_strs.append(f"{item['name']} {acc / 1_000_000:.1f}M")
-        elif acc >= 1_000:
-            breakdown_strs.append(f"{item['name']} {acc / 1_000:.0f}K")
-        else:
-            breakdown_strs.append(f"{item['name']} {acc}")
-    parts.append(f"    分解: {' + '.join(breakdown_strs)}")
-
-    deploy_strs = []
-    for item in cost.get("deployment_breakdown", []):
-        acc = item["accesses"]
-        if acc >= 1_000_000:
-            deploy_strs.append(f"{item['name']} {acc / 1_000_000:.1f}M")
-        elif acc >= 1_000:
-            deploy_strs.append(f"{item['name']} {acc / 1_000:.0f}K")
-        else:
-            deploy_strs.append(f"{item['name']} {acc}")
-    if deploy_strs:
-        deploy_ratio = cost.get("deployment_ratio", "?")
-        parts.append(f"    部署查表成本: {' + '.join(deploy_strs)} = {deploy_ratio}x 原始矩阵")
-
     parts.append(
-        "  降低成本可调参数: TRUNK_RANK, NUM_CODES, STAGE1_RATIO, FACTORIZED_HIDDEN_DIM"
+        "  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES"
     )
 
     return "\n".join(parts)
@@ -324,12 +373,13 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
         rows.append(row)
 
     parts = [
-        "encoder 选择成本可行性速查表（ratio ≤ 1.5x 且标 + = 可行, 标 - = 超预算）：",
+        "Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：",
         f"  {header}",
     ]
     for row in rows:
         parts.append(f"  {row}")
-    parts.append("  注意：以上为 encoder 选择成本（不依赖 K）。部署时还需查表成本 K×n（K=32 约 +3%，K=128 约 +12%）。")
+    parts.append("  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。")
+    parts.append("  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。")
 
     return "\n".join(parts)
 

@@ -86,15 +86,15 @@
 
 LUTurbo 部署的总访存预算约束为：
 
-`selection_cost + K×h + K×n + p×h×n < h×n`
+`total_cost = selection_cost + deployment_cost`
 
-其中 `selection_cost` 是 encoder 端的内存访问量，即为每个 token 决定使用哪些向量和对应系数所需的计算。
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
 
-**AutoResearch 硬约束：selection_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。这个阈值允许一定余量（选择过程可以比原始 matmul 稍贵，因为查表端有对应的节省），但不能无限制增长。
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
 
-当前各架构的典型 selection_cost / (h×n) 比率：
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
 
-| 架构 | 比率 | 是否通过 (≤1.5x) |
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
 |---|---|---|
 | topk (EF=12) | 3.0x | 不通过 |
 | gated (EF=12) | 6.0x | 不通过 |
@@ -102,12 +102,12 @@ LUTurbo 部署的总访存预算约束为：
 | bucketed 系 (EF=12) | 12.25x | 不通过 |
 | factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
 
-注意：选择成本不只由架构决定，还取决于 EF、K、TRUNK_RANK、NUM_CODES 等参数。降低这些参数可以把同一架构的成本降到阈值以下。
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
 
-降低 selection_cost 的已知方向：
+降低 total_cost 的已知方向：
 
+降低 encoder 成本：
 - 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
-- 减小 `K`（减少稀疏预算，间接减少两阶段架构的 encoder 量）
 - 减小 `TRUNK_RANK`（低秩近似更激进）
 - 减少 `NUM_CODES`（更少的 codebook 条目）
 - 减小 `STAGE1_RATIO`（调整两阶段预算分配）
@@ -115,7 +115,12 @@ LUTurbo 部署的总访存预算约束为：
 - 探索不依赖 `h → h×EF` 全连接层的选择机制
 - 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
 
-每个 SparseCoder 子类现在都实现了 `selection_cost_estimate()` 方法，能精确报告其 encoder 端开销。AutoResearch prompt 中已展示此信息。
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
 
 ---
 
@@ -169,9 +174,9 @@ LUTurbo 部署的总访存预算约束为：
 
 ## 4. 当前 frontier 与主线结论
 
-**注意：frontier 已从 (K, EF) 离散格子改为 (selection_cost, FVU) 2D Pareto front。**
+**注意：frontier 已从 (K, EF) 离散格子改为 (total_cost, FVU) 2D Pareto front。**
 
-K 和 EF 不再是固定约束，而是可自由调整的参数。frontier 中每个点代表一个 (selection_cost, FVU) 的非支配权衡。selection_cost 是 encoder 端的总访存量。
+K 和 EF 不再是固定约束，而是可自由调整的参数。frontier 中每个点代表一个 (total_cost, FVU) 的非支配权衡。total_cost = encoder 选择成本 + 部署查表成本。
 
 以下是旧格式下的历史最优，供新一轮搜索参考：
 

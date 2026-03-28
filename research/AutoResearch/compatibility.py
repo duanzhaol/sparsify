@@ -88,11 +88,11 @@ def compatibility_hard_rules() -> str:
         "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
         "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
         "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
-        "5. 选择成本硬约束：encoder 选择成本不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
-        "   超过此阈值的配置将被 policy 拦截。降低 encoder 选择成本的手段包括：",
-        "   减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
+        "   超过此阈值的配置将被 policy 拦截。",
+        "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。",
         "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
-        "   注意：K 不影响 encoder 选择成本，但影响部署查表成本（K×n 访存）。",
     ])
 
 
@@ -220,9 +220,10 @@ def frontier_has_feasible_entry(
     registry: dict[str, str],
     d_in: int = 1024,
 ) -> bool:
-    """Check if frontier has at least one feasible entry within cost budget.
+    """Check if frontier has at least one feasible entry within total cost budget.
 
-    Feasible means: selection_cost / (d_in * 4*d_in) <= 1.5
+    Feasible means: total_cost / (d_in * 4*d_in) <= 1.5
+    where total_cost = encoder selection cost + deployment lookup cost.
     """
     budget = 1.5 * d_in * 4 * d_in  # 1.5 × h × n
 
@@ -236,20 +237,27 @@ def frontier_has_feasible_entry(
         if not is_compatible_label(registry.get(family_name)):
             continue
 
+        # Prefer stored total_cost; fallback to selection_cost + deployment
+        tc = entry.get("total_cost")
+        if tc is not None:
+            if float(tc) <= budget:
+                return True
+            continue
         sel_cost = entry.get("selection_cost")
+        deploy = entry.get("deployment_accesses", 0) or 0
         if sel_cost is not None:
-            if float(sel_cost) <= budget:
+            if float(sel_cost) + float(deploy) <= budget:
                 return True
-        else:
-            # No stored cost — compute from entry fields
-            cost = compute_selection_cost(
-                str(entry.get("architecture") or cfg.get("architecture") or "topk"),
-                k=int(entry.get("k") or cfg.get("k") or 128),
-                ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
-                d_in=d_in,
-            )
-            if "error" not in cost and cost.get("feasible", False):
-                return True
+            continue
+        # No stored cost — compute from entry fields
+        cost = compute_selection_cost(
+            str(entry.get("architecture") or cfg.get("architecture") or "topk"),
+            k=int(entry.get("k") or cfg.get("k") or 128),
+            ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
+            d_in=d_in,
+        )
+        if "error" not in cost and cost.get("combined_feasible", False):
+            return True
 
     return False
 

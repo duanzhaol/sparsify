@@ -223,14 +223,17 @@ class SparseCoder(nn.Module):
         return [("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}")]
 
     def selection_cost_estimate(self, n_output: int | None = None) -> dict:
-        """Estimate encoder-side and deployment-side memory accesses.
+        """Estimate encoder-side, deployment-side, and combined memory accesses.
 
         Args:
             n_output: output dim of original weight matrix. Default 4*d_in.
 
         Returns:
-            dict with encoder cost (total_accesses, ratio, etc.) and
-            deployment cost (deployment_accesses, deployment_ratio, etc.).
+            dict with three sets of metrics:
+            - Encoder (selection): total_accesses, ratio, budget_ratio, feasible
+            - Deployment (lookup): deployment_accesses, deployment_ratio
+            - Combined (total): combined_accesses, combined_ratio,
+              combined_budget_ratio, combined_feasible
         """
         if n_output is None:
             n_output = 4 * self.d_in
@@ -262,16 +265,28 @@ class SparseCoder(nn.Module):
             deploy_total += acc
         deploy_ratio = deploy_total / original if original > 0 else float("inf")
 
+        # Combined (encoder + deployment)
+        combined = total + deploy_total
+        combined_ratio = combined / original if original > 0 else float("inf")
+        combined_budget_ratio = combined / budget if budget > 0 else float("inf")
+
         return {
+            # --- encoder-only (selection) ---
             "total_accesses": total,
             "original_matmul_accesses": original,
             "ratio": round(ratio, 2),
             "budget_ratio": round(budget_ratio, 2),
             "feasible": budget_ratio <= 1.0,
             "breakdown": breakdown,
+            # --- deployment (lookup) ---
             "deployment_accesses": deploy_total,
             "deployment_ratio": round(deploy_ratio, 2),
             "deployment_breakdown": deploy_breakdown,
+            # --- combined = encoder + deployment ---
+            "combined_accesses": combined,
+            "combined_ratio": round(combined_ratio, 2),
+            "combined_budget_ratio": round(combined_budget_ratio, 2),
+            "combined_feasible": combined_budget_ratio <= 1.0,
         }
 
     def encode(self, x: Tensor) -> EncoderOutput:

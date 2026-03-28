@@ -250,13 +250,14 @@ class StateManager:
     # -----------------------------------------------------------------------
 
     def frontier_digest(self, limit: int = 8) -> list[str]:
-        """Return frontier as compact one-liner strings, sorted by selection_cost."""
+        """Return frontier as compact one-liner strings, sorted by total_cost."""
         points: list[tuple[float, str]] = []
+        d_in = 1024
+        original = d_in * 4 * d_in
         for _key, entry in self.frontier.items():
             if not isinstance(entry, dict):
                 continue
             fvu = entry.get("fvu", 999)
-            sel_cost = entry.get("selection_cost")
             k = entry.get("k", "?")
             ef = entry.get("ef", "?")
             arch = entry.get("architecture", "?")
@@ -265,15 +266,19 @@ class StateManager:
             opt = cfg.get("optimizer", "?")
             commit = str(entry.get("commit", ""))[:7]
 
-            if sel_cost is not None:
-                d_in = 1024
-                n_out = 4 * d_in
-                original = d_in * n_out
-                ratio = round(sel_cost / original, 2) if original > 0 else "?"
-                cost_str = f"cost={ratio}x"
-                sort_key = float(sel_cost)
+            # Determine total_cost for sorting
+            tc = entry.get("total_cost")
+            if tc is None:
+                sel = entry.get("selection_cost")
+                deploy = entry.get("deployment_accesses", 0) or 0
+                tc = (float(sel) + float(deploy)) if sel is not None else None
+
+            if tc is not None:
+                ratio = round(float(tc) / original, 2) if original > 0 else "?"
+                cost_str = f"total={ratio}x"
+                sort_key = float(tc)
             else:
-                cost_str = "cost=?"
+                cost_str = "total=?"
                 sort_key = float("inf")
 
             line = f"{cost_str} fvu={fvu} arch={arch} K={k} EF={ef} lr={lr} opt={opt} @{commit}"
@@ -462,9 +467,10 @@ class StateManager:
         1. K-only keys: "128" → "legacy_128"
         2. K_EF keys: "128_12" → "legacy_128_12"
 
-        Also computes and stores selection_cost for entries that lack it.
+        Also computes and stores total_cost/selection_cost/deployment for entries that lack them.
         """
-        from .controller import _estimate_cost_from_entry
+        from .compatibility import compute_selection_cost
+        from .controller import _extract_extra_config, _estimate_total_cost_from_entry
 
         legacy_keys = [
             k for k in frontier
@@ -491,9 +497,24 @@ class StateManager:
                     cfg = entry.get("config", {})
                     entry["ef"] = int(cfg.get("expansion_factor", cfg.get("EXPANSION_FACTOR", 12)))
 
-            # Compute selection_cost if missing
-            if "selection_cost" not in entry:
-                entry["selection_cost"] = _estimate_cost_from_entry(entry)
+            # Compute cost breakdown if missing
+            if "total_cost" not in entry:
+                cfg = entry.get("config", {})
+                arch = str(entry.get("architecture") or cfg.get("architecture") or "topk").lower()
+                k_val = int(entry.get("k") or cfg.get("k") or 128)
+                ef_val = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
+                cost = compute_selection_cost(
+                    arch, k=k_val, ef=ef_val,
+                    extra_config=_extract_extra_config(cfg),
+                )
+                if "error" not in cost:
+                    entry.setdefault("selection_cost", float(cost["total_accesses"]))
+                    entry.setdefault("deployment_accesses", float(cost.get("deployment_accesses", 0)))
+                    entry.setdefault("deployment_ratio", cost.get("deployment_ratio"))
+                    entry["total_cost"] = float(cost.get("combined_accesses", 0))
+                else:
+                    entry["total_cost"] = _estimate_total_cost_from_entry(entry)
+                entry["metric_version"] = "total_cost_v1"
 
             new_key = f"legacy_{old_key}"
             frontier[new_key] = entry

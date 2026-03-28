@@ -85,7 +85,7 @@ def validate_action(
     if not ok:
         return action, f"Incubation limit: {msg}"
 
-    ok, msg = _check_selection_cost(action)
+    ok, msg = _check_total_cost_feasibility(action)
     if not ok:
         return action, msg
 
@@ -228,14 +228,14 @@ def build_policy_guidance(
             f"当前主线 family：{mainline['family_name']}",
             f"当前主线参考配方：{recipe_line}",
             "本轮要求：",
-            "1. 首要目标：找到 encoder 选择成本 ≤1.5×h×n 的配置。",
-            "2. 降低成本的最有效手段是降低 EXPANSION_FACTOR（成本近似正比于 EF）。",
-            "3. K 不影响 encoder 选择成本，但影响部署查表成本（K×n）。选 K 时需权衡 FVU 改善与查表开销。",
+            "1. 首要目标：找到 total_cost (encoder + deployment) ≤1.5×h×n 的配置。",
+            "2. 降低 encoder 成本最有效的手段是降低 EXPANSION_FACTOR。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。",
+            "3. 选 K 时需权衡 FVU 改善与部署查表开销（K×n），K 过大会推高 total_cost。",
             "4. 参考成本速查表选择可行的 (架构, EF) 组合。",
             "5. 可以尝试不同架构——简单架构在低 EF 下可能是更好的权衡。",
             "6. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
             "",
-            "选择成本硬约束：encoder 选择成本不得超过 1.5×h×n，超过将被拦截。",
+            "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
 
     if mode == "architecture_probe":
@@ -259,11 +259,11 @@ def build_policy_guidance(
         "本轮要求：",
         "1. 默认继续围绕同一个 family 推进，不要新开 family。",
         "2. 推荐顺序：先确认 EF 在成本预算内（≤1.5x），再补 clean baseline，再调学习率，再换优化器，再看 loss/preprocess，最后才动 K。",
-        "   注意：降低 encoder 成本主要靠降 EF。K 影响部署查表成本（K×n），过大的 K 会增加查表开销。",
+        "   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。",
         "3. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
         "4. 每轮只回答一个问题。",
         "",
-        "选择成本硬约束：encoder 选择成本不得超过 1.5×h×n，超过将被拦截。",
+        "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",
     ])
 
@@ -398,8 +398,8 @@ def _check_param_only_single_variable(
     return True, ""
 
 
-def _check_selection_cost(action: Action) -> tuple[bool, str]:
-    """拦截 encoder 选择成本超过 1.5×h×n 的配置。
+def _check_total_cost_feasibility(action: Action) -> tuple[bool, str]:
+    """拦截总成本 (encoder + deployment) 超过 1.5×h×n 的配置。
 
     对 edit_sae_code 类型的 action 跳过 pre-check：代码修改可能正是为了降低成本，
     用修改前的实现去估算成本会错误地拦截合理的降成本提案。
@@ -431,15 +431,18 @@ def _check_selection_cost(action: Action) -> tuple[bool, str]:
     if "error" in cost:
         return True, ""  # 计算失败时不拦截
 
-    if cost.get("feasible", True):
+    if cost.get("combined_feasible", True):
         return True, ""
 
-    budget_ratio = cost.get("budget_ratio", 0)
-    ratio = cost.get("ratio", 0)
+    combined_ratio = cost.get("combined_ratio", 0)
+    combined_budget = cost.get("combined_budget_ratio", 0)
+    sel_ratio = cost.get("ratio", 0)
+    deploy_ratio = cost.get("deployment_ratio", 0)
     return False, (
-        f"选择成本超出预算：{arch} (K={k}, EF={ef}) 的 encoder 成本为 {ratio}x 原始矩阵，"
-        f"预算比率 {budget_ratio}x（需 ≤1.0x，即 ≤1.5×h×n）。"
-        f"请通过减小 K / EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES 等参数降低选择成本。"
+        f"总成本超出预算：{arch} (K={k}, EF={ef}) 的 total_cost 为 {combined_ratio}x 原始矩阵 "
+        f"(encoder {sel_ratio}x + deployment {deploy_ratio}x)，"
+        f"预算比率 {combined_budget}x（需 ≤1.0x，即 total ≤1.5×h×n）。"
+        f"降低 encoder 成本：减小 EF / TRUNK_RANK / NUM_CODES。降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。"
     )
 
 
@@ -578,8 +581,12 @@ def _best_frontier_entry(
         all_candidates.append(entry)
 
         if prefer_feasible:
-            sel_cost = entry.get("selection_cost")
-            if sel_cost is not None and float(sel_cost) <= budget:
+            tc = entry.get("total_cost")
+            if tc is None:
+                sel = entry.get("selection_cost")
+                deploy = entry.get("deployment_accesses", 0) or 0
+                tc = (float(sel) + float(deploy)) if sel is not None else None
+            if tc is not None and float(tc) <= budget:
                 feasible.append(entry)
 
     if prefer_feasible and feasible:

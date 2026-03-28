@@ -18,7 +18,7 @@ from .compatibility import (
     is_compatible_label,
     parse_compatibility_registry,
 )
-from .controller import frontier_key
+from .controller import frontier_key, _extract_extra_config
 from .types import BASE_ENV_DEFAULTS, HISTORY_DIR
 
 
@@ -190,9 +190,21 @@ def rebuild_runtime_state(
                 "checkpoint": result.get("checkpoint"),
                 "peak_memory_gb": result.get("peak_memory_gb"),
             }
-            # Compute selection_cost
-            from .controller import _estimate_cost_from_entry
-            new_entry["selection_cost"] = _estimate_cost_from_entry(new_entry)
+            # Compute cost breakdown (selection + deployment + total)
+            from .compatibility import compute_selection_cost
+            cost = compute_selection_cost(
+                arch, k=k_val, ef=ef_val,
+                extra_config=_extract_extra_config(config),
+            )
+            if "error" not in cost:
+                new_entry["selection_cost"] = float(cost["total_accesses"])
+                new_entry["deployment_accesses"] = float(cost.get("deployment_accesses", 0))
+                new_entry["deployment_ratio"] = cost.get("deployment_ratio")
+                new_entry["total_cost"] = float(cost.get("combined_accesses", 0))
+            else:
+                from .controller import _estimate_total_cost_from_entry
+                new_entry["total_cost"] = _estimate_total_cost_from_entry(new_entry)
+            new_entry["metric_version"] = "total_cost_v1"
             frontier[key] = new_entry
 
     # Pareto cleanup: remove dominated points
