@@ -33,6 +33,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
     "lowrank_residual": _LOWRANK_KEYS,
     "lowrank_expert_residual": _TWOSTAGE_KEYS,
+    "two_stage_residual_expert": {"STAGE1_RATIO"},
     "lowrank_gated_residual": _LOWRANK_KEYS,
     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
     "lowrank_grouped_residual": _LOWRANK_KEYS,
