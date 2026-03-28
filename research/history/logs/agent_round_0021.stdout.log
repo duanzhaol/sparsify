@@ -1,0 +1,247 @@
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`factorized_topk` 只改变在线打分链路为 h(x)=ReLU(W1x), scores=W2h(x) 后做 top-k，decoder 仍是单个静态向量库上的有限加权和，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理流水线，兼容性=直接兼容。r20 已证明在极低成本 0.28x 处它能给出新的兼容 frontier 点；本轮主假设是保持低秩 scorer 宽度不变，仅增加 `K` 到 192，把节省下来的 encoder 成本转移到部署查表侧，能在仍处于低成本区的前提下显著降低 FVU，补出 0.3x 左右的新 Pareto 点。","summary":"相对 r20 的完整配置，本轮只改一个 env 参数：`K=192`。保持 `ARCHITECTURE=factorized_topk`、`EXPANSION_FACTOR=1`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 不变，专门测 cheap scorer + 更高 sparse budget 的质量斜率。预计 total_cost 约从 0.28x 提升到 0.31x（selection 仍约 0.12x，deployment 约从 0.16x 升到 0.19x）。","change_type":"param_only","expected_win":"lower_fvu","family_name":"factorized_topk","family_stage":"stabilize","self_review":"这轮不是继续压 encoder 成本，而是验证 r20 的低选择成本是否真能换成更有效的部署预算。风险是 hidden_dim=256 可能已成为主要瓶颈，单纯加 K 只带来有限收益；但这是当前最干净的单变量测试，能直接回答 factorized_topk 的 Pareto 斜率是否优于 topk。若收益很弱，下一轮应停止继续堆 K，转而回到 `FACTORIZED_HIDDEN_DIM` 或切换到其他未充分验证 family。","needs_sanity":false,"env_overrides":[{"key":"K","value":"192"}],"touched_files":[],"notes_to_memory":["兼容性判断：`factorized_topk` 为直接兼容；最终导出形式不变，仍是单静态向量库上的有限加权和。","reference_round 选 r20，因为本轮要隔离 `K` 对同一 family 的影响；只改 1 个 env 参数，满足 param_only 单变量规则。","r20 在 0.28x 已优于 topk 的最低成本点，说明 factorized scorer 至少在当前 target 的超低成本带有信号；本轮继续测其沿部署成本方向的 frontier 斜率。","成本预估：K=192, FACTORIZED_HIDDEN_DIM=256, EF=1 时，selection 约 0.12x、deployment 约 0.19x、total 约 0.31x，仍位于当前优先补强的 <0.5x 区域。"],"next_hypotheses":["如果本轮在约 0.31x 处明显优于现有 topk 低成本点，下一轮继续以该 family 自身最好点为 reference_round，只改 `FACTORIZED_HIDDEN_DIM` 或 `K` 细化局部前沿。","如果本轮收益有限，说明 hidden_dim=256 已成主瓶颈；下一轮应回到 `FACTORIZED_HIDDEN_DIM` 调整，或转向当前 target 上尚未充分验证的其他低成本兼容 family。"],"reference_round":20}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3530-6530-7691-923b-8fe9f6814ab2
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 21。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 21 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1577，明显落后于当前最佳可行点 FVU=0.0627，需要定向补低开销前沿。
+当前主线 family：topk
+当前主线参考配方：ARCHITECTURE=topk K=512 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前主线完整配置（source=frontier_best）：
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=512
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. 优先补充低开销样本，但不要把某个 family 预设为唯一主线；简单结构、低秩结构、分阶段结构都可以给出新信息。
+4. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。
+5. 在高优先级未充分验证方向里，轻量 expert 子库 / MoE-like 路由应被优先考虑，而不是一直停留在旧 family 的局部打磨。
+6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让它重新主导搜索注意力。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 8 个，扩展兼容 21 个，不兼容 3 个。
+
+Agent 状态：round=20, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=11
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前高优先级未充分验证方向：
+  1. 轻量 expert 子库 / MoE-like 路由。
+     只有在 router 足够轻、ACTIVE_EXPERTS 很小、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. 如果已实现 family 持续不能给出满意结果，不要只继续微调旧 family；应优先抽出一部分轮次去补这些未充分验证方向。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.28x (sel=0.12x + deploy=0.16x)  fvu=0.23161178827285767  arch=factorized_topk  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.33x (sel=0.25x + deploy=0.08x)  fvu=0.2200852334499359  arch=topk  K=80 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.38x (sel=0.25x + deploy=0.12x)  fvu=0.18987518548965454  arch=topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.41x (sel=0.25x + deploy=0.16x)  fvu=0.17296889424324036  arch=topk  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.44x (sel=0.25x + deploy=0.19x)  fvu=0.15771770477294922  arch=topk  K=192 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.5x (sel=0.25x + deploy=0.25x)  fvu=0.1312783807516098  arch=topk  K=256 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.56x (sel=0.25x + deploy=0.31x)  fvu=0.10977637022733688  arch=topk  K=320 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.62x (sel=0.25x + deploy=0.38x)  fvu=0.09135372191667557  arch=topk  K=384 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=192, EF=1) [FEASIBLE]:
+    总成本: 0.44x | 预算比率: 0.29x | encoder: 0.25x | 部署: 0.19x | FVU: 0.15771770477294922
+  最优可行点 → topk (K=512, EF=1) [FEASIBLE]:
+    总成本: 0.75x | 预算比率: 0.5x | encoder: 0.25x | 部署: 0.5x | FVU: 0.06265510618686676
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r17 topk param_only -> keep fvu=0.09135372191667557 343s | 最终重构公式固定为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`topk` 的在线侧只输出稀疏支持集 S(x) 与对应系数 α_i(x)...
+  r18 topk param_only -> keep fvu=0.06265510618686676 349s | 最终重构公式固定为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`topk` 的在线侧只输出稀疏支持集 S(x) 与对应系数 α_i(x)...
+  r19 factorized_topk param_only -> discard fvu=0.19890208542346954 491s | 最终重构公式保持为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`factorized_topk` 只把在线选择链路改成 h(x)=ReL...
+  r20 factorized_topk param_only -> keep fvu=0.23161178827285767 397s | 最终重构公式保持为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`factorized_topk` 只把在线选择链路改成 h(x)=ReL...
+
+最近可用 reference_round 的完整配置：
+  r20 factorized_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=factorized_topk
+  EXPANSION_FACTOR=1
+  K=160
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+
+  r18 topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=512
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r10 jumprelu (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=jumprelu
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r9 group_topk (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=group_topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | scorer mixture 仍可导出为静态库和 | 扩展兼容 |
+| `whitened_lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 扩展兼容 |
+| `whitened_lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 预处理 + gated residual 需要 fresh validation | 扩展兼容 |
+| `two_stage_residual` | multi-stage sparse sum | candidate | staged residual 仍是静态库和 | 扩展兼容 |
+| `lowrank_two_stage_residual` | trunk + two-stage sparse sum | candidate | staged residual path | 扩展兼容 |
+| `routed_lowrank_two_stage_residual` | trunk + routed two-stage sparse sum | candidate | route 只在选择链路 | 扩展兼容 |
+| `codebook_topk` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | coarse codebook + sparse residual | 扩展兼容 |
+| `residual_vq` | `x_hat = Σ_m π_m c_m + Σ_i α_i b_i` | candidate | hard codebook coarse branch | 扩展兼容 |
+| `two_code_residual_vq` | multi-codebook + sparse residual | candidate | 更深 coarse path，结构更复杂 | 扩展兼容 |
+| `lowrank_residual_vq` | trunk + codebook + sparse residual | candidate | trunk + codebook +
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S(x)} α_i(x) b_i。`factorized_topk` 只改变在线打分链路为 h(x)=ReLU(W1x), scores=W2h(x) 后做 top-k，decoder 仍是单个静态向量库上的有限加权和，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理流水线，兼容性=直接兼容。r20 已证明在极低成本 0.28x 处它能给出新的兼容 frontier 点；本轮主假设是保持低秩 scorer 宽度不变，仅增加 `K` 到 192，把节省下来的 encoder 成本转移到部署查表侧，能在仍处于低成本区的前提下显著降低 FVU，补出 0.3x 左右的新 Pareto 点。","summary":"相对 r20 的完整配置，本轮只改一个 env 参数：`K=192`。保持 `ARCHITECTURE=factorized_topk`、`EXPANSION_FACTOR=1`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 不变，专门测 cheap scorer + 更高 sparse budget 的质量斜率。预计 total_cost 约从 0.28x 提升到 0.31x（selection 仍约 0.12x，deployment 约从 0.16x 升到 0.19x）。","change_type":"param_only","expected_win":"lower_fvu","family_name":"factorized_topk","family_stage":"stabilize","self_review":"这轮不是继续压 encoder 成本，而是验证 r20 的低选择成本是否真能换成更有效的部署预算。风险是 hidden_dim=256 可能已成为主要瓶颈，单纯加 K 只带来有限收益；但这是当前最干净的单变量测试，能直接回答 factorized_topk 的 Pareto 斜率是否优于 topk。若收益很弱，下一轮应停止继续堆 K，转而回到 `FACTORIZED_HIDDEN_DIM` 或切换到其他未充分验证 family。","needs_sanity":false,"env_overrides":[{"key":"K","value":"192"}],"touched_files":[],"notes_to_memory":["兼容性判断：`factorized_topk` 为直接兼容；最终导出形式不变，仍是单静态向量库上的有限加权和。","reference_round 选 r20，因为本轮要隔离 `K` 对同一 family 的影响；只改 1 个 env 参数，满足 param_only 单变量规则。","r20 在 0.28x 已优于 topk 的最低成本点，说明 factorized scorer 至少在当前 target 的超低成本带有信号；本轮继续测其沿部署成本方向的 frontier 斜率。","成本预估：K=192, FACTORIZED_HIDDEN_DIM=256, EF=1 时，selection 约 0.12x、deployment 约 0.19x、total 约 0.31x，仍位于当前优先补强的 <0.5x 区域。"],"next_hypotheses":["如果本轮在约 0.31x 处明显优于现有 topk 低成本点，下一轮继续以该 family 自身最好点为 reference_round，只改 `FACTORIZED_HIDDEN_DIM` 或 `K` 细化局部前沿。","如果本轮收益有限，说明 hidden_dim=256 已成主瓶颈；下一轮应回到 `FACTORIZED_HIDDEN_DIM` 调整，或转向当前 target 上尚未充分验证的其他低成本兼容 family。"],"reference_round":20}
+tokens used
+161,250
