@@ -1,0 +1,267 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"64"}],"expected_win":"lower_cost","experiment_tier":"full","family_name":"factorized_topk","family_stage":"frontier_mapping","hypothesis":"候选 family: factorized_topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；低秩 factorized scorer 只改变单样本在线侧的打分与选择链路，不改变 decoder 端的单库查表 + 加权求和 + 选择性补偿导出形式，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容。相对 reference_round=r246 只改一个 env 参数 `K=64`，保持 `ARCHITECTURE=factorized_topk`、`EXPANSION_FACTOR=1`、`FACTORIZED_HIDDEN_DIM=96`、`OPTIMIZER=signum`、`LR=0.003` 及其余配置不变，测试在已确认可形成 0.14x 左端点之后，进一步把部署查表成本压低到更左侧时，FVU 是否仍基本维持在同一量级，从而补出更完整的超低成本 Pareto 左边界。","needs_sanity":false,"next_hypotheses":["如果 `factorized_topk@K64,FACTORIZED_HIDDEN_DIM=96` 只带来有限 FVU 退化，同时保持接近 r246 的吞吐与时长，则下一轮继续相对本轮单变量下探 `K=32`，确认这条超低成本支线的最左可用边界。","如果 `K=64` 相比 r246 的 FVU 明显恶化，说明这条 factorized 低 hidden-dim 线虽然能给出极左成本点，但质量已开始快速坍塌；后续应停止继续左移，转回更高质量的低成本 family。","如果 `K=64` 的训练时长或 tokens_per_sec 异常变差，则把问题归因为实现/运行时负担，而不是简单归因为 `K` 轴本身，并停止继续在这条线上加密。"],"notes_to_memory":["r246 已确认 `factorized_topk@K96,FACTORIZED_HIDDEN_DIM=96` 能以约 0.14x total_cost 补出新的最左 Pareto 点；这说明低 hidden-dim factorized scorer 线虽质量弱，但在成本维度上确实提供了新增信息。","r230 与 r246 的 FVU 差异很小（`K=256 -> 96` 仅轻微变差），初步信号表明该 family 在当前 hidden-dim 下可能已接近 K 不敏感区；继续下探 `K=64` 是判断其左边界形状的最小动作。","本轮必须同时比较 `val_fvu`、`tokens_per_sec`、`duration_sec`、`final_total_tokens`；若只是更便宜但系统代价明显恶化，应直接视为负面信号。"],"reference_round":246,"self_review":"这轮严格遵守单变量原则：相对 r246 只改 `K`，不联动 architecture、EF、optimizer、LR 或 `FACTORIZED_HIDDEN_DIM`。选择继续沿 r246 的新左端 frontier 点下探，而不是立刻切回别的 family，是因为当前最有信息量的问题已经变成“这条真正低秩 scorer 线的左边界在哪里”；连续多轮在 0.34x 槽位做 family 对照的边际收益已经明显下降。","summary":"严格锚定 r246，仅把 `factorized_topk` 的 `K` 从 96 降到 64，优先绘制新出现的超低成本左侧 frontier，确认这条低 hidden-dim factorized scorer 支线能否在进一步降部署成本后仍保持近似质量。","touched_files":[]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d344d-207a-73a1-b479-7adfbce20488
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 247。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 应显式给出 reference_round。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 247 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1462，明显落后于当前最佳可行点 FVU=0.0647，需要定向补低开销前沿。
+当前参考 family：lowrank_soft_codebook_residual
+当前参考配方：ARCHITECTURE=lowrank_soft_codebook_residual K=128 EXPANSION_FACTOR=2 OPTIMIZER=signum LR=0.003
+当前参考完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_soft_codebook_residual
+  EXPANSION_FACTOR=2
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。
+4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。
+5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。
+6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=246, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=26
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.14x (sel=0.05x + deploy=0.09x)  fvu=0.3986594080924988  arch=factorized_topk  K=96 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.28x (sel=0.25x + deploy=0.03x)  fvu=0.3198612928390503  arch=topk  K=32 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.3x (sel=0.25x + deploy=0.05x)  fvu=0.2839871644973755  arch=topk  K=48 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.3x (sel=0.25x + deploy=0.05x)  fvu=0.27053385972976685  arch=topk  K=56 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.31x (sel=0.25x + deploy=0.06x)  fvu=0.25825566053390503  arch=topk  K=64 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.34x (sel=0.25x + deploy=0.09x)  fvu=0.221914142370224  arch=topk  K=96 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.38x (sel=0.25x + deploy=0.12x)  fvu=0.19679804146289825  arch=topk  K=128 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.44x (sel=0.25x + deploy=0.19x)  fvu=0.16352370381355286  arch=topk  K=192 EF=1  lr=0.003 opt=signum [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=248, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.25x | 部署: 0.24x | FVU: 0.14621132612228394
+  最优可行点 → lowrank_soft_codebook_residual (K=128, EF=2) [FEASIBLE]:
+    总成本: 1.38x | 预算比率: 0.92x | encoder: 0.75x | 部署: 0.62x | FVU: 0.06465830653905869
+  全局最低 FVU → lowrank_two_stage_soft_codebook_residual (K=128, EF=12) [OVER BUDGET]:
+    总成本: 6.88x | 预算比率: 4.58x | encoder: 6.25x | 部署: 0.62x | FVU: 0.04925498366355896
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r243 jumprelu param_only -> archive fvu=0.22218090295791626 456s | 候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只...
+  r244 factorized_topk param_only -> discard fvu=0.3008039891719818 359s | 候选 family: factorized_topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；fac...
+  r245 group_topk param_only -> discard fvu=0.22579419612884521 359s | 候选 family: group_topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；group_to...
+  r246 factorized_topk param_only -> keep fvu=0.3986594080924988 366s | 候选 family: factorized_topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；低秩 ...
+
+最近可用 reference_round 的完整配置：
+  r246 factorized_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=factorized_topk
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=96
+
+  r243 jumprelu (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=jumprelu
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r242 topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r245 group_topk (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=group_topk
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+操作提示：
+  1. 最近多轮训练耗时明显上升。做决策时必须同时关注效果和运行代价，不要只看最终 FVU。每轮都要检查 tokens_per_sec、总耗时、final_total_tokens，以及性能下降
+  是来自训练更长、吞吐变慢，还是某个 recipe（如 hadamard）本身更贵。若新 recipe 只带来很小 FVU 改善但显著拖慢训练，应明确把它视为负面信号，并优先验证是否值得继续。
+
+历史研究关键结论：
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`total_cost = selection_cost + deployment_cost`
+
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
+
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
+
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
+
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
+
+降低 total_cost 的已知方向：
+
+降低 encoder 成本：
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
+
+---
+
+当前开放假设：
+  - 如果 `factorized_topk@K96,FACTORIZED_HIDDEN_DIM=96` 在显著低于当前左端 0.28x 成本的同时，把 FVU 压到接近或优于 `topk@K32` ...
+  - 如果该点质量明显差于 `topk@K32` 且没有明显运行优势，则关闭 `factorized_topk` 的低 hidden-dim 低 K 主线，不再把它作为 `<0.5x` 区域优先方向。
+  - 如果该点质量尚可但时长或吞吐异常恶化，则把问题归因为实现/运行时负担，而不是简单归因为结构优劣，并停止继续在这条线加密。
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"64"}],"expected_win":"lower_cost","experiment_tier":"full","family_name":"factorized_topk","family_stage":"frontier_mapping","hypothesis":"候选 family: factorized_topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；低秩 factorized scorer 只改变单样本在线侧的打分与选择链路，不改变 decoder 端的单库查表 + 加权求和 + 选择性补偿导出形式，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容。相对 reference_round=r246 只改一个 env 参数 `K=64`，保持 `ARCHITECTURE=factorized_topk`、`EXPANSION_FACTOR=1`、`FACTORIZED_HIDDEN_DIM=96`、`OPTIMIZER=signum`、`LR=0.003` 及其余配置不变，测试在已确认可形成 0.14x 左端点之后，进一步把部署查表成本压低到更左侧时，FVU 是否仍基本维持在同一量级，从而补出更完整的超低成本 Pareto 左边界。","needs_sanity":false,"next_hypotheses":["如果 `factorized_topk@K64,FACTORIZED_HIDDEN_DIM=96` 只带来有限 FVU 退化，同时保持接近 r246 的吞吐与时长，则下一轮继续相对本轮单变量下探 `K=32`，确认这条超低成本支线的最左可用边界。","如果 `K=64` 相比 r246 的 FVU 明显恶化，说明这条 factorized 低 hidden-dim 线虽然能给出极左成本点，但质量已开始快速坍塌；后续应停止继续左移，转回更高质量的低成本 family。","如果 `K=64` 的训练时长或 tokens_per_sec 异常变差，则把问题归因为实现/运行时负担，而不是简单归因为 `K` 轴本身，并停止继续在这条线上加密。"],"notes_to_memory":["r246 已确认 `factorized_topk@K96,FACTORIZED_HIDDEN_DIM=96` 能以约 0.14x total_cost 补出新的最左 Pareto 点；这说明低 hidden-dim factorized scorer 线虽质量弱，但在成本维度上确实提供了新增信息。","r230 与 r246 的 FVU 差异很小（`K=256 -> 96` 仅轻微变差），初步信号表明该 family 在当前 hidden-dim 下可能已接近 K 不敏感区；继续下探 `K=64` 是判断其左边界形状的最小动作。","本轮必须同时比较 `val_fvu`、`tokens_per_sec`、`duration_sec`、`final_total_tokens`；若只是更便宜但系统代价明显恶化，应直接视为负面信号。"],"reference_round":246,"self_review":"这轮严格遵守单变量原则：相对 r246 只改 `K`，不联动 architecture、EF、optimizer、LR 或 `FACTORIZED_HIDDEN_DIM`。选择继续沿 r246 的新左端 frontier 点下探，而不是立刻切回别的 family，是因为当前最有信息量的问题已经变成“这条真正低秩 scorer 线的左边界在哪里”；连续多轮在 0.34x 槽位做 family 对照的边际收益已经明显下降。","summary":"严格锚定 r246，仅把 `factorized_topk` 的 `K` 从 96 降到 64，优先绘制新出现的超低成本左侧 frontier，确认这条低 hidden-dim factorized scorer 支线能否在进一步降部署成本后仍保持近似质量。","touched_files":[]}
+tokens used
+445,998

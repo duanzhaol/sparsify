@@ -1,0 +1,492 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"JUMPRELU_INIT_THRESHOLD","value":"0.02"}],"expected_win":"better_fvu_within_low_cost_region","experiment_tier":"full","family_name":"jumprelu","family_stage":"stabilize","hypothesis":"候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只改变单样本在线侧的阈值化支持形成与系数计算，不改变 decoder 端的单库有限加权和，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路，兼容性判断为直接兼容。相对 r226 只改一个 env 参数 `JUMPRELU_INIT_THRESHOLD=0.02`，保持 `JUMPRELU_BANDWIDTH=0.05`、`EF=1`、`K=248`、`signum`、`LR=0.003` 不变，测试在已经证实优于同成本 topk 的尖锐门控基础上，给一个轻微正阈值初始化能否进一步抑制小幅噪声激活、改善高 K 单库支持塑形，从而把当前 0.49x 成本点的 FVU 从 0.14590 继续压低。该改动不改变 encoder/deployment 成本估计，total_cost 仍约为 0.49x，满足 LUTurbo 的总成本硬约束。","needs_sanity":false,"next_hypotheses":["如果 `JUMPRELU_INIT_THRESHOLD=0.02` 继续降低 FVU，且 tokens_per_sec 与总时长保持接近 r226，则可再相对本轮单变量上探到更积极的 `0.05`，继续逼近该同成本点的最佳阈值。","如果 FVU 基本持平但系统代价仍显著优于同成本 topk，则将 `jumprelu@EF1,K248,bandwidth=0.05` 视为当前 `<0.5x` 区域更优默认锚点，并停止在 plain single-library selector 上做过密 recipe 清洗。","如果正阈值初始化导致 FVU 或稳定性恶化，则回退结论为当前改进主要来自更小 bandwidth 而非显式正阈值，关闭 `JUMPRELU_INIT_THRESHOLD` 这条线并转向新的低成本 family。"],"notes_to_memory":["r226 已经在与 topk 相同约 0.49x 成本下拿到更低 FVU=0.14590，同时训练代价明显更优：166.55k tokens/s、483s，对比 r222 topk 的 111.04k tokens/s、730s。","在单变量原则下，clean repeat 不能作为本轮动作；当前最合理的后续是继续在已验证有效的 jumprelu 线上测试另一个不增成本、且与支持塑形直接相关的参数。","`JUMPRELU_INIT_THRESHOLD` 已在 config-resolution/runner 链路中注册，无需改代码；本轮重点仍应同时检查 FVU、tokens_per_sec、duration_sec、final_total_tokens，避免为了极小质量收益接受明显更差的系统代价。"],"reference_round":226,"self_review":"这轮严格遵守单变量原则：相对 r226 只改 `JUMPRELU_INIT_THRESHOLD`，不联动 architecture、K、EF、LR、bandwidth 或其他 recipe。选择继续围绕 jumprelu 而不是立刻切换新 family，是因为它刚刚在 `<0.5x` 主战区以同成本拿到比 topk 更好的 FVU，而且系统代价显著更优；在此基础上用一个轻微正阈值初始化检验“噪声抑制是否还能继续改善前沿点”比重开一个高不确定性 family 更符合当前证据。主要风险是阈值过早抬高会削弱有效特征利用，但 0.02 属于温和探针，归因清晰。","summary":"相对 r226 的 `jumprelu@EF1,K248,JUMPRELU_BANDWIDTH=0.05` 做一次严格 param_only 阈值初始化探针，仅设置 `JUMPRELU_INIT_THRESHOLD=0.02`。目标是在不增加约 0.49x 总成本的前提下，继续压低当前 `<0.5x` 区域最佳 FVU，并验证正阈值初始化是否是这条直接兼容单库路线的下一个有效杠杆。","touched_files":[]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d33e1-a9b9-7692-a30b-fe088a24439a
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 227。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 应显式给出 reference_round。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 227 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1462，明显落后于当前最佳可行点 FVU=0.0647，需要定向补低开销前沿。
+当前参考 family：lowrank_soft_codebook_residual
+当前参考配方：ARCHITECTURE=lowrank_soft_codebook_residual K=128 EXPANSION_FACTOR=2 OPTIMIZER=signum LR=0.003
+当前参考完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_soft_codebook_residual
+  EXPANSION_FACTOR=2
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。
+4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。
+5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。
+6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=226, consecutive_crashes=0, consecutive_no_improve=6, rounds_since_new_family=6
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.31x (sel=0.25x + deploy=0.06x)  fvu=0.25825566053390503  arch=topk  K=64 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.38x (sel=0.25x + deploy=0.12x)  fvu=0.19679804146289825  arch=topk  K=128 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.44x (sel=0.25x + deploy=0.19x)  fvu=0.16352370381355286  arch=topk  K=192 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.47x (sel=0.25x + deploy=0.22x)  fvu=0.15281182527542114  arch=topk  K=224 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.48x (sel=0.25x + deploy=0.23x)  fvu=0.14833292365074158  arch=topk  K=240 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.49x (sel=0.25x + deploy=0.24x)  fvu=0.14621132612228394  arch=topk  K=248 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.69x (sel=0.38x + deploy=0.31x)  fvu=0.12559494376182556  arch=lowrank_factorized_residual  K=64 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.88x (sel=0.5x + deploy=0.38x)  fvu=0.10676437616348267  arch=lowrank_factorized_residual  K=128 EF=2  lr=0.003 opt=signum [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=248, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.25x | 部署: 0.24x | FVU: 0.14621132612228394
+  最优可行点 → lowrank_soft_codebook_residual (K=128, EF=2) [FEASIBLE]:
+    总成本: 1.38x | 预算比率: 0.92x | encoder: 0.75x | 部署: 0.62x | FVU: 0.06465830653905869
+  全局最低 FVU → lowrank_two_stage_soft_codebook_residual (K=128, EF=12) [OVER BUDGET]:
+    总成本: 6.88x | 预算比率: 4.58x | encoder: 6.25x | 部署: 0.62x | FVU: 0.04925498366355896
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r223 topk param_only -> archive fvu=0.14645832777023315 478s | 候选 family: topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；在线侧只做单样本 top-k...
+  r224 lowrank_factorized_residual param_only -> discard fvu=0.167219877243042 371s | 候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r β_r u_r + Σ_i α_i ...
+  r225 jumprelu param_only -> archive fvu=0.14736151695251465 519s | 候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只...
+  r226 jumprelu param_only -> archive fvu=0.14590254426002502 483s | 候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只...
+
+最近可用 reference_round 的完整配置：
+  r226 jumprelu (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=jumprelu
+  EXPANSION_FACTOR=1
+  K=248
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.0
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  JUMPRELU_BANDWIDTH=0.05
+
+  r223 topk (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=248
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=3.6e-3
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.0
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r210 lowrank_factorized_residual (decision=keep, source=checkpoint_config)
+  ARCHITECTURE=lowrank_factorized_residual
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r219 factorized_topk (decision=discard, source=checkpoint_config)
+  ARCHITECTURE=factorized_topk
+  EXPANSION_FACTOR=1
+  K=256
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+操作提示：
+  1. 最近多轮训练耗时明显上升。做决策时必须同时关注效果和运行代价，不要只看最终 FVU。每轮都要检查 tokens_per_sec、总耗时、final_total_tokens，以及性能下降
+  是来自训练更长、吞吐变慢，还是某个 recipe（如 hadamard）本身更贵。若新 recipe 只带来很小 FVU 改善但显著拖慢训练，应明确把它视为负面信号，并优先验证是否值得继续。
+
+历史研究关键结论：
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`total_cost = selection_cost + deployment_cost`
+
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
+
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
+
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
+
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
+
+降低 total_cost 的已知方向：
+
+降低 encoder 成本：
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
+
+---
+
+当前开放假设：
+  - 如果 `JUMPRELU_BANDWIDTH=0.05` 在保持接近 r225 吞吐与总时长的同时把 FVU 压到 0.1462 以下，则对该配方做一次 clean repeat，确认 jump...
+  - 如果 FVU 基本持平但运行代价仍优于 topk，则保留 jumprelu 作为同成本更优系统候选，并只再做一次 `JUMPRELU_INIT_THRESHOLD` 的单变量微调。
+  - 如果更小带宽导致 FVU 或稳定性明显恶化，则关闭 jumprelu 的带宽调参线，转去新的低成本 family，而不是继续在 plain-selector thresholding 上消耗轮次。
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+  → Inspect latest round 226 runtime/quality details and nearby candidate families
+  • Choose one single-variable low-cost hypothesis for round 227
+  • Return action JSON only
+codex
+查看 r226 的训练代价与曲线信号，再对比当前低开销候选，目标是选一个仍满足单变量原则的 round 227 动作。
+exec
+/bin/bash -lc "sed -n '1,240p' research/history/round_summaries/round_0226.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 226,
+  "timestamp": 1774692332,
+  "started_at": 1774691849,
+  "ended_at": 1774692332,
+  "duration_sec": 483,
+  "family_name": "jumprelu",
+  "family_stage": "stabilize",
+  "session_id": "019d33e1-a9b9-7692-a30b-fe088a24439a",
+  "timeline_event_ids": [
+    "evt_1774691849103969027",
+    "evt_1774692148072661229",
+    "evt_1774692332390498665"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: jumprelu\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i \u03b1_i b_i\uff0c\u5176\u4e2d {b_i} \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1bJumpReLU \u53ea\u6539\u53d8\u5355\u6837\u672c\u5728\u7ebf\u4fa7\u7684\u9608\u503c\u5316\u652f\u6301\u5f62\u6210\u4e0e\u7cfb\u6570\u8ba1\u7b97\uff0c\u4e0d\u6539\u53d8 decoder \u7aef\u7684\u5355\u5e93\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u76f8\u5bf9 r225 \u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `JUMPRELU_BANDWIDTH`\uff0c\u628a\u5e26\u5bbd\u4ece\u9ed8\u8ba4 0.1 \u6536\u7d27\u5230 0.05\uff0c\u6d4b\u8bd5\u66f4\u63a5\u8fd1\u786c\u9608\u503c\u7684\u95e8\u63a7\u662f\u5426\u80fd\u5728\u4e0d\u589e\u52a0 total_cost \u7684\u524d\u63d0\u4e0b\uff0c\u538b\u6389\u5f53\u524d\u9ad8 K\u3001\u4f4e EF \u5355\u5e93 regime \u91cc\u7684\u5f31\u5c0f\u566a\u58f0\u6fc0\u6d3b\uff0c\u4ece\u800c\u628a r225 \u7684 FVU=0.14736 \u7ee7\u7eed\u538b\u5230\u5f53\u524d <0.5x \u6700\u4f18 topk \u70b9 0.14621 \u4ee5\u4e0b\u3002\u8fd9\u4e2a\u65b9\u5411\u4e4b\u6240\u4ee5\u4f18\u5148\u4e8e\u7ee7\u7eed\u5f00\u65b0 family\uff0c\u662f\u56e0\u4e3a r225 \u5df2\u7ecf\u8bc1\u660e jumprelu \u5728\u540c\u6210\u672c\u4e0b\u51e0\u4e4e\u8ffd\u5e73 topk\uff0c\u540c\u65f6\u8bad\u7ec3\u4fa7\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\uff08166.6k tokens/s\u3001519s\uff0c\u5bf9\u6bd4 r222 topk \u7684 111.0k tokens/s\u3001730s\uff09\uff1b\u5f53\u524d\u6700\u503c\u5f97\u56de\u7b54\u7684\u5355\u4e00\u95ee\u9898\uff0c\u662f\u66f4\u5c16\u9510\u7684 threshold gate \u80fd\u5426\u628a\u8fd9\u6761\u540c\u6210\u672c\u76f4\u517c\u5bb9\u652f\u7ebf\u771f\u6b63\u63a8\u4e0a\u4f4e\u5f00\u9500 Pareto \u524d\u6cbf\u3002",
+    "summary": "\u57fa\u4e8e r225 \u7684\u540c\u6210\u672c jumprelu \u70b9\uff0c\u505a\u4e00\u6b21\u4e25\u683c param_only \u8ddf\u8fdb\uff1a\u4ec5\u8bbe\u7f6e `JUMPRELU_BANDWIDTH=0.05`\u3002\u76ee\u6807\u662f\u5728\u4fdd\u6301 `<0.5x` \u603b\u6210\u672c\u4e0e\u5f53\u524d\u8f83\u597d\u8bad\u7ec3\u541e\u5410\u7684\u524d\u63d0\u4e0b\uff0c\u628a jumprelu \u4ece 0.14736 \u63a8\u5230\u4f4e\u4e8e topk@0.14621\uff0c\u5224\u65ad\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u5355\u5e93\u9608\u503c\u5316\u8def\u7ebf\u80fd\u5426\u6210\u4e3a\u65b0\u7684\u4f4e\u5f00\u9500\u524d\u6cbf\u70b9\u3002",
+    "change_type": "param_only",
+    "expected_win": "lower_fvu",
+    "family_name": "jumprelu",
+    "family_stage": "stabilize",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r225 \u53ea\u6539 `JUMPRELU_BANDWIDTH`\uff0c\u4e0d\u8054\u52a8 architecture\u3001K\u3001EF\u3001LR \u6216\u5176\u4ed6 recipe\u3002\u9009\u62e9\u7ee7\u7eed\u8ddf\u8fdb jumprelu\uff0c\u800c\u4e0d\u662f\u56de\u5230 topk \u6216\u7ee7\u7eed\u8ffd lowrank_factorized_residual\uff0c\u662f\u56e0\u4e3a\u524d\u8005\u5df2\u7ecf\u7ed9\u51fa\u4e86\u6700\u63a5\u8fd1\u5f53\u524d `<0.5x` \u524d\u6cbf\u4e14\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\u7684\u540c\u6210\u672c\u8bc1\u636e\uff1b\u7ee7\u7eed\u5728\u5b83\u4e0a\u9762\u505a\u4e00\u4e2a\u771f\u6b63\u7ed3\u6784\u76f8\u5173\u4f46\u4e0d\u589e\u6210\u672c\u7684 knob\uff0c\u6bd4\u518d\u6b21\u5f00\u542f\u4e00\u4e2a\u5927\u6982\u7387\u66f4\u5f31\u7684\u65b0 family \u66f4\u7b26\u5408\u672c\u8f6e\u201c\u4f4e\u5f00\u9500\u533a\u4f18\u5148\u538b FVU\u201d\u7684\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f\u66f4\u5c0f bandwidth \u8ba9\u68af\u5ea6\u8fc7\u786c\u3001\u8bad\u7ec3\u540e\u6bb5\u53d8\u8106\uff1b\u4f46 0.05 \u5c5e\u4e8e\u6e29\u548c\u6536\u7d27\uff0c\u4e0d\u662f\u6fc0\u8fdb\u786c\u5316\uff0c\u98ce\u9669\u53ef\u63a5\u53d7\u4e14\u5f52\u56e0\u6e05\u6670\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "JUMPRELU_BANDWIDTH",
+        "value": "0.05"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "r225 \u5df2\u7ecf\u7ed9\u51fa\u4e00\u4e2a\u540c\u6210\u672c\u3001\u76f4\u63a5\u517c\u5bb9\u3001\u51e0\u4e4e\u8ffd\u5e73 topk \u7684 jumprelu \u70b9\uff1aFVU \u4ec5\u6bd4 topk@0.49x \u5dee\u7ea6 0.00115\uff0c\u4f46\u8bad\u7ec3\u4fa7 tokens_per_sec \u548c duration \u660e\u663e\u66f4\u4f18\u3002",
+      "\u5f53\u524d round 226 \u7684\u6700\u9ad8\u4ef7\u503c\u95ee\u9898\u4e0d\u662f\u518d\u628a\u6210\u672c\u538b\u5f97\u66f4\u4f4e\uff0c\u800c\u662f\u5728 `<0.5x` \u5df2\u6709\u540c\u6210\u672c\u5019\u9009\u91cc\uff0c\u5224\u65ad\u66f4\u5c16\u9510\u7684 threshold gate \u80fd\u5426\u628a jumprelu \u771f\u6b63\u63a8\u8fdb Pareto \u524d\u6cbf\u3002",
+      "`JUMPRELU_BANDWIDTH` \u5df2\u5728 override/config-resolution/runner \u94fe\u8def\u4e2d\u6ce8\u518c\uff0c\u65e0\u9700\u6539\u4ee3\u7801\uff1b\u672c\u8f6e\u5e94\u76f4\u63a5\u6309 param_only \u6267\u884c\u5e76\u91cd\u70b9\u6838\u5bf9 FVU\u3001tokens_per_sec\u3001duration_sec\u3001final_total_tokens \u7684\u8054\u52a8\u53d8\u5316\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c `JUMPRELU_BANDWIDTH=0.05` \u5728\u4fdd\u6301\u63a5\u8fd1 r225 \u541e\u5410\u4e0e\u603b\u65f6\u957f\u7684\u540c\u65f6\u628a FVU \u538b\u5230 0.1462 \u4ee5\u4e0b\uff0c\u5219\u5bf9\u8be5\u914d\u65b9\u505a\u4e00\u6b21 clean repeat\uff0c\u786e\u8ba4 jumprelu \u662f\u5426\u80fd\u53d6\u4ee3\u5f53\u524d `<0.5x` \u7684 topk \u951a\u70b9\u3002",
+      "\u5982\u679c FVU \u57fa\u672c\u6301\u5e73\u4f46\u8fd0\u884c\u4ee3\u4ef7\u4ecd\u4f18\u4e8e topk\uff0c\u5219\u4fdd\u7559 jumprelu \u4f5c\u4e3a\u540c\u6210\u672c\u66f4\u4f18\u7cfb\u7edf\u5019\u9009\uff0c\u5e76\u53ea\u518d\u505a\u4e00\u6b21 `JUMPRELU_INIT_THRESHOLD` \u7684\u5355\u53d8\u91cf\u5fae\u8c03\u3002",
+      "\u5982\u679c\u66f4\u5c0f\u5e26\u5bbd\u5bfc\u81f4 FVU \u6216\u7a33\u5b9a\u6027\u660e\u663e\u6076\u5316\uff0c\u5219\u5173\u95ed jumprelu \u7684\u5e26\u5bbd\u8c03\u53c2\u7ebf\uff0c\u8f6c\u53bb\u65b0\u7684\u4f4e\u6210\u672c family\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728 plain-selector thresholding \u4e0a\u6d88\u8017\u8f6e\u6b21\u3002"
+    ],
+    "reference_round": 225
+  },
+  "result": {
+    "decision": "archive",
+    "status": "ok",
+    "timestamp": "1774692332",
+    "val_fvu": "0.14590254426002502",
+    "observed_fvu": "0.145903",
+    "k": "248",
+    "architecture": "jumprelu",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "166554.564775",
+    "baseline_ratio": "0.999997",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0226/round0226_standard_1774692148_dp2_bs1_ga8_ef1_k248_20260328_180234",
+    "experiment_id": "r226_1774692332",
+    "head_commit": "c0778c0a2f12b6fb2ff22af27840b044ada21060",
+    "description": "\u57fa\u4e8e r225 \u7684\u540c\u6210\u672c jumprelu \u70b9\uff0c\u505a\u4e00\u6b21\u4e25\u683c param_only \u8ddf\u8fdb\uff1a\u4ec5\u8bbe\u7f6e `JUMPRELU_BANDWIDTH=0.05`\u3002\u76ee\u6807\u662f\u5728\u4fdd\u6301 `<0.5x` \u603b\u6210\u672c\u4e0e\u5f53\u524d\u8f83\u597d\u8bad\u7ec3\u541e\u5410\u7684\u524d\u63d0\u4e0b\uff0c\u628a jumprelu \u4ece 0.14736 \u63a8\u5230\u4f4e\u4e8e topk@0.14621\uff0c\u5224\u65ad\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u5355\u5e93\u9608\u503c\u5316\u8def\u7ebf\u80fd\u5426\u6210\u4e3a\u65b0\u7684\u4f4e\u5f00\u9500\u524d\u6cbf\u70b9\u3002",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r225 \u53ea\u6539 `JUMPRELU_BANDWIDTH`\uff0c\u4e0d\u8054\u52a8 architecture\u3001K\u3001EF\u3001LR \u6216\u5176\u4ed6 recipe\u3002\u9009\u62e9\u7ee7\u7eed\u8ddf\u8fdb jumprelu\uff0c\u800c\u4e0d\u662f\u56de\u5230 topk \u6216\u7ee7\u7eed\u8ffd lowrank_factorized_residual\uff0c\u662f\u56e0\u4e3a\u524d\u8005\u5df2\u7ecf\u7ed9\u51fa\u4e86\u6700\u63a5\u8fd1\u5f53\u524d `<0.5x` \u524d\u6cbf\u4e14\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\u7684\u540c\u6210\u672c\u8bc1\u636e\uff1b\u7ee7\u7eed\u5728\u5b83\u4e0a\u9762\u505a\u4e00\u4e2a\u771f\u6b63\u7ed3\u6784\u76f8\u5173\u4f46\u4e0d\u589e\u6210\u672c\u7684 knob\uff0c\u6bd4\u518d\u6b21\u5f00\u542f\u4e00\u4e2a\u5927\u6982\u7387\u66f4\u5f31\u7684\u65b0 family \u66f4\u7b26\u5408\u672c\u8f6e\u201c\u4f4e\u5f00\u9500\u533a\u4f18\u5148\u538b FVU\u201d\u7684\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f\u66f4\u5c0f bandwidth \u8ba9\u68af\u5ea6\u8fc7\u786c\u3001\u8bad\u7ec3\u540e\u6bb5\u53d8\u8106\uff1b\u4f46 0.05 \u5c5e\u4e8e\u6e29\u548c\u6536\u7d27\uff0c\u4e0d\u662f\u6fc0\u8fdb\u786c\u5316\uff0c\u98ce\u9669\u53ef\u63a5\u53d7\u4e14\u5f52\u56e0\u6e05\u6670\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0226_standard_1774692148.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0226/round0226_standard_1774692148_dp2_bs1_ga8_ef1_k248_20260328_180234/metrics.jsonl",
+    "curve_start_fvu": "0.223858",
+    "curve_mid_fvu": "0.162726",
+    "curve_end_fvu": "0.145903",
+    "curve_late_slope": "-0.000000",
+    "curve_still_improving": "true",
+    "initial_target_tokens": "50000000",
+    "final_target_tokens": "60000000",
+    "final_total_tokens": "59969536",
+    "resume_stage_count": "2",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "248",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.0",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "248",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.0",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "JUMPRELU_BANDWIDTH": "0.05"
+  },
+  "changed_keys": [
+    "JUMPRELU_BANDWIDTH"
+  ],
+  "reference_source": "reference_round:r225",
+  "runtime_config_json": {
+    "architecture": "jumprelu",
+    "expansion_factor": 1,
+    "k": 248,
+    "optimizer": "signum",
+    "lr": "0.003",
+    "hookpoints": "layers.[3].self_attn.o_proj",
+    "batch_size": 1,
+    "grad_acc_steps": 8,
+    "micro_acc_steps": 1,
+    "auxk_alpha": 0.0,
+    "dead_feature_threshold": 10000000,
+    "use_hadamard": false,
+    "family_name": "jumprelu",
+    "family_stage": "stabilize",
+    "jumprelu_bandwidth": 0.05
+  },
+  "runtime_env_config": {
+    "ARCHITECTURE": "jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "248",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.0",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "JUMPRELU_BANDWIDTH": "0.05"
+  },
+  "touched_files": [],
+  "patch_path": null
+}
+
+exec
+/bin/bash -lc "python - <<'PY'
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+cases = [
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.05,'jumprelu_init_threshold':0.0}),
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.05,'jumprelu_init_threshold':0.02}),
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.05,'jumprelu_init_threshold':0.05}),
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.05,'jumprelu_init_threshold':0.1}),
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.02,'jumprelu_init_threshold':0.0}),
+ ('jumprelu',1,248,{'jumprelu_bandwidth':0.08,'jumprelu_init_threshold':0.0}),
+ ('topk',1,248,{}),
+]
+for arch,ef,k,extra in cases:
+    cfg = SparseCoderConfig(architecture=arch, expansion_factor=ef, k=k, **extra)
+    m = _get_sae_class(arch)(768, cfg, device='cpu', decoder=False)
+    c = m.selection_cost_estimate()
+    print(arch, extra, c['ratio'], c['deployment_ratio'], c['combined_ratio'])
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "rg -n 'JUMPRELU_INIT_THRESHOLD|JUMPRELU_BANDWIDTH|ARCHITECTURE.*jumprelu' research/history/logs research/history/round_summaries -g '*.json'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0060.json:20:    "summary": "Run one matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`, and the same runtime knobs, and change only `ARCHITECTURE` from `gated` to `jumprelu`. Judge this probe by the whole trajectory, not just the endpoint: if `jumprelu` stays smooth and remains reasonably close to the `0.142923` `gated` anchor, it is worth keeping in reserve because its thresholded support path may reduce LUTurbo online selection overhead versus a full gating branch; if it is clearly worse across the curve, archive it as a non-promising matched alternative and return to the `gated` mainline next round.",
+research/history/round_summaries/round_0060.json:105:    "description": "Run one matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`, and the same runtime knobs, and change only `ARCHITECTURE` from `gated` to `jumprelu`. Judge this probe by the whole trajectory, not just the endpoint: if `jumprelu` stays smooth and remains reasonably close to the `0.142923` `gated` anchor, it is worth keeping in reserve because its thresholded support path may reduce LUTurbo online selection overhead versus a full gating branch; if it is clearly worse across the curve, archive it as a non-promising matched alternative and return to the `gated` mainline next round.",
+research/history/round_summaries/round_0226.json:19:    "hypothesis": "\u5019\u9009 family: jumprelu\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i \u03b1_i b_i\uff0c\u5176\u4e2d {b_i} \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1bJumpReLU \u53ea\u6539\u53d8\u5355\u6837\u672c\u5728\u7ebf\u4fa7\u7684\u9608\u503c\u5316\u652f\u6301\u5f62\u6210\u4e0e\u7cfb\u6570\u8ba1\u7b97\uff0c\u4e0d\u6539\u53d8 decoder \u7aef\u7684\u5355\u5e93\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u76f8\u5bf9 r225 \u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `JUMPRELU_BANDWIDTH`\uff0c\u628a\u5e26\u5bbd\u4ece\u9ed8\u8ba4 0.1 \u6536\u7d27\u5230 0.05\uff0c\u6d4b\u8bd5\u66f4\u63a5\u8fd1\u786c\u9608\u503c\u7684\u95e8\u63a7\u662f\u5426\u80fd\u5728\u4e0d\u589e\u52a0 total_cost \u7684\u524d\u63d0\u4e0b\uff0c\u538b\u6389\u5f53\u524d\u9ad8 K\u3001\u4f4e EF \u5355\u5e93 regime \u91cc\u7684\u5f31\u5c0f\u566a\u58f0\u6fc0\u6d3b\uff0c\u4ece\u800c\u628a r225 \u7684 FVU=0.14736 \u7ee7\u7eed\u538b\u5230\u5f53\u524d <0.5x \u6700\u4f18 topk \u70b9 0.14621 \u4ee5\u4e0b\u3002\u8fd9\u4e2a\u65b9\u5411\u4e4b\u6240\u4ee5\u4f18\u5148\u4e8e\u7ee7\u7eed\u5f00\u65b0 family\uff0c\u662f\u56e0\u4e3a r225 \u5df2\u7ecf\u8bc1\u660e jumprelu \u5728\u540c\u6210\u672c\u4e0b\u51e0\u4e4e\u8ffd\u5e73 topk\uff0c\u540c\u65f6\u8bad\u7ec3\u4fa7\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\uff08166.6k tokens/s\u3001519s\uff0c\u5bf9\u6bd4 r222 topk \u7684 111.0k tokens/s\u3001730s\uff09\uff1b\u5f53\u524d\u6700\u503c\u5f97\u56de\u7b54\u7684\u5355\u4e00\u95ee\u9898\uff0c\u662f\u66f4\u5c16\u9510\u7684 threshold gate \u80fd\u5426\u628a\u8fd9\u6761\u540c\u6210\u672c\u76f4\u517c\u5bb9\u652f\u7ebf\u771f\u6b63\u63a8\u4e0a\u4f4e\u5f00\u9500 Pareto \u524d\u6cbf\u3002",
+research/history/round_summaries/round_0226.json:20:    "summary": "\u57fa\u4e8e r225 \u7684\u540c\u6210\u672c jumprelu \u70b9\uff0c\u505a\u4e00\u6b21\u4e25\u683c param_only \u8ddf\u8fdb\uff1a\u4ec5\u8bbe\u7f6e `JUMPRELU_BANDWIDTH=0.05`\u3002\u76ee\u6807\u662f\u5728\u4fdd\u6301 `<0.5x` \u603b\u6210\u672c\u4e0e\u5f53\u524d\u8f83\u597d\u8bad\u7ec3\u541e\u5410\u7684\u524d\u63d0\u4e0b\uff0c\u628a jumprelu \u4ece 0.14736 \u63a8\u5230\u4f4e\u4e8e topk@0.14621\uff0c\u5224\u65ad\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u5355\u5e93\u9608\u503c\u5316\u8def\u7ebf\u80fd\u5426\u6210\u4e3a\u65b0\u7684\u4f4e\u5f00\u9500\u524d\u6cbf\u70b9\u3002",
+research/history/round_summaries/round_0226.json:25:    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r225 \u53ea\u6539 `JUMPRELU_BANDWIDTH`\uff0c\u4e0d\u8054\u52a8 architecture\u3001K\u3001EF\u3001LR \u6216\u5176\u4ed6 recipe\u3002\u9009\u62e9\u7ee7\u7eed\u8ddf\u8fdb jumprelu\uff0c\u800c\u4e0d\u662f\u56de\u5230 topk \u6216\u7ee7\u7eed\u8ffd lowrank_factorized_residual\uff0c\u662f\u56e0\u4e3a\u524d\u8005\u5df2\u7ecf\u7ed9\u51fa\u4e86\u6700\u63a5\u8fd1\u5f53\u524d `<0.5x` \u524d\u6cbf\u4e14\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\u7684\u540c\u6210\u672c\u8bc1\u636e\uff1b\u7ee7\u7eed\u5728\u5b83\u4e0a\u9762\u505a\u4e00\u4e2a\u771f\u6b63\u7ed3\u6784\u76f8\u5173\u4f46\u4e0d\u589e\u6210\u672c\u7684 knob\uff0c\u6bd4\u518d\u6b21\u5f00\u542f\u4e00\u4e2a\u5927\u6982\u7387\u66f4\u5f31\u7684\u65b0 family \u66f4\u7b26\u5408\u672c\u8f6e\u201c\u4f4e\u5f00\u9500\u533a\u4f18\u5148\u538b FVU\u201d\u7684\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f\u66f4\u5c0f bandwidth \u8ba9\u68af\u5ea6\u8fc7\u786c\u3001\u8bad\u7ec3\u540e\u6bb5\u53d8\u8106\uff1b\u4f46 0.05 \u5c5e\u4e8e\u6e29\u548c\u6536\u7d27\uff0c\u4e0d\u662f\u6fc0\u8fdb\u786c\u5316\uff0c\u98ce\u9669\u53ef\u63a5\u53d7\u4e14\u5f52\u56e0\u6e05\u6670\u3002",
+research/history/round_summaries/round_0226.json:29:        "key": "JUMPRELU_BANDWIDTH",
+research/history/round_summaries/round_0226.json:37:      "`JUMPRELU_BANDWIDTH` \u5df2\u5728 override/config-resolution/runner \u94fe\u8def\u4e2d\u6ce8\u518c\uff0c\u65e0\u9700\u6539\u4ee3\u7801\uff1b\u672c\u8f6e\u5e94\u76f4\u63a5\u6309 param_only \u6267\u884c\u5e76\u91cd\u70b9\u6838\u5bf9 FVU\u3001tokens_per_sec\u3001duration_sec\u3001final_total_tokens \u7684\u8054\u52a8\u53d8\u5316\u3002"
+research/history/round_summaries/round_0226.json:40:      "\u5982\u679c `JUMPRELU_BANDWIDTH=0.05` \u5728\u4fdd\u6301\u63a5\u8fd1 r225 \u541e\u5410\u4e0e\u603b\u65f6\u957f\u7684\u540c\u65f6\u628a FVU \u538b\u5230 0.1462 \u4ee5\u4e0b\uff0c\u5219\u5bf9\u8be5\u914d\u65b9\u505a\u4e00\u6b21 clean repeat\uff0c\u786e\u8ba4 jumprelu \u662f\u5426\u80fd\u53d6\u4ee3\u5f53\u524d `<0.5x` \u7684 topk \u951a\u70b9\u3002",
+research/history/round_summaries/round_0226.json:41:      "\u5982\u679c FVU \u57fa\u672c\u6301\u5e73\u4f46\u8fd0\u884c\u4ee3\u4ef7\u4ecd\u4f18\u4e8e topk\uff0c\u5219\u4fdd\u7559 jumprelu \u4f5c\u4e3a\u540c\u6210\u672c\u66f4\u4f18\u7cfb\u7edf\u5019\u9009\uff0c\u5e76\u53ea\u518d\u505a\u4e00\u6b21 `JUMPRELU_INIT_THRESHOLD` \u7684\u5355\u53d8\u91cf\u5fae\u8c03\u3002",
+research/history/round_summaries/round_0226.json:62:    "description": "\u57fa\u4e8e r225 \u7684\u540c\u6210\u672c jumprelu \u70b9\uff0c\u505a\u4e00\u6b21\u4e25\u683c param_only \u8ddf\u8fdb\uff1a\u4ec5\u8bbe\u7f6e `JUMPRELU_BANDWIDTH=0.05`\u3002\u76ee\u6807\u662f\u5728\u4fdd\u6301 `<0.5x` \u603b\u6210\u672c\u4e0e\u5f53\u524d\u8f83\u597d\u8bad\u7ec3\u541e\u5410\u7684\u524d\u63d0\u4e0b\uff0c\u628a jumprelu \u4ece 0.14736 \u63a8\u5230\u4f4e\u4e8e topk@0.14621\uff0c\u5224\u65ad\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u5355\u5e93\u9608\u503c\u5316\u8def\u7ebf\u80fd\u5426\u6210\u4e3a\u65b0\u7684\u4f4e\u5f00\u9500\u524d\u6cbf\u70b9\u3002",
+research/history/round_summaries/round_0226.json:63:    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r225 \u53ea\u6539 `JUMPRELU_BANDWIDTH`\uff0c\u4e0d\u8054\u52a8 architecture\u3001K\u3001EF\u3001LR \u6216\u5176\u4ed6 recipe\u3002\u9009\u62e9\u7ee7\u7eed\u8ddf\u8fdb jumprelu\uff0c\u800c\u4e0d\u662f\u56de\u5230 topk \u6216\u7ee7\u7eed\u8ffd lowrank_factorized_residual\uff0c\u662f\u56e0\u4e3a\u524d\u8005\u5df2\u7ecf\u7ed9\u51fa\u4e86\u6700\u63a5\u8fd1\u5f53\u524d `<0.5x` \u524d\u6cbf\u4e14\u7cfb\u7edf\u4ee3\u4ef7\u66f4\u597d\u7684\u540c\u6210\u672c\u8bc1\u636e\uff1b\u7ee7\u7eed\u5728\u5b83\u4e0a\u9762\u505a\u4e00\u4e2a\u771f\u6b63\u7ed3\u6784\u76f8\u5173\u4f46\u4e0d\u589e\u6210\u672c\u7684 knob\uff0c\u6bd4\u518d\u6b21\u5f00\u542f\u4e00\u4e2a\u5927\u6982\u7387\u66f4\u5f31\u7684\u65b0 family \u66f4\u7b26\u5408\u672c\u8f6e\u201c\u4f4e\u5f00\u9500\u533a\u4f18\u5148\u538b FVU\u201d\u7684\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f\u66f4\u5c0f bandwidth \u8ba9\u68af\u5ea6\u8fc7\u786c\u3001\u8bad\u7ec3\u540e\u6bb5\u53d8\u8106\uff1b\u4f46 0.05 \u5c5e\u4e8e\u6e29\u548c\u6536\u7d27\uff0c\u4e0d\u662f\u6fc0\u8fdb\u786c\u5316\uff0c\u98ce\u9669\u53ef\u63a5\u53d7\u4e14\u5f52\u56e0\u6e05\u6670\u3002",
+research/history/round_summaries/round_0226.json:79:    "ARCHITECTURE": "jumprelu",
+research/history/round_summaries/round_0226.json:94:    "ARCHITECTURE": "jumprelu",
+research/history/round_summaries/round_0226.json:107:    "JUMPRELU_BANDWIDTH": "0.05"
+research/history/round_summaries/round_0226.json:110:    "JUMPRELU_BANDWIDTH"
+research/history/round_summaries/round_0226.json:131:    "ARCHITECTURE": "jumprelu",
+research/history/round_summaries/round_0226.json:144:    "JUMPRELU_BANDWIDTH": "0.05"
+research/history/round_summaries/round_0086.json:20:    "summary": "Run one matched architecture probe by switching `ARCHITECTURE` to `lowrank_jumprelu_residual` while keeping `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, and `EXPANSION_FACTOR=12` fixed.",
+research/history/round_summaries/round_0086.json:75:    "description": "Run one matched architecture probe by switching `ARCHITECTURE` to `lowrank_jumprelu_residual` while keeping `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, and `EXPANSION_FACTOR=12` fixed.",
+research/history/round_summaries/round_0076.json:20:    "summary": "Use the one allowed matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, and the same aux/runtime settings, and change only `ARCHITECTURE` from `two_stage_residual` to `jumprelu`. Judge the run by the whole trajectory, not just the endpoint: if `jumprelu` stays reasonably close with a healthy curve, keep it in reserve because its thresholded single-stage support path may lower LUTurbo online selection cost; if it is clearly worse throughout, close the probe and return to the `two_stage_residual` mainline next round.",
+research/history/round_summaries/round_0076.json:101:    "description": "Use the one allowed matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, and the same aux/runtime settings, and change only `ARCHITECTURE` from `two_stage_residual` to `jumprelu`. Judge the run by the whole trajectory, not just the endpoint: if `jumprelu` stays reasonably close with a healthy curve, keep it in reserve because its thresholded single-stage support path may lower LUTurbo online selection cost; if it is clearly worse throughout, close the probe and return to the `two_stage_residual` mainline next round.",
+research/history/round_summaries/round_0225.json:19:    "hypothesis": "\u5019\u9009 family: jumprelu\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i \u03b1_i b_i\uff0c\u5176\u4e2d {b_i} \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1bJumpReLU \u53ea\u6539\u53d8\u5355\u6837\u672c\u5728\u7ebf\u4fa7\u7684\u9608\u503c\u5316\u652f\u6301\u5f62\u6210\u4e0e\u7cfb\u6570\u8ba1\u7b97\uff0c\u4e0d\u6539\u53d8 decoder \u7aef\u7684\u5355\u5e93\u6709\u9650\u52a0\u6743\u548c\u5f62\u5f0f\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u63a8\u7406\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002r223 \u5df2\u786e\u8ba4 `topk@EF1,K248` \u7684\u5411\u4e0a LR \u5206\u652f\u6ca1\u6709\u6536\u76ca\uff0cr224 \u4e5f\u786e\u8ba4 lowrank_factorized_residual \u7684 scorer \u538b\u7f29\u5728 <0.5x \u76ee\u6807\u533a\u4ecd\u843d\u540e\u4e8e\u540c\u6210\u672c topk\uff1b\u56e0\u6b64\u5f53\u524d\u6700\u6709\u4fe1\u606f\u91cf\u7684\u4e0b\u4e00\u6b65\uff0c\u4e0d\u662f\u7ee7\u7eed\u6e05\u6d17\u5df2\u9971\u548c family \u7684 recipe\uff0c\u800c\u662f\u5728\u4e0d\u589e\u52a0 total_cost \u7684\u524d\u63d0\u4e0b\u6d4b\u8bd5\u65b0\u7684\u540c\u6210\u672c selector \u673a\u5236\u3002\u4e25\u683c\u951a\u5b9a r222\uff0c\u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `ARCHITECTURE=jumprelu`\uff0c\u4fdd\u7559 `EF=1,K=248,signum,LR=3.0e-3,AUXK_ALPHA=0.0` \u4e0d\u53d8\uff0c\u9a8c\u8bc1 learned-threshold \u652f\u6301\u5851\u5f62\u80fd\u5426\u5728\u76f8\u540c `total_cost\u22480.49x` \u4e0b\uff0c\u628a <0.5x \u533a\u57df FVU \u538b\u5230\u5f53\u524d topk \u6700\u4f73 0.1462 \u4ee5\u4e0b\uff0c\u6216\u8005\u81f3\u5c11\u7ed9\u51fa\u6bd4 topk \u66f4\u6709\u5e0c\u671b\u7684\u66f2\u7ebf\u5f62\u72b6\u800c\u4e0d\u62d6\u6162\u8bad\u7ec3\u3002",
+research/history/round_summaries/round_0225.json:25:    "self_review": "\u8be5\u63d0\u6848\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9\u6709\u6548\u53c2\u8003\u8f6e r222 \u53ea\u6539 `ARCHITECTURE` \u4e00\u4e2a env \u53c2\u6570\uff0cK\u3001EF\u3001optimizer\u3001LR\u3001AUXK_ALPHA \u548c\u6240\u6709\u8fd0\u884c\u65f6\u53c2\u6570\u5168\u90e8\u4fdd\u6301\u4e0d\u53d8\u3002\u9009\u62e9 `jumprelu` \u800c\u4e0d\u662f\u7ee7\u7eed\u56de\u5230 topk/group_topk\uff0c\u662f\u56e0\u4e3a\u5b83\u5728\u5386\u53f2\u4e0a\u867d\u672a\u6210\u4e3a\u4e3b\u7ebf\uff0c\u4f46\u6bd4\u7eaf grouped \u7ade\u4e89\u66f4\u63a5\u8fd1\u201c\u540c\u6210\u672c\u4e0b\u6539\u53d8\u652f\u6301\u5851\u5f62\u201d\u7684\u72ec\u7acb\u95ee\u9898\uff0c\u540c\u65f6\u4e0d\u4f1a\u989d\u5916\u62ac\u9ad8\u90e8\u7f72\u6216\u9009\u62e9\u6210\u672c\u3002",
+research/history/round_summaries/round_0225.json:63:    "self_review": "\u8be5\u63d0\u6848\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9\u6709\u6548\u53c2\u8003\u8f6e r222 \u53ea\u6539 `ARCHITECTURE` \u4e00\u4e2a env \u53c2\u6570\uff0cK\u3001EF\u3001optimizer\u3001LR\u3001AUXK_ALPHA \u548c\u6240\u6709\u8fd0\u884c\u65f6\u53c2\u6570\u5168\u90e8\u4fdd\u6301\u4e0d\u53d8\u3002\u9009\u62e9 `jumprelu` \u800c\u4e0d\u662f\u7ee7\u7eed\u56de\u5230 topk/group_topk\uff0c\u662f\u56e0\u4e3a\u5b83\u5728\u5386\u53f2\u4e0a\u867d\u672a\u6210\u4e3a\u4e3b\u7ebf\uff0c\u4f46\u6bd4\u7eaf grouped \u7ade\u4e89\u66f4\u63a5\u8fd1\u201c\u540c\u6210\u672c\u4e0b\u6539\u53d8\u652f\u6301\u5851\u5f62\u201d\u7684\u72ec\u7acb\u95ee\u9898\uff0c\u540c\u65f6\u4e0d\u4f1a\u989d\u5916\u62ac\u9ad8\u90e8\u7f72\u6216\u9009\u62e9\u6210\u672c\u3002",
+research/history/round_summaries/round_0225.json:94:    "ARCHITECTURE": "jumprelu",
+research/history/round_summaries/round_0225.json:129:    "ARCHITECTURE": "jumprelu",
+research/history/logs/agent_action_0086.json:1:{"command":"run","hypothesis":"After `routed_lowrank_two_stage_residual` and `lowrank_residual_vq` both failed to pressure the `lowrank_two_stage_residual` K128 anchor, the most informative single matched architecture probe is `lowrank_jumprelu_residual`. It preserves the same low-rank static-library export path while collapsing the selector back to a single residual pass with thresholded support selection, which is more promising for LUTurbo's total online cost (`selection + coeffs + lookup + compensation`) than another multi-stage or routed variant. If it is still clearly weaker under the exact matched `K=128, OPTIMIZER=signum, LR=2.0e-3, EXPANSION_FACTOR=12` recipe, then this simpler low-rank single-stage family is not worth continuing in the current regime.","summary":"Run one matched architecture probe by switching `ARCHITECTURE` to `lowrank_jumprelu_residual` while keeping `K=128`, `OPTIMIZER=signum`, `LR=2.0e-3`, and `EXPANSION_FACTOR=12` fixed.","change_type":"param_only","experiment_tier":"full","expected_win":"lower_cost","family_name":"lowrank_jumprelu_residual","family_stage":"prototype","self_review":"This obeys the round rule by changing exactly one primary variable: `architecture`. I kept the current mainline recipe fixed, explicitly pinned `EXPANSION_FACTOR=12`, and chose a candidate that is LUTurbo-compatible and meaningfully simpler online than the current two-stage mainline. Risk: older low-K evidence for this family was weak, so this may just confirm that the simpler single-stage thresholded selector cannot retain enough quality at matched K128.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_jumprelu_residual"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"2.0e-3"},{"key":"EXPANSION_FACTOR","value":"12"}],"touched_files":[],"notes_to_memory":["Round 86 spends the single allowed matched architecture probe on `lowrank_jumprelu_residual` against the exact `lowrank_two_stage_residual` K128/EF12/signum/LR=2.0e-3 anchor.","Judge this run as a family-worthiness test for a simpler low-rank single-stage thresholded selector that may reduce LUTurbo online selection and compensation cost; return to the `lowrank_two_stage_residual` mainline next round regardless of outcome."],"next_hypotheses":["If `lowrank_jumprelu_residual` is clearly weaker than the matched `lowrank_two_stage_residual` anchor, discard it and resume mainline tuning on `lowrank_two_stage_residual` next round.","If `lowrank_jumprelu_residual` is unexpectedly competitive at matched K128, record it as a viable lower-online-complexity branch but still return to the mainline next round per probe policy."],"primary_variable":"architecture"}
+research/history/logs/agent_action_0061.json:1:{"command":"run","hypothesis":"Round 60 showed that matched `jumprelu` is competitive enough to avoid immediate dismissal but still clearly trails the strengthened `gated` anchor (`0.148243` vs `0.142923`), so the next single architecture question should test the closest support-selection near-neighbor rather than another looser variant. `routed` preserves LUTurbo's static-vector finite weighted-sum reconstruction contract while separating support routing from activation magnitude, so this round asks one clean yes/no question: under the exact current mainline recipe (`K=128`, `EF=12`, `signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`), is `routed` competitive enough in full-curve behavior to justify any later follow-up as a deployment-relevant family?","summary":"Run one matched architecture probe on `routed`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`, and the same runtime knobs, and change only `ARCHITECTURE` from `gated` to `routed`. Judge this probe by the whole trajectory, not just the endpoint: if `routed` stays smooth and lands near the `0.142923` `gated` anchor, it is worth keeping in reserve because decoupled routing may offer a better LUTurbo cost/quality tradeoff than full gating; if it is clearly worse across the curve, archive it as a non-promising matched alternative and return to the `gated` mainline next round.","change_type":"param_only","experiment_tier":"full","expected_win":"explore_unknown","family_name":"routed","family_stage":"prototype","self_review":"This obeys the Round 61 matched-probe rule by changing exactly one primary variable, `architecture`, while keeping `K`, `OPTIMIZER`, `LR`, `EXPANSION_FACTOR`, and the settled mainline recipe fixed. `routed` is the highest-value remaining probe because it stays very close to the successful `gated` family while changing only the support-selection mechanism, which is directly relevant to LUTurbo online cost. The main risk is that the matched `gated`-tuned recipe may not be ideal for routed support, but that is acceptable for a family-worthiness screen.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"routed"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"2.0e-3"},{"key":"BATCH_SIZE","value":"1"},{"key":"GRAD_ACC_STEPS","value":"8"},{"key":"MICRO_ACC_STEPS","value":"1"},{"key":"AUXK_ALPHA","value":"0.03125"},{"key":"DEAD_FEATURE_THRESHOLD","value":"10000000"},{"key":"USE_HADAMARD","value":"1"},{"key":"COMPILE_MODEL","value":"1"}],"touched_files":[],"notes_to_memory":["Round 60 showed that matched `jumprelu` is only modestly worse than the strengthened `gated` anchor (`0.148243` vs `0.142923`), so simpler support-shaping variants are still worth probing when mainline progress stalls.","`routed` remains LUTurbo-compatible because the reconstruction is still a finite weighted sum over a static decoder library with fixed `K`; the architectural change is confined to using a separate router for support selection while preserving the same export form.","Round 61 should judge `routed` purely as a family-worthiness probe against the current `gated@128` anchor: if it is clearly worse or unstable, archive it and return to the `gated` mainline next round; if it is competitive, keep exactly one later follow-up slot available."],"next_hypotheses":["If matched `routed` is clearly worse than the strengthened `gated` anchor, return to the `gated` mainline next round and close this probe.","If matched `routed` is roughly competitive with a healthy curve, still return to the `gated` mainline next round, but preserve one later revisit because decoupled routing may better align with LUTurbo online-cost goals.","If matched `routed` unexpectedly beats the current `gated` anchor, return to the `gated` mainline next round per policy but schedule exactly one later follow-up for this family."],"primary_variable":"architecture"}
+research/history/logs/agent_action_0169.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_jumprelu_residual"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"}],"expected_win":"explore_unknown","experiment_tier":"full","family_name":"lowrank_jumprelu_residual","family_stage":"prototype","hypothesis":"Matched architecture probe on `lowrank_jumprelu_residual` with `K=128`, `EXPANSION_FACTOR=2`, `OPTIMIZER=signum`, and `LR=3.0e-3` fixed. Final reconstruction formula is `x_hat = U(Vx) + Σ_i alpha_i b_i`, where `U(Vx)` is a static low-rank trunk library and `{b_i}` is a static residual dictionary; JumpReLU only changes the single-sample support/coef shaping before top-k, not the exported decoder basis. This is `扩展兼容`: LUTurbo/Lottable can export it as one static trunk lookup plus one sparse weighted sum over a fixed residual vector library, with the learned thresholds used only in online selection. At EF=2 its encoder selection cost should stay within the `≤ 1.5×h×n` hard budget and remain below the current two-stage soft-codebook mainline. The single question is whether this thresholded low-rank single-stage selector is intrinsically worth keeping in the current low-EF deployable regime, or whether the mainline’s soft-codebook plus two-stage refinement remains clearly necessary.","needs_sanity":false,"next_hypotheses":["If `lowrank_jumprelu_residual` is clearly worse than the mainline in both FVU and runtime metrics, discard it and return to `lowrank_two_stage_soft_codebook_residual` next round.","If it is somewhat worse in FVU but materially better in throughput or total runtime, record it as a lower-complexity compatible side branch, but still return to the mainline next round per probe policy.","If it is unexpectedly close to the mainline at lower selection cost, allow at most one later family-specific follow-up after the required return to the mainline."],"notes_to_memory":["Compatibility: `扩展兼容`. Export path is `U(Vx)` trunk lookup plus one sparse residual lookup over a fixed decoder library; JumpReLU modifies only selector thresholds, not decoder exportability.","This round is a strict matched architecture probe: keep `K=128`, `EXPANSION_FACTOR=2`, `OPTIMIZER=signum`, and `LR=3.0e-3` explicitly pinned, and change only `ARCHITECTURE`.","Judge family worthiness using `tokens_per_sec`, total duration, and `final_total_tokens` alongside final FVU, because LUTurbo cares about total online/runtime cost rather than FVU alone."],"primary_variable":"architecture","self_review":"This obeys the single-variable rule by changing only `architecture` and explicitly pinning the current mainline recipe fields. After `lowrank_asymmetric_two_stage_soft_codebook_residual` and `lowrank_gated_residual` both failed to pressure the mainline, `lowrank_jumprelu_residual` is the highest-value remaining feasible matched probe because it preserves LUTurbo exportability, stays in the low-EF budgeted regime, and tests a simpler thresholded selector that could reduce total online complexity if quality holds up. The main risk is that historical evidence for JumpReLU-style selectors has been weak, so this may mainly confirm that a single-stage thresholded low-rank branch cannot recover enough quality.","summary":"Run one valid matched architecture probe on `lowrank_jumprelu_residual` while keeping the `K=128`, `EF=2`, `signum`, `LR=3.0e-3` mainline recipe fixed. This cleanly tests whether a thresholded single-stage low-rank selector is worth any continued attention under LUTurbo-compatible low-EF constraints.","touched_files":[]}
+research/history/logs/agent_action_0226.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"JUMPRELU_BANDWIDTH","value":"0.05"}],"expected_win":"lower_fvu","experiment_tier":"full","family_name":"jumprelu","family_stage":"stabilize","hypothesis":"候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只改变单样本在线侧的阈值化支持形成与系数计算，不改变 decoder 端的单库有限加权和，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判断为直接兼容。相对 r225 只改一个 env 参数 `JUMPRELU_BANDWIDTH`，把带宽从默认 0.1 收紧到 0.05，测试更接近硬阈值的门控是否能在不增加 total_cost 的前提下，压掉当前高 K、低 EF 单库 regime 里的弱小噪声激活，从而把 r225 的 FVU=0.14736 继续压到当前 <0.5x 最优 topk 点 0.14621 以下。这个方向之所以优先于继续开新 family，是因为 r225 已经证明 jumprelu 在同成本下几乎追平 topk，同时训练侧系统代价更好（166.6k tokens/s、519s，对比 r222 topk 的 111.0k tokens/s、730s）；当前最值得回答的单一问题，是更尖锐的 threshold gate 能否把这条同成本直兼容支线真正推上低开销 Pareto 前沿。","needs_sanity":false,"next_hypotheses":["如果 `JUMPRELU_BANDWIDTH=0.05` 在保持接近 r225 吞吐与总时长的同时把 FVU 压到 0.1462 以下，则对该配方做一次 clean repeat，确认 jumprelu 是否能取代当前 `<0.5x` 的 topk 锚点。","如果 FVU 基本持平但运行代价仍优于 topk，则保留 jumprelu 作为同成本更优系统候选，并只再做一次 `JUMPRELU_INIT_THRESHOLD` 的单变量微调。","如果更小带宽导致 FVU 或稳定性明显恶化，则关闭 jumprelu 的带宽调参线，转去新的低成本 family，而不是继续在 plain-selector thresholding 上消耗轮次。"],"notes_to_memory":["r225 已经给出一个同成本、直接兼容、几乎追平 topk 的 jumprelu 点：FVU 仅比 topk@0.49x 差约 0.00115，但训练侧 tokens_per_sec 和 duration 明显更优。","当前 round 226 的最高价值问题不是再把成本压得更低，而是在 `<0.5x` 已有同成本候选里，判断更尖锐的 threshold gate 能否把 jumprelu 真正推进 Pareto 前沿。","`JUMPRELU_BANDWIDTH` 已在 override/config-resolution/runner 链路中注册，无需改代码；本轮应直接按 param_only 执行并重点核对 FVU、tokens_per_sec、duration_sec、final_total_tokens 的联动变化。"],"reference_round":225,"self_review":"这轮严格遵守单变量原则：相对 r225 只改 `JUMPRELU_BANDWIDTH`，不联动 architecture、K、EF、LR 或其他 recipe。选择继续跟进 jumprelu，而不是回到 topk 或继续追 lowrank_factorized_residual，是因为前者已经给出了最接近当前 `<0.5x` 前沿且系统代价更好的同成本证据；继续在它上面做一个真正结构相关但不增成本的 knob，比再次开启一个大概率更弱的新 family 更符合本轮“低开销区优先压 FVU”的目标。主要风险是更小 bandwidth 让梯度过硬、训练后段变脆；但 0.05 属于温和收紧，不是激进硬化，风险可接受且归因清晰。","summary":"基于 r225 的同成本 jumprelu 点，做一次严格 param_only 跟进：仅设置 `JUMPRELU_BANDWIDTH=0.05`。目标是在保持 `<0.5x` 总成本与当前较好训练吞吐的前提下，把 jumprelu 从 0.14736 推到低于 topk@0.14621，判断这条直接兼容单库阈值化路线能否成为新的低开销前沿点。","touched_files":[]}
+research/history/logs/agent_action_0170.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_soft_codebook_residual"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"}],"expected_win":"explore_unknown","experiment_tier":"full","family_name":"lowrank_soft_codebook_residual","family_stage":"matched_probe","hypothesis":"Matched architecture probe on `lowrank_soft_codebook_residual` with `K=128`, `EXPANSION_FACTOR=2`, `OPTIMIZER=signum`, and `LR=3.0e-3` fixed. Final reconstruction formula is `x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i b_i`, where `U(Vx)` is a static low-rank trunk library, `{c_m}` is a static soft-codebook library, and `{b_i}` is a static residual dictionary. This is `扩展兼容`: LUTurbo/Lottable can export it as one trunk lookup plus one codebook lookup plus one sparse residual lookup over fixed vector libraries; the online path remains finite weighted sums over static libraries. At EF=2 its encoder selection cost stays within the `≤ 1.5×h×n` hard budget and is materially lower than the current two-stage soft-codebook mainline. The single question is whether dropping the second residual refinement stage preserves enough quality and runtime efficiency to remain worth continuing as a cheaper LUTurbo-compatible branch, or whether the second stage is clearly necessary.","needs_sanity":false,"next_hypotheses":["If `lowrank_soft_codebook_residual` is clearly worse than the two-stage mainline in both FVU and runtime metrics, close this parent branch for the current low-EF regime and return to `lowrank_two_stage_soft_codebook_residual` next round.","If it is modestly worse in FVU but materially better in throughput or total runtime, keep it as a cheaper compatible Pareto branch, but still return to the mainline next round per probe policy.","If it is unexpectedly very close to the mainline at lower selection cost, allow at most one later family-specific follow-up after the required return to the mainline."],"notes_to_memory":["Compatibility: `扩展兼容`. Export path is static trunk library + static soft-codebook library + static residual dictionary; no decoder branch depends on dynamic weights.","This round is a strict matched architecture probe: keep `K=128`, `EXPANSION_FACTOR=2`, `OPTIMIZER=signum`, and `LR=3.0e-3` explicitly pinned, and change only `ARCHITECTURE`.","Evaluate with `tokens_per_sec`, total duration, and `final_total_tokens` alongside FVU, because LUTurbo cares about total online/runtime cost rather than FVU alone; a tiny quality change with slower runtime is negative."],"primary_variable":"architecture","self_review":"This obeys the single-variable rule by changing only `architecture` and explicitly pinning the current mainline recipe fields. After the recent asymmetric, gated, and jumprelu probes failed to pressure the mainline, the highest-value remaining matched probe is the strongest cheaper parent `lowrank_soft_codebook_residual`: it preserves the same formula class except for removing the second residual stage, stays within the EF=2 budget, and directly tests whether that extra stage is actually earning its cost in the current deployable regime. The main risk is limited novelty because this family is already known historically, but it is still the cleanest remaining architecture-worthiness question under the forced probe policy.","summary":"Run one valid matched architecture probe on `lowrank_soft_codebook_residual` while keeping the `K=128`, `EF=2`, `signum`, `LR=3.0e-3` mainline recipe fixed. This cleanly tests whether the cheaper one-stage soft-codebook parent is still worth continued attention under LUTurbo-compatible low-EF constraints.","touched_files":[]}
+research/history/logs/agent_action_0225.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"jumprelu"}],"expected_win":"information_gain","experiment_tier":"full","family_name":"jumprelu","family_stage":"prototype","hypothesis":"候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只改变单样本在线侧的阈值化支持形成与系数计算，不改变 decoder 端的单库有限加权和形式，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路，兼容性判断为直接兼容。r223 已确认 `topk@EF1,K248` 的向上 LR 分支没有收益，r224 也确认 lowrank_factorized_residual 的 scorer 压缩在 <0.5x 目标区仍落后于同成本 topk；因此当前最有信息量的下一步，不是继续清洗已饱和 family 的 recipe，而是在不增加 total_cost 的前提下测试新的同成本 selector 机制。严格锚定 r222，只改一个 env 参数 `ARCHITECTURE=jumprelu`，保留 `EF=1,K=248,signum,LR=3.0e-3,AUXK_ALPHA=0.0` 不变，验证 learned-threshold 支持塑形能否在相同 `total_cost≈0.49x` 下，把 <0.5x 区域 FVU 压到当前 topk 最佳 0.1462 以下，或者至少给出比 topk 更有希望的曲线形状而不拖慢训练。","needs_sanity":false,"next_hypotheses":["如果 `jumprelu@EF1,K248` 在相同 0.49x 成本下优于 `topk@K248` 的 FVU=0.1462，且 tokens_per_sec / duration_sec 没有明显恶化，则下一轮基于本轮做一次 clean repeat，确认它是否能成为新的 <0.5x 直接兼容锚点。","如果 `jumprelu` 与 topk 质量接近但运行代价更差，则将其仅记录为历史参考，不继续占用低开销主线轮次。","如果 `jumprelu` 明显差于 topk，则关闭这条 plain-selector thresholding 支线，下一轮转向另一条同成本或近邻成本的新 family。"],"notes_to_memory":["本地 `selection_cost_estimate()` 显示 `jumprelu@EF1,K248` 与 `topk@EF1,K248` 的 combined_ratio 同为约 0.49x，因此这是一次纯 selector 机制比较，而不是成本变化导致的混杂实验。","r223 与 r224 分别对 topk recipe 继续清洗、以及 lowrank_factorized_residual scorer 压缩给出负面信号；当前应优先测试新的同成本 family，而不是继续沿这两条线做局部小修。","`jumprelu` 保持单静态库导出契约，属于直接兼容 family；若它也失败，则说明当前 <0.5x 区域里 plain single-library selector 的主导瓶颈更可能是表示容量而非支持塑形规则。"],"reference_round":222,"self_review":"该提案严格遵守单变量原则：相对有效参考轮 r222 只改 `ARCHITECTURE` 一个 env 参数，K、EF、optimizer、LR、AUXK_ALPHA 和所有运行时参数全部保持不变。选择 `jumprelu` 而不是继续回到 topk/group_topk，是因为它在历史上虽未成为主线，但比纯 grouped 竞争更接近“同成本下改变支持塑形”的独立问题，同时不会额外抬高部署或选择成本。","summary":"相对 r222 的 `topk@EF1,K248,AUXK_ALPHA=0.0` 做一次严格 param_only architecture probe，仅切换到 `jumprelu`，测试在相同 0.49x 成本下，阈值化支持塑形是否能把 <0.5x 前沿继续压低。","touched_files":[]}
+research/history/logs/agent_action_0076.json:1:{"command":"run","hypothesis":"Round 75 closed the simplest single-stage `topk` alternative: under the matched `K=128`, `EXPANSION_FACTOR=12`, `signum`, `LR=2.0e-3` recipe it was clearly worse than the `two_stage_residual` mainline, so the next and only remaining high-value matched architecture probe this round should target a different deployment tradeoff rather than another plain top-k variant. `jumprelu` is the best single yes/no probe because it preserves LUTurbo's static-library finite weighted-sum form while potentially reducing online selection complexity through thresholded support shaping instead of a full staged residual path. This round asks one question only: under the exact current mainline recipe, is `jumprelu` competitive enough in full-curve behavior to remain worth later consideration, or should it be ruled out as clearly inferior?","summary":"Use the one allowed matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, and the same aux/runtime settings, and change only `ARCHITECTURE` from `two_stage_residual` to `jumprelu`. Judge the run by the whole trajectory, not just the endpoint: if `jumprelu` stays reasonably close with a healthy curve, keep it in reserve because its thresholded single-stage support path may lower LUTurbo online selection cost; if it is clearly worse throughout, close the probe and return to the `two_stage_residual` mainline next round.","change_type":"param_only","experiment_tier":"full","expected_win":"lower_cost","family_name":"jumprelu","family_stage":"prototype","self_review":"This obeys the Round 76 rule by changing exactly one primary variable, `architecture`, while keeping `K`, `EXPANSION_FACTOR`, `OPTIMIZER`, `LR`, and the rest of the recipe fixed. `jumprelu` is a better use of the single probe than another standard top-k family because it tests a distinct support-selection mechanism that may be cheaper to deploy online while still satisfying the export contract. The main risk is that prior matched probing under an earlier regime already suggested weak reconstruction quality, but this is still the most informative remaining architecture-worthiness check under the current mainline anchor.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"jumprelu"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"2.0e-3"},{"key":"BATCH_SIZE","value":"1"},{"key":"GRAD_ACC_STEPS","value":"8"},{"key":"MICRO_ACC_STEPS","value":"1"},{"key":"AUXK_ALPHA","value":"0.03125"},{"key":"DEAD_FEATURE_THRESHOLD","value":"10000000"},{"key":"USE_HADAMARD","value":"0"}],"touched_files":[],"notes_to_memory":["Round 76 spends the single allowed matched architecture probe on `jumprelu` against the current `two_stage_residual` mainline recipe, because it represents a distinct thresholded selector that may reduce LUTurbo online selection cost while preserving static exportability.","Judge this probe as a family-worthiness test only: compare matched `jumprelu@128` against the `two_stage_residual` reference at fixed `EF=12`, `signum`, and `LR=2.0e-3`, then return to the `two_stage_residual` mainline next round regardless of outcome."],"next_hypotheses":["If matched `jumprelu` is reasonably close with a healthy curve, return to the `two_stage_residual` mainline next round but keep one later `jumprelu` revisit available because its selector path may be cheaper to deploy.","If matched `jumprelu` is clearly worse than `two_stage_residual` across the curve, close the probe and return to the `two_stage_residual` mainline next round.","If matched `jumprelu` unexpectedly beats the current `two_stage_residual` reference, still return to the `two_stage_residual` mainline next round per policy, but record `jumprelu` as a high-priority later follow-up family."],"primary_variable":"architecture"}
+research/history/logs/agent_action_0060.json:1:{"command":"run","hypothesis":"Round 59 ruled out `factorized_topk` as a strong matched alternative under the current `gated` recipe: at `0.229180` it was clearly too weak, so the next single architecture question should move to a different export-compatible support-formation mechanism rather than another heavier scoring path. `jumprelu` preserves LUTurbo's static-vector finite weighted-sum reconstruction contract while replacing the learned input-conditioned gate with per-latent thresholding, so this round asks one clean yes/no question: under the exact current mainline recipe (`K=128`, `EF=12`, `signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`), is `jumprelu` competitive enough in full-curve behavior to justify any later follow-up as a potentially cheaper deployment family?","summary":"Run one matched architecture probe on `jumprelu`. Keep the current mainline recipe fixed at `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, `USE_HADAMARD=1`, and the same runtime knobs, and change only `ARCHITECTURE` from `gated` to `jumprelu`. Judge this probe by the whole trajectory, not just the endpoint: if `jumprelu` stays smooth and remains reasonably close to the `0.142923` `gated` anchor, it is worth keeping in reserve because its thresholded support path may reduce LUTurbo online selection overhead versus a full gating branch; if it is clearly worse across the curve, archive it as a non-promising matched alternative and return to the `gated` mainline next round.","change_type":"param_only","experiment_tier":"full","expected_win":"explore_unknown","family_name":"jumprelu","family_stage":"prototype","self_review":"This obeys the Round 60 matched-probe rule by changing exactly one primary variable, `architecture`, while keeping `K`, `OPTIMIZER`, `LR`, `EXPANSION_FACTOR`, and the settled mainline recipe fixed. `jumprelu` is a sensible LUTurbo-oriented probe because it preserves the same static library weighted-sum output form while simplifying support shaping relative to `gated`; the main risk is that the matched `gated`-tuned recipe may not be ideal for its threshold dynamics, but that is acceptable for a family-worthiness screen.","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"jumprelu"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"12"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"2.0e-3"},{"key":"BATCH_SIZE","value":"1"},{"key":"GRAD_ACC_STEPS","value":"8"},{"key":"MICRO_ACC_STEPS","value":"1"},{"key":"AUXK_ALPHA","value":"0.03125"},{"key":"DEAD_FEATURE_THRESHOLD","value":"10000000"},{"key":"USE_HADAMARD","value":"1"},{"key":"COMPILE_MODEL","value":"1"}],"touched_files":[],"notes_to_memory":["Round 59 showed that matched `factorized_topk` is not promising under the strengthened mainline recipe: its `0.229180` endpoint is far from the `gated@128` anchor, so that family should not be prioritized for LUTurbo-oriented follow-up.","`jumprelu` remains LUTurbo-compatible because the reconstruction is still a finite weighted sum over a static decoder library with fixed `K`; the architectural change is confined to threshold-based support shaping before top-k selection.","Round 60 should judge `jumprelu` purely as a family-worthiness probe against the current `gated@128` anchor: if it is clearly worse or unstable, archive it and return to the `gated` mainline next round; if it is competitive, keep exactly one later follow-up slot available."],"next_hypotheses":["If matched `jumprelu` is clearly worse than the strengthened `gated` anchor, return to the `gated` mainline next round and close this probe.","If matched `jumprelu` is roughly competitive with a healthy curve, still return to the `gated` mainline next round, but preserve one later revisit because its thresholded support path may better align with LUTurbo online-cost goals.","If matched `jumprelu` unexpectedly beats the current `gated` anchor, return to the `gated` mainline next round per policy but schedule exactly one later follow-up for this family."],"primary_variable":"architecture"}
+research/history/logs/agent_action_0179.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_jumprelu_residual"},{"key":"K","value":"128"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"OPTIMIZER","value":"signum"},{"key":"LR","value":"3.0e-3"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_jumprelu_residual","family_stage":"prototype","hypothesis":"Matched architecture probe on `lowrank_jumprelu_residual` under the unchanged mainline recipe (`K=128, EF=2, signum, lr=3.0e-3`). Final reconstruction is `x_hat = U(Vx) + Σ_i alpha_i b_i`, where `U(Vx)` is a static low-rank trunk and the JumpReLU selector only changes which residual dictionary atoms `b_i` are activated and their coefficients. This is `扩展兼容`: LUTurbo/Lottable can export the trunk factors and residual dictionary as static vector libraries, then execute `trunk lookup + thresholded sparse selection + weighted lookup-sum` online. The probe asks one question only: in the low-EF feasible regime, does learned thresholding provide a better architecture tradeoff than the current soft-codebook two-stage mainline, or should this family be ruled out. Encoder selection cost should stay in the feasible band at `EF=2`, so this should produce a real signal instead of a policy reject.","needs_sanity":false,"next_hypotheses":["Return to the mainline `lowrank_two_stage_soft_codebook_residual` next round and tune exactly one cost knob such as `TRUNK_RANK`, `NUM_CODES`, or `STAGE1_RATIO`.","If `lowrank_jumprelu_residual` underperforms the mainline on FVU or shows materially worse `tokens_per_sec`/runtime without compensating benefit, mark the family as not worth continuing in the low-cost regime."],"notes_to_memory":["`lowrank_jumprelu_residual` is LUTurbo `扩展兼容`: decode remains a finite weighted sum over a static low-rank trunk plus a static residual dictionary; JumpReLU only changes selector-side activation sparsity.","This matched probe stays inside the likely feasible encoder-cost regime and is more informative than another routed/bucketed-style over-budget probe.","When scoring the run, inspect `tokens_per_sec`, wall-clock time, and `final_total_tokens` together with FVU; a tiny quality gain with slower training is a negative signal."],"primary_variable":"architecture","self_review":"Single-variable discipline is preserved: only `ARCHITECTURE` changes while `K`, `EXPANSION_FACTOR`, `OPTIMIZER`, and `LR` remain fixed to the mainline recipe. This probe avoids another likely budget rejection and tests a remaining compatible architecture that can still deliver a clean go/no-go answer for the low-EF frontier.","summary":"Probe `lowrank_jumprelu_residual` as the one matched architecture change. It is LUTurbo-exportable (`扩展兼容`) through a static low-rank trunk plus static residual dictionary, and it should give a real low-cost signal on whether learned thresholding is worth continuing versus the current soft-codebook two-stage mainline.","touched_files":[]}
+
+ succeeded in 3998ms:
+Using fused decoder on CUDA.
+jumprelu {'jumprelu_bandwidth': 0.05, 'jumprelu_init_threshold': 0.0} 0.25 0.32 0.57
+jumprelu {'jumprelu_bandwidth': 0.05, 'jumprelu_init_threshold': 0.02} 0.25 0.32 0.57
+jumprelu {'jumprelu_bandwidth': 0.05, 'jumprelu_init_threshold': 0.05} 0.25 0.32 0.57
+jumprelu {'jumprelu_bandwidth': 0.05, 'jumprelu_init_threshold': 0.1} 0.25 0.32 0.57
+jumprelu {'jumprelu_bandwidth': 0.02, 'jumprelu_init_threshold': 0.0} 0.25 0.32 0.57
+jumprelu {'jumprelu_bandwidth': 0.08, 'jumprelu_init_threshold': 0.0} 0.25 0.32 0.57
+topk {} 0.25 0.32 0.57
+
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"JUMPRELU_INIT_THRESHOLD","value":"0.02"}],"expected_win":"better_fvu_within_low_cost_region","experiment_tier":"full","family_name":"jumprelu","family_stage":"stabilize","hypothesis":"候选 family: jumprelu。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；JumpReLU 只改变单样本在线侧的阈值化支持形成与系数计算，不改变 decoder 端的单库有限加权和，因此可直接导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路，兼容性判断为直接兼容。相对 r226 只改一个 env 参数 `JUMPRELU_INIT_THRESHOLD=0.02`，保持 `JUMPRELU_BANDWIDTH=0.05`、`EF=1`、`K=248`、`signum`、`LR=0.003` 不变，测试在已经证实优于同成本 topk 的尖锐门控基础上，给一个轻微正阈值初始化能否进一步抑制小幅噪声激活、改善高 K 单库支持塑形，从而把当前 0.49x 成本点的 FVU 从 0.14590 继续压低。该改动不改变 encoder/deployment 成本估计，total_cost 仍约为 0.49x，满足 LUTurbo 的总成本硬约束。","needs_sanity":false,"next_hypotheses":["如果 `JUMPRELU_INIT_THRESHOLD=0.02` 继续降低 FVU，且 tokens_per_sec 与总时长保持接近 r226，则可再相对本轮单变量上探到更积极的 `0.05`，继续逼近该同成本点的最佳阈值。","如果 FVU 基本持平但系统代价仍显著优于同成本 topk，则将 `jumprelu@EF1,K248,bandwidth=0.05` 视为当前 `<0.5x` 区域更优默认锚点，并停止在 plain single-library selector 上做过密 recipe 清洗。","如果正阈值初始化导致 FVU 或稳定性恶化，则回退结论为当前改进主要来自更小 bandwidth 而非显式正阈值，关闭 `JUMPRELU_INIT_THRESHOLD` 这条线并转向新的低成本 family。"],"notes_to_memory":["r226 已经在与 topk 相同约 0.49x 成本下拿到更低 FVU=0.14590，同时训练代价明显更优：166.55k tokens/s、483s，对比 r222 topk 的 111.04k tokens/s、730s。","在单变量原则下，clean repeat 不能作为本轮动作；当前最合理的后续是继续在已验证有效的 jumprelu 线上测试另一个不增成本、且与支持塑形直接相关的参数。","`JUMPRELU_INIT_THRESHOLD` 已在 config-resolution/runner 链路中注册，无需改代码；本轮重点仍应同时检查 FVU、tokens_per_sec、duration_sec、final_total_tokens，避免为了极小质量收益接受明显更差的系统代价。"],"reference_round":226,"self_review":"这轮严格遵守单变量原则：相对 r226 只改 `JUMPRELU_INIT_THRESHOLD`，不联动 architecture、K、EF、LR、bandwidth 或其他 recipe。选择继续围绕 jumprelu 而不是立刻切换新 family，是因为它刚刚在 `<0.5x` 主战区以同成本拿到比 topk 更好的 FVU，而且系统代价显著更优；在此基础上用一个轻微正阈值初始化检验“噪声抑制是否还能继续改善前沿点”比重开一个高不确定性 family 更符合当前证据。主要风险是阈值过早抬高会削弱有效特征利用，但 0.02 属于温和探针，归因清晰。","summary":"相对 r226 的 `jumprelu@EF1,K248,JUMPRELU_BANDWIDTH=0.05` 做一次严格 param_only 阈值初始化探针，仅设置 `JUMPRELU_INIT_THRESHOLD=0.02`。目标是在不增加约 0.49x 总成本的前提下，继续压低当前 `<0.5x` 区域最佳 FVU，并验证正阈值初始化是否是这条直接兼容单库路线的下一个有效杠杆。","touched_files":[]}
+tokens used
+263,111

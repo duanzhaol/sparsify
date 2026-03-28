@@ -1,0 +1,662 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"AUXK_ALPHA","value":"0.0"}],"expected_win":"better_fvu_within_low_cost_region","experiment_tier":"full","family_name":"topk","family_stage":"mainline","hypothesis":"候选 family: topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；在线侧只做单样本 top-k 选择与系数计算，部署侧仍是单库查表 + 加权求和 + 选择性补偿，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容。基于 r218 已在 total_cost=0.49x 处给出当前 <0.5x 区域最佳 FVU=0.1462，而最近两轮更复杂低成本结构 probe（factorized_topk、lowrank_factorized_residual@TRUNK_RANK=32）分别给出明显更差 FVU，且 r221 还把吞吐压到 111k tokens/s、总时长拉到 760s，说明当前更值得在最强低开销锚点上做不增加系统成本的单变量 recipe 探针。本轮严格锚定 r218，只改 `AUXK_ALPHA=0.0`，测试在 EF=1、K=248、字典容量已很紧、支持集已很大的低成本 regime 下，去掉 auxiliary-K loss 是否能减少对主重构目标的干扰，在不恶化 tokens_per_sec、总耗时和 final_total_tokens 的前提下，把 <0.5x 前沿 FVU 继续压低。","needs_sanity":false,"next_hypotheses":["如果 `AUXK_ALPHA=0.0` 在保持接近 r218 吞吐与总时长的同时把 FVU 压到 0.1462 以下，则下一轮对该无辅助损失配方做一次 clean repeat 确认，再考虑继续围绕 topk 低成本主线做 recipe 局部化。","如果 `AUXK_ALPHA=0.0` 与 r218 基本等价，则记录 auxiliary loss 在 `topk@EF1,K248` 低成本主线中不是关键因子，随后转向同一锚点上的单变量 LR probe。","如果 `AUXK_ALPHA=0.0` 明显退化，则恢复默认 auxiliary loss，并将 loss 轴在该 low-cost topk 主线上暂时关闭。"],"notes_to_memory":["r221 证明低秩 trunk 压缩在 lowrank_factorized_residual 上同时伤害质量与运行代价，不应继续占用 <0.5x 主线轮次。","当前最有价值的动作是在已知最强 <0.5x 点 `topk@EF1,K248` 上做不改变部署成本的单变量 recipe probe，而不是继续引入更长选择链路。","若 `AUXK_ALPHA=0.0` 成功，则说明在高 K、低 EF 的单库 topk 低成本 regime 中，auxiliary K loss 可能只是训练干扰项而非必要正则。"],"reference_round":218,"self_review":"该提案满足单变量原则：相对有效参考轮 r218 只改 `AUXK_ALPHA`，不改 family、K、EF、optimizer、LR 或其他结构参数。相比继续做新的 architecture probe，这一步信息更干净，因为它直接回答当前最强 <0.5x 锚点是否还有零部署增量的可挖掘训练收益；风险是 auxiliary loss 可能仍对活跃特征利用有帮助，但这正是本轮要隔离验证的问题。","summary":"相对 r218 的 `topk@EF1,K248` 做一次严格 param_only loss 轴验证，仅将 `AUXK_ALPHA` 设为 0.0，判断去掉 auxiliary-K loss 能否在不增加系统成本和运行时负担的前提下继续压低 <0.5x 前沿 FVU。","touched_files":[]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d33af-ae32-75e1-8869-a44ad7238885
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 222。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 应显式给出 reference_round。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 222 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1462，明显落后于当前最佳可行点 FVU=0.0647，需要定向补低开销前沿。
+当前参考 family：lowrank_soft_codebook_residual
+当前参考配方：ARCHITECTURE=lowrank_soft_codebook_residual K=128 EXPANSION_FACTOR=2 OPTIMIZER=signum LR=0.003
+当前参考完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_soft_codebook_residual
+  EXPANSION_FACTOR=2
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，而是补全 total_cost < 0.5x 区域的 Pareto 前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. 优先尝试天然低成本结构：极低 EF / 极低 K、factorized scorer、更少静态库、更短选择链路、轻量多专家/多子库方案。
+4. 在这个区域，topk、factorized_topk、lowrank_residual 等简单架构是合理起点；不要因为它们在高 EF 下表现差就直接排斥。
+5. MoE-like 方向只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试。
+6. >0.5x 区域只保留少量质量锚点或解释性对照，不应继续作为默认主战场。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=221, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=1
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.31x (sel=0.25x + deploy=0.06x)  fvu=0.25825566053390503  arch=topk  K=64 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.38x (sel=0.25x + deploy=0.12x)  fvu=0.19679804146289825  arch=topk  K=128 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.44x (sel=0.25x + deploy=0.19x)  fvu=0.16352370381355286  arch=topk  K=192 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.47x (sel=0.25x + deploy=0.22x)  fvu=0.15281182527542114  arch=topk  K=224 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.48x (sel=0.25x + deploy=0.23x)  fvu=0.14833292365074158  arch=topk  K=240 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.49x (sel=0.25x + deploy=0.24x)  fvu=0.14621132612228394  arch=topk  K=248 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.69x (sel=0.38x + deploy=0.31x)  fvu=0.12559494376182556  arch=lowrank_factorized_residual  K=64 EF=1  lr=0.003 opt=signum [FEASIBLE]
+  total=0.88x (sel=0.5x + deploy=0.38x)  fvu=0.10676437616348267  arch=lowrank_factorized_residual  K=128 EF=2  lr=0.003 opt=signum [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → topk (K=248, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.25x | 部署: 0.24x | FVU: 0.14621132612228394
+  最优可行点 → lowrank_soft_codebook_residual (K=128, EF=2) [FEASIBLE]:
+    总成本: 1.38x | 预算比率: 0.92x | encoder: 0.75x | 部署: 0.62x | FVU: 0.06465830653905869
+  全局最低 FVU → lowrank_two_stage_soft_codebook_residual (K=128, EF=12) [OVER BUDGET]:
+    总成本: 6.88x | 预算比率: 4.58x | encoder: 6.25x | 部署: 0.62x | FVU: 0.04925498366355896
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，3）：
+  r218 topk architecture -> keep fvu=0.14621132612228394 417s | 候选 family: topk。最终重构公式为 x_hat = Σ_i alpha_i b_i，其中 {b_i} 来自单个静态向量库；在线侧只做单样本 t...
+  r219 factorized_topk architecture -> discard fvu=0.27445852756500244 387s | 候选 family: factorized_topk。最终重构公式为 x_hat = Σ_i alpha_i b_i，其中 {b_i} 来自单个静态向量库...
+  r221 lowrank_factorized_residual param_only -> discard fvu=0.2844943404197693 760s | 候选 family: lowrank_factorized_residual。最终重构公式为 x_hat = Σ_r β_r u_r + Σ_i α_i ...
+
+最近可用 reference_round 的完整配置：
+  r218 topk (decision=keep, source=checkpoint_config)
+  ARCHITECTURE=topk
+  EXPANSION_FACTOR=1
+  K=248
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r210 lowrank_factorized_residual (decision=keep, source=checkpoint_config)
+  ARCHITECTURE=lowrank_factorized_residual
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r205 factorized_topk (decision=keep, source=checkpoint_config)
+  ARCHITECTURE=factorized_topk
+  EXPANSION_FACTOR=2
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+  r202 lowrank_soft_codebook_residual (decision=archive, source=checkpoint_config)
+  ARCHITECTURE=lowrank_soft_codebook_residual
+  EXPANSION_FACTOR=2
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.o_proj
+  OPTIMIZER=signum
+  LR=0.003
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+
+操作提示：
+  1. 最近多轮训练耗时明显上升。做决策时必须同时关注效果和运行代价，不要只看最终 FVU。每轮都要检查 tokens_per_sec、总耗时、final_total_tokens，以及性能下降
+  是来自训练更长、吞吐变慢，还是某个 recipe（如 hadamard）本身更贵。若新 recipe 只带来很小 FVU 改善但显著拖慢训练，应明确把它视为负面信号，并优先验证是否值得继续。
+
+历史研究关键结论：
+## 2. LUTurbo/Lottable 兼容性约束
+
+新 proposal 进入主线前，先按下面的标准判断。
+
+硬约束：
+
+1. 最终重构必须能表示成一个或多个固定向量库上的有限加权和。
+2. 每个重构分支都必须能静态导出成固定向量库。
+
+补充说明：
+
+- 允许固定层数的多阶段、多分支、残差式分解。
+- 不要求必须是单库、单阶段、单步重构。
+- 只要每个阶段都对应静态可导出的向量库，且最终重构仍然是这些库项的有限加权和，就满足约束。
+
+兼容性标签：
+
+### `直接兼容`
+
+最终形式接近：
+
+`x_hat = Σ alpha_i b_i`
+
+动作：可直接进入主线搜索。
+
+### `扩展兼容`
+
+最终形式是多个静态库或多个静态分支的有限加权和，例如：
+
+`x_hat = Σ_u beta_u u_u + Σ_m pi_m c_m + Σ_i alpha_i b_i + ...`
+
+动作：写清导出路径后，可以进入主线搜索。
+
+### `不兼容`
+
+典型情况：
+
+- 表示依赖整个 batch，而不是单样本
+- 向量库本身依赖输入动态生成
+- 很难定义成单样本的静态导出表示
+
+动作：只能作为灵感参考，不能作为主线候选。
+
+这里不把”在线选择成本大”当作兼容性判据；成本问题单独评估。
+
+### 2.1 选择成本维度
+
+兼容性标签只判断”decoder 端能不能导出”，不判断”encoder 端的在线选择代价能不能接受”。
+
+LUTurbo 部署的总访存预算约束为：
+
+`total_cost = selection_cost + deployment_cost`
+
+其中 `selection_cost` 是 encoder 端的访存量（为每个 token 选择 top-K latent），`deployment_cost` 是部署端的查表访存量（K × n_output + trunk/codebook 等额外库）。
+
+**AutoResearch 硬约束：total_cost ≤ 1.5 × h × n。** 超过此阈值的配置将被 policy 拦截。
+
+当前各架构的典型 encoder selection_cost / (h×n) 比率（部署成本额外叠加）：
+
+| 架构 | encoder 比率 | 是否通过 (≤1.5x, encoder-only) |
+|---|---|---|
+| topk (EF=12) | 3.0x | 不通过 |
+| gated (EF=12) | 6.0x | 不通过 |
+| lowrank_two_stage_soft_codebook_residual (EF=12) | 6.25x | 不通过 |
+| bucketed 系 (EF=12) | 12.25x | 不通过 |
+| factorized_topk (EF=12) | 1.62x | 不通过（但接近） |
+
+注意：以上仅为 encoder 选择成本。实际 budget 以 total_cost = selection + deployment 为准，部署查表成本额外贡献约 K×n（K=32 约 +3%，K=128 约 +12%）。
+
+降低 total_cost 的已知方向：
+
+降低 encoder 成本：
+- 减小 `EXPANSION_FACTOR`（直接减少字典大小 N = d_in × EF）
+- 减小 `TRUNK_RANK`（低秩近似更激进）
+- 减少 `NUM_CODES`（更少的 codebook 条目）
+- 减小 `STAGE1_RATIO`（调整两阶段预算分配）
+- 使用低秩 scorer 代替全字典评分（如 `FACTORIZED_HIDDEN_DIM`）
+- 探索不依赖 `h → h×EF` 全连接层的选择机制
+- 分级/粗到细的选择策略（先用小 scorer 缩小候选集）
+
+降低 deployment 成本：
+- 减小 `K`（直接减少查表次数）
+- 减小 `TRUNK_RANK`（减少 trunk 部署库大小）
+- 减少 `NUM_CODES`（减少 codebook 部署库大小）
+
+每个 SparseCoder 子类都实现了 `selection_cost_estimate()` 方法，返回 encoder / deployment / combined 三套指标。
+
+---
+
+当前开放假设：
+  - 如果配置审计通过且 `TRUNK_RANK=32` 仍明显优于 `topk@0.38x` 的 FVU=0.1968，并且吞吐接近 r210 的 166.6k tokens/s，则下一轮继续相对本...
+  - 如果配置审计通过但 `TRUNK_RANK=32` 的 FVU 退化过大，则仍保留这轮作为有效成本点，下一轮在同 family 内回退到更温和的 `TRUNK_RANK=64` 做单变量 bra...
+  - 如果这轮再次出现 `TRUNK_RANK` 未进入 runtime/checkpoint config，则停止解读任何 FVU，直接转入接线修复验证轮。
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+本轮需要基于 r221 的真实运行代价和结果来收敛低开销方向，我先读取 round 221 摘要，确认它是质量退化还是训练代价也明显变差，再选下一个单变量动作。
+exec
+/bin/bash -lc "sed -n '1,260p' research/history/round_summaries/round_0221.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 221,
+  "timestamp": 1774689320,
+  "started_at": 1774688560,
+  "ended_at": 1774689320,
+  "duration_sec": 760,
+  "family_name": "lowrank_factorized_residual",
+  "family_stage": "mainline",
+  "session_id": "019d33af-ae32-75e1-8869-a44ad7238885",
+  "timeline_event_ids": [
+    "evt_1774688560032133537",
+    "evt_1774688956032818443",
+    "evt_1774689320320763040"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: lowrank_factorized_residual\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_r \u03b2_r u_r + \u03a3_i \u03b1_i b_i\uff0c\u5176\u4e2d {u_r} \u662f\u9759\u6001 trunk \u5411\u91cf\u5e93\u3001{b_i} \u662f\u9759\u6001 residual \u5411\u91cf\u5e93\uff1b\u5728\u7ebf\u4fa7\u53ea\u8ba1\u7b97 \u03b2_r \u4e0e \u03b1_i\uff0c\u518d\u6267\u884c trunk \u67e5\u8868 + residual \u67e5\u8868 + \u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u6269\u5c55\u517c\u5bb9\u3002r220 \u7684 blocker \u4e0d\u662f\u8d28\u91cf\uff0c\u800c\u662f TRUNK_RANK override \u6ca1\u6709\u771f\u6b63\u8fdb\u5165\u8bad\u7ec3\u914d\u7f6e\uff1b\u5f53\u524d\u6267\u884c\u94fe\u5df2\u5177\u5907 `TRUNK_RANK -> --trunk_rank -> sae.trunk_rank` \u8def\u5f84\uff0c\u56e0\u6b64\u672c\u8f6e\u5e94\u4e25\u683c\u951a\u5b9a\u6709\u6548\u53c2\u8003\u8f6e r210\uff0c\u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `TRUNK_RANK=32`\uff0c\u5148\u9a8c\u8bc1 `research/history/logs/round*.config.json` \u4e0e checkpoint `config.json` \u90fd\u8bb0\u5f55 `sae.trunk_rank=32`\uff0c\u518d\u5224\u65ad\u8be5 family \u662f\u5426\u80fd\u4ee5\u9884\u4f30 total_cost\u22480.36x \u4fdd\u6301\u663e\u8457\u4f18\u4e8e <0.5x \u533a\u57df topk \u524d\u6cbf\u7684 FVU\uff0c\u540c\u65f6\u4fdd\u4f4f\u5176\u66f4\u9ad8\u541e\u5410/\u66f4\u77ed\u603b\u65f6\u957f\u3002",
+    "summary": "\u590d\u8dd1 r220 \u7684\u79d1\u5b66\u95ee\u9898\uff0c\u4f46\u6309\u5408\u6cd5 `param_only` \u5f62\u5f0f\u4e25\u683c\u951a\u5b9a\u6709\u6548\u53c2\u8003\u8f6e r210\uff0c\u4ec5\u4e0b\u53d1 `TRUNK_RANK=32`\u3002\u672c\u8f6e\u5148\u505a\u53c2\u6570\u751f\u6548\u786e\u8ba4\uff0c\u518d\u8bc4\u4f30 lowrank_factorized_residual \u662f\u5426\u80fd\u4ee5\u7ea6 0.36x total_cost \u8fdb\u5165 <0.5x Pareto \u4e3b\u524d\u6cbf\u3002",
+    "change_type": "param_only",
+    "expected_win": "lower_cost",
+    "family_name": "lowrank_factorized_residual",
+    "family_stage": "mainline",
+    "self_review": "\u8fd9\u8f6e\u7ee7\u7eed\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9\u6709\u6548 reference r210 \u53ea\u6539 `TRUNK_RANK`\uff0c\u4e0d\u91cd\u590d\u628a `ARCHITECTURE/K/EF/LR` \u5199\u8fdb patch\uff0c\u4e5f\u4e0d\u4f7f\u7528\u5df2\u7ecf\u88ab\u5ba1\u8ba1\u6807\u8bb0\u65e0\u6548\u7684 r220 \u4f5c\u4e3a\u951a\u70b9\u3002\u9009\u62e9\u590d\u8dd1 `TRUNK_RANK=32` \u800c\u4e0d\u662f\u76f4\u63a5\u53bb `16`\uff0c\u662f\u56e0\u4e3a\u5f53\u524d\u6700\u9ad8\u4f18\u5148\u7ea7\u662f\u5148\u6d88\u9664\u53d8\u91cf\u9694\u79bb\u5931\u6548\u8fd9\u4e2a blocker\uff0c\u5e76\u62ff\u5230\u7b2c\u4e00\u6761\u771f\u5b9e\u6709\u6548\u7684\u4f4e trunk-rank \u8bc1\u636e\uff1b\u5728\u5ba1\u8ba1\u901a\u8fc7\u4e4b\u524d\uff0c\u4e0d\u5e94\u628a\u7ed3\u679c\u5f53\u6210\u67b6\u6784\u7ed3\u8bba\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "TRUNK_RANK",
+        "value": "32"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "r220 \u65e0\u6548\u7684\u6839\u56e0\u662f\u53c2\u6570\u63a5\u7ebf\u800c\u975e\u67b6\u6784\u8d28\u91cf\uff1b\u4e0b\u4e00\u8f6e\u5fc5\u987b\u628a\u201c\u53c2\u6570\u786e\u5b9e\u8fdb\u5165 runtime_config \u4e0e checkpoint config\u201d\u4f5c\u4e3a\u7b2c\u4e00\u5224\u636e\u3002",
+      "\u672c\u5730 `selection_cost_estimate()` \u663e\u793a `lowrank_factorized_residual@K64,EF1,TRUNK_RANK=32` \u7684 combined_ratio \u7ea6\u4e3a 0.36x\uff0c\u663e\u8457\u4f4e\u4e8e r210 \u7684 0.69x\uff0c\u4e5f\u4f4e\u4e8e\u5f53\u524d `topk@K248,EF1` \u7684 0.49x\u3002",
+      "\u82e5\u8be5\u70b9\u8d28\u91cf\u63a5\u8fd1 r210 \u7684 FVU=0.1256\uff0c\u540c\u65f6\u7ef4\u6301\u5176\u7ea6 166.6k tokens/s\u3001291s \u7ea7\u522b\u7684\u8bad\u7ec3\u4ee3\u4ef7\uff0c\u5219\u4f1a\u6210\u4e3a <0.5x \u533a\u57df\u6bd4 topk \u66f4\u5f3a\u7684\u9ad8\u4ef7\u503c Pareto \u70b9\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c\u914d\u7f6e\u5ba1\u8ba1\u901a\u8fc7\u4e14 `TRUNK_RANK=32` \u4ecd\u660e\u663e\u4f18\u4e8e `topk@0.38x` \u7684 FVU=0.1968\uff0c\u5e76\u4e14\u541e\u5410\u63a5\u8fd1 r210 \u7684 166.6k tokens/s\uff0c\u5219\u4e0b\u4e00\u8f6e\u7ee7\u7eed\u76f8\u5bf9\u672c\u8f6e\u5355\u53d8\u91cf\u4e0b\u63a2 `TRUNK_RANK=16`\uff0c\u5bfb\u627e\u66f4\u4f4e\u6210\u672c\u62d0\u70b9\u3002",
+      "\u5982\u679c\u914d\u7f6e\u5ba1\u8ba1\u901a\u8fc7\u4f46 `TRUNK_RANK=32` \u7684 FVU \u9000\u5316\u8fc7\u5927\uff0c\u5219\u4ecd\u4fdd\u7559\u8fd9\u8f6e\u4f5c\u4e3a\u6709\u6548\u6210\u672c\u70b9\uff0c\u4e0b\u4e00\u8f6e\u5728\u540c family \u5185\u56de\u9000\u5230\u66f4\u6e29\u548c\u7684 `TRUNK_RANK=64` \u505a\u5355\u53d8\u91cf bracket\uff0c\u800c\u4e0d\u662f\u7acb\u5373\u5207\u53bb\u65b0 family\u3002",
+      "\u5982\u679c\u8fd9\u8f6e\u518d\u6b21\u51fa\u73b0 `TRUNK_RANK` \u672a\u8fdb\u5165 runtime/checkpoint config\uff0c\u5219\u505c\u6b62\u89e3\u8bfb\u4efb\u4f55 FVU\uff0c\u76f4\u63a5\u8f6c\u5165\u63a5\u7ebf\u4fee\u590d\u9a8c\u8bc1\u8f6e\u3002"
+    ],
+    "reference_round": 210
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774689320",
+    "val_fvu": "0.2844943404197693",
+    "observed_fvu": "0.284494",
+    "k": "64",
+    "architecture": "lowrank_factorized_residual",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111039.545013",
+    "baseline_ratio": "0.666696",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0221/round0221_standard_1774688956_dp2_bs1_ga8_ef1_k64_20260328_170923",
+    "experiment_id": "r221_1774689320",
+    "head_commit": "06057e1a2938a2e646e0664dcb8a926439185964",
+    "description": "\u590d\u8dd1 r220 \u7684\u79d1\u5b66\u95ee\u9898\uff0c\u4f46\u6309\u5408\u6cd5 `param_only` \u5f62\u5f0f\u4e25\u683c\u951a\u5b9a\u6709\u6548\u53c2\u8003\u8f6e r210\uff0c\u4ec5\u4e0b\u53d1 `TRUNK_RANK=32`\u3002\u672c\u8f6e\u5148\u505a\u53c2\u6570\u751f\u6548\u786e\u8ba4\uff0c\u518d\u8bc4\u4f30 lowrank_factorized_residual \u662f\u5426\u80fd\u4ee5\u7ea6 0.36x total_cost \u8fdb\u5165 <0.5x Pareto \u4e3b\u524d\u6cbf\u3002",
+    "self_review": "\u8fd9\u8f6e\u7ee7\u7eed\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9\u6709\u6548 reference r210 \u53ea\u6539 `TRUNK_RANK`\uff0c\u4e0d\u91cd\u590d\u628a `ARCHITECTURE/K/EF/LR` \u5199\u8fdb patch\uff0c\u4e5f\u4e0d\u4f7f\u7528\u5df2\u7ecf\u88ab\u5ba1\u8ba1\u6807\u8bb0\u65e0\u6548\u7684 r220 \u4f5c\u4e3a\u951a\u70b9\u3002\u9009\u62e9\u590d\u8dd1 `TRUNK_RANK=32` \u800c\u4e0d\u662f\u76f4\u63a5\u53bb `16`\uff0c\u662f\u56e0\u4e3a\u5f53\u524d\u6700\u9ad8\u4f18\u5148\u7ea7\u662f\u5148\u6d88\u9664\u53d8\u91cf\u9694\u79bb\u5931\u6548\u8fd9\u4e2a blocker\uff0c\u5e76\u62ff\u5230\u7b2c\u4e00\u6761\u771f\u5b9e\u6709\u6548\u7684\u4f4e trunk-rank \u8bc1\u636e\uff1b\u5728\u5ba1\u8ba1\u901a\u8fc7\u4e4b\u524d\uff0c\u4e0d\u5e94\u628a\u7ed3\u679c\u5f53\u6210\u67b6\u6784\u7ed3\u8bba\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0221_standard_1774688956.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0221/round0221_standard_1774688956_dp2_bs1_ga8_ef1_k64_20260328_170923/metrics.jsonl",
+    "curve_start_fvu": "0.363633",
+    "curve_mid_fvu": "0.295919",
+    "curve_end_fvu": "0.284494",
+    "curve_late_slope": "-0.000000",
+    "curve_still_improving": "true",
+    "initial_target_tokens": "50000000",
+    "final_target_tokens": "60000000",
+    "final_total_tokens": "59969536",
+    "resume_stage_count": "2",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "lowrank_factorized_residual",
+    "EXPANSION_FACTOR": "1",
+    "K": "64",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "lowrank_factorized_residual",
+    "EXPANSION_FACTOR": "1",
+    "K": "64",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "TRUNK_RANK": "32"
+  },
+  "changed_keys": [
+    "TRUNK_RANK"
+  ],
+  "reference_source": "reference_round:r210",
+  "runtime_config_json": {
+    "architecture": "lowrank_factorized_residual",
+    "expansion_factor": 1,
+    "k": 64,
+    "optimizer": "signum",
+    "lr": "0.003",
+    "hookpoints": "layers.[3].self_attn.o_proj",
+    "batch_size": 1,
+    "grad_acc_steps": 8,
+    "micro_acc_steps": 1,
+    "auxk_alpha": 0.03125,
+    "dead_feature_threshold": 10000000,
+    "use_hadamard": false,
+    "family_name": "lowrank_factorized_residual",
+    "family_stage": "mainline",
+    "trunk_rank": 32
+  },
+  "runtime_env_config": {
+    "ARCHITECTURE": "lowrank_factorized_residual",
+    "EXPANSION_FACTOR": "1",
+    "K": "64",
+    "HOOKPOINTS": "layers.[3].self_attn.o_proj",
+    "OPTIMIZER": "signum",
+    "LR": "0.003",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "TRUNK_RANK": "32"
+  },
+  "touched_files": [],
+  "patch_path": null
+}
+
+codex
+r221 已经给出明确信号：`TRUNK_RANK=32` 不仅 FVU 崩到 0.2845，而且吞吐掉到 111k tokens/s、总时长拉到 760s，这条低秩 trunk 压缩线在当前 family 上是负面证据。接下来我对比几个更短链路候选的理论成本，选一个真正只改一个 env 参数的低开销 probe。
+exec
+/bin/bash -lc "python - <<'PY'
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+cands = [
+    ('lowrank_residual',64,1,{}),
+    ('lowrank_residual',128,1,{}),
+    ('factorized_topk',32,2,{}),
+    ('factorized_topk',32,2,{'factorized_hidden_dim':128}),
+    ('factorized_topk',32,2,{'factorized_hidden_dim':64}),
+    ('factorized_topk',32,2,{'factorized_hidden_dim':32}),
+    ('factorized_topk',32,1,{}),
+    ('factorized_topk',64,1,{}),
+]
+for arch,k,ef,extra in cands:
+    cfg = SparseCoderConfig(architecture=arch,k=k,expansion_factor=ef,**extra)
+    m = _get_sae_class(arch)(1024,cfg,device='cpu')
+    print(arch,k,ef,extra,m.selection_cost_estimate())
+PY" in /root/sparsify-ascend
+ succeeded in 4027ms:
+Using fused decoder on CUDA.
+lowrank_residual 64 1 {} {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 1310720, 'deployment_ratio': 0.31, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 2883584, 'combined_ratio': 0.69, 'combined_budget_ratio': 0.46, 'combined_feasible': True}
+lowrank_residual 128 1 {} {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3145728, 'combined_ratio': 0.75, 'combined_budget_ratio': 0.5, 'combined_feasible': True}
+factorized_topk 32 2 {} {'total_accesses': 1572864, 'original_matmul_accesses': 4194304, 'ratio': 0.38, 'budget_ratio': 0.25, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '512x2048'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 1703936, 'combined_ratio': 0.41, 'combined_budget_ratio': 0.27, 'combined_feasible': True}
+factorized_topk 32 2 {'factorized_hidden_dim': 128} {'total_accesses': 393216, 'original_matmul_accesses': 4194304, 'ratio': 0.09, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'encoder', 'accesses': 262144, 'shape': '128x2048'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 524288, 'combined_ratio': 0.12, 'combined_budget_ratio': 0.08, 'combined_feasible': True}
+factorized_topk 32 2 {'factorized_hidden_dim': 64} {'total_accesses': 196608, 'original_matmul_accesses': 4194304, 'ratio': 0.05, 'budget_ratio': 0.03, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'encoder', 'accesses': 131072, 'shape': '64x2048'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 327680, 'combined_ratio': 0.08, 'combined_budget_ratio': 0.05, 'combined_feasible': True}
+factorized_topk 32 2 {'factorized_hidden_dim': 32} {'total_accesses': 98304, 'original_matmul_accesses': 4194304, 'ratio': 0.02, 'budget_ratio': 0.02, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 32768, 'shape': '1024x32'}, {'name': 'encoder', 'accesses': 65536, 'shape': '32x2048'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 229376, 'combined_ratio': 0.05, 'combined_budget_ratio': 0.04, 'combined_feasible': True}
+factorized_topk 32 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 131072, 'deployment_ratio': 0.03, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 131072, 'shape': 'K=32×n=4096'}], 'combined_accesses': 1179648, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+factorized_topk 64 1 {} {'total_accesses': 1048576, 'original_matmul_accesses': 4194304, 'ratio': 0.25, 'budget_ratio': 0.17, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '1024x512'}, {'name': 'encoder', 'accesses': 524288, 'shape': '512x1024'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+
+codex
+我看到了一个更有信息量的单变量轴：`factorized_topk` 的 `FACTORIZED_HIDDEN_DIM`。它直接缩短选择链路，而且不像 `TRUNK_RANK` 那样引入额外 trunk 分支的训练开销；先取历史低开销有效点 r205 作为锚点，再做一次干净的 scorer 压缩更符合当前目标区。
+exec
+/bin/bash -lc "sed -n '1,240p' research/history/round_summaries/round_0205.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 205,
+  "timestamp": 1774669029,
+  "started_at": 1774668747,
+  "ended_at": 1774669029,
+  "duration_sec": 282,
+  "family_name": "factorized_topk",
+  "family_stage": "mainline",
+  "session_id": "019d327b-df00-7e31-9d8e-ff033fd638f5",
+  "timeline_event_ids": [
+    "evt_1774668747196468727",
+    "evt_1774668841273130686",
+    "evt_1774669029597939922"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u5019\u9009 family: factorized_topk\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_i alpha_i b_i\uff0c\u5176\u4e2d b_i \u6765\u81ea\u5355\u4e2a\u9759\u6001\u5411\u91cf\u5e93\uff1bfactorized scorer \u4ec5\u7528\u4e8e\u5728\u7ebf\u6253\u5206\u4e0e\u9009\u5740\uff0c\u5bfc\u51fa\u5230 LUTurbo/Lottable \u65f6\u4ecd\u662f\u5355\u5e93\u67e5\u8868\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u57fa\u4e8e r204 \u5df2\u5728 K=64\u3001EF=2 \u4e0b\u62ff\u5230 0.44x / 0.3013 \u7684 <0.5x \u70b9\uff0c\u672c\u8f6e\u7ee7\u7eed\u4fdd\u6301 architecture\u3001EF\u3001optimizer\u3001LR \u4e0d\u53d8\uff0c\u4ec5\u5c06 K \u4ece 64 \u4e0b\u63a2\u5230 32\uff0c\u9884\u8ba1 deployment cost \u53ef\u7531\u7ea6 0.06x \u8fdb\u4e00\u6b65\u964d\u5230\u7ea6 0.03x\uff0c\u4f7f total_cost \u7ea6\u843d\u5728 0.41x\uff0c\u8865\u5168\u66f4\u4f4e\u6210\u672c\u7aef\u8986\u76d6\uff0c\u5e76\u68c0\u9a8c\u8be5 family \u5728\u66f4\u77ed\u67e5\u8868\u94fe\u8def\u4e0b\u7684 FVU \u9000\u5316\u659c\u7387\u3002",
+    "summary": "\u5728\u76f4\u63a5\u517c\u5bb9 family factorized_topk \u4e0a\u505a\u5355\u53d8\u91cf\u4f4e\u5f00\u9500\u4e0b\u63a2\uff1a\u56fa\u5b9a EF=2\u3001signum\u3001LR=3e-3\uff0c\u4ec5\u628a K \u4ece 64 \u964d\u5230 32\uff0c\u76ee\u6807\u662f\u628a total_cost \u4ece 0.44x \u8fdb\u4e00\u6b65\u538b\u5230\u7ea6 0.41x\uff0c\u5e76\u8865\u5168 <0.5x Pareto \u524d\u6cbf\u7684\u66f4\u4f4e\u90e8\u7f72\u6210\u672c\u7aef\u3002",
+    "change_type": "param_only",
+    "expected_win": "smaller_k",
+    "family_name": "factorized_topk",
+    "family_stage": "mainline",
+    "self_review": "\u8be5\u63d0\u6848\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff0c\u76ee\u6807\u660e\u786e\u6307\u5411 <0.5x \u533a\u57df\u6269\u70b9\u3002\u4e3b\u8981\u98ce\u9669\u662f K=32 \u53ef\u80fd\u628a FVU \u63a8\u9ad8\u8fc7\u5feb\uff0c\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u4f4e\u5f00\u9500 regime \u9700\u8981\u91cf\u5316\u7684 tradeoff\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "factorized_topk"
+      },
+      {
+        "key": "K",
+        "value": "32"
+      },
+      {
+        "key": "EXPANSION_FACTOR",
+        "value": "2"
+      },
+      {
+        "key": "OPTIMIZER",
+        "value": "signum"
+      },
+      {
+        "key": "LR",
+        "value": "3.0e-3"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "factorized_topk \u5728 LUTurbo \u94fe\u8def\u4e2d\u53ef\u76f4\u63a5\u5bfc\u51fa\u4e3a\u5355\u9759\u6001\u5b57\u5178\u7684 top-k \u67e5\u8868\u52a0\u6743\u548c\uff0c\u517c\u5bb9\u6027\u7a33\u5b9a\uff0c\u4e0d\u56e0 scorer factorization \u6539\u53d8 decoder \u5f62\u5f0f\u3002",
+      "\u672c\u8f6e\u7ee7\u7eed\u53ea\u6539 K\uff0c\u6cbf deployment \u6210\u672c\u8f74\u4e0b\u63a2\uff0c\u907f\u514d\u628a encoder \u964d\u672c\u4e0e lookup \u964d\u672c\u6df7\u5728\u4e00\u8d77\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c K=32 \u4ecd\u4fdd\u6301\u53ef\u63a5\u53d7 FVU\uff0c\u53ef\u7ee7\u7eed\u5728 factorized_topk \u4e0a\u5355\u53d8\u91cf\u4e0b\u63a2 FACTORIZED_HIDDEN_DIM\uff0c\u4e89\u53d6\u628a encoder cost \u4e5f\u5f80\u4e0b\u538b\u3002",
+      "\u5982\u679c K=32 \u7684 FVU \u9000\u5316\u8fc7\u5927\uff0c\u5219\u4fdd\u7559 K=64 \u4f5c\u4e3a <0.5x \u4e3b\u70b9\uff0c\u5e76\u8f6c\u53bb topk \u6216 lowrank_residual \u7684\u4f4e\u6210\u672c\u5bf9\u7167\u4ee5\u8865\u524d\u6cbf\u5f62\u72b6\u3002"
+    ],
+    "primary_variable": "k"
+  },
+  "result": {
+    "decision": "keep",
+    "status": "ok",
+    "timestamp": "1774669029",
+    "val_fvu": "0.36946922540664673",
+    "observed_fvu": "0.369469",
+    "k": "32",
+    "architecture": "factorized_topk",
+    "expansion_factor": "2",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "166551.490873",
+    "baseline_ratio": "1.000004",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0205/round0205_standard_1774668841_dp2_bs1_ga8_ef2_k32_20260328_113407",
+    "experiment_id": "r205_1774669029",
+    "head_commit": "5ca14bb0b33af9e45611f312a904a6476c30f930",
+    "description": "\u5728\u76f4\u63a5\u517c\u5bb9 family factorized_topk \u4e0a\u505a\u5355\u53d8\u91cf\u4f4e\u5f00\u9500\u4e0b\u63a2\uff1a\u56fa\u5b9a EF=2\u3001signum\u3001LR=3e-3\uff0c\u4ec5\u628a K \u4ece 64 \u964d\u5230 32\uff0c\u76ee\u6807\u662f\u628a total_cost \u4ece 0.44x \u8fdb\u4e00\u6b65\u538b\u5230\u7ea6 0.41x\uff0c\u5e76\u8865\u5168 <0.5x Pareto \u524d\u6cbf\u7684\u66f4\u4f4e\u90e8\u7f72\u6210\u672c\u7aef\u3002",
+    "self_review": "\u8be5\u63d0\u6848\u4e25\u683c\u9075\u5b88\u5355\u53d8\u91cf\u539f\u5219\uff0c\u76ee\u6807\u660e\u786e\u6307\u5411 <0.5x \u533a\u57df\u6269\u70b9\u3002\u4e3b\u8981\u98ce\u9669\u662f K=32 \u53ef\u80fd\u628a FVU \u63a8\u9ad8\u8fc7\u5feb\uff0c\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u4f4e\u5f00\u9500 regime \u9700\u8981\u91cf\u5316\u7684 tradeoff\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0205_standard_1774668841.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0205/round0205_standard_1774668841_dp2_bs1_ga8_ef2_k32_20260328_113407/metrics.jsonl",
+    "curve_start_fvu": "0.424239",
+    "curve_mid_fvu": "0.371015",
+    "curve_end_fvu": "0.369469",
+    "curve_late_slope": "-0.000000",
+    "curve_still_improving": "true",
+    "initial_target_tokens": "50000000",
+    "final_target_tokens": "60000000",
+    "final_total_tokens": "59969536",
+    "resume_stage_count": "2",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "touched_files": [],
+  "patch_path": null
+}
+
+exec
+/bin/bash -lc "python - <<'PY'
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+for cfg in [
+    ('lowrank_soft_codebook_residual',128,1,{}),
+    ('lowrank_soft_codebook_residual',64,1,{}),
+    ('lowrank_soft_codebook_residual',128,1,{'num_codes':128}),
+    ('lowrank_soft_codebook_residual',128,1,{'num_codes':64}),
+    ('lowrank_soft_codebook_residual',64,1,{'num_codes':64}),
+    ('lowrank_soft_codebook_residual',64,1,{'num_codes':32}),
+]:
+    arch,k,ef,extra=cfg
+    m = _get_sae_class(arch)(1024,SparseCoderConfig(architecture=arch,k=k,expansion_factor=ef,**extra),device='cpu')
+    print(arch,k,ef,extra,m.selection_cost_estimate())
+PY" in /root/sparsify-ascend
+ succeeded in 4005ms:
+Using fused decoder on CUDA.
+lowrank_soft_codebook_residual 128 1 {} {'total_accesses': 2097152, 'original_matmul_accesses': 4194304, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 262144, 'shape': '256x1024'}], 'deployment_accesses': 2621440, 'deployment_ratio': 0.62, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 1048576, 'shape': 'codes=256×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 4718592, 'combined_ratio': 1.12, 'combined_budget_ratio': 0.75, 'combined_feasible': True}
+lowrank_soft_codebook_residual 64 1 {} {'total_accesses': 1835008, 'original_matmul_accesses': 4194304, 'ratio': 0.44, 'budget_ratio': 0.29, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 131072, 'shape': '128x1024'}], 'deployment_accesses': 1835008, 'deployment_ratio': 0.44, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 524288, 'shape': 'codes=128×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 3670016, 'combined_ratio': 0.88, 'combined_budget_ratio': 0.58, 'combined_feasible': True}
+lowrank_soft_codebook_residual 128 1 {'num_codes': 128} {'total_accesses': 1835008, 'original_matmul_accesses': 4194304, 'ratio': 0.44, 'budget_ratio': 0.29, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 131072, 'shape': '128x1024'}], 'deployment_accesses': 2097152, 'deployment_ratio': 0.5, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 524288, 'shape': 'codes=128×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3932160, 'combined_ratio': 0.94, 'combined_budget_ratio': 0.62, 'combined_feasible': True}
+lowrank_soft_codebook_residual 128 1 {'num_codes': 64} {'total_accesses': 1703936, 'original_matmul_accesses': 4194304, 'ratio': 0.41, 'budget_ratio': 0.27, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 65536, 'shape': '64x1024'}], 'deployment_accesses': 1835008, 'deployment_ratio': 0.44, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 262144, 'shape': 'codes=64×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 524288, 'shape': 'K=128×n=4096'}], 'combined_accesses': 3538944, 'combined_ratio': 0.84, 'combined_budget_ratio': 0.56, 'combined_feasible': True}
+lowrank_soft_codebook_residual 64 1 {'num_codes': 64} {'total_accesses': 1703936, 'original_matmul_accesses': 4194304, 'ratio': 0.41, 'budget_ratio': 0.27, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 65536, 'shape': '64x1024'}], 'deployment_accesses': 1572864, 'deployment_ratio': 0.38, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 262144, 'shape': 'codes=64×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 3276800, 'combined_ratio': 0.78, 'combined_budget_ratio': 0.52, 'combined_feasible': True}
+lowrank_soft_codebook_residual 64 1 {'num_codes': 32} {'total_accesses': 1638400, 'original_matmul_accesses': 4194304, 'ratio': 0.39, 'budget_ratio': 0.26, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'trunk_decoder', 'accesses': 262144, 'shape': '256x1024'}, {'name': 'code_router', 'accesses': 32768, 'shape': '1024x32'}, {'name': 'encoder', 'accesses': 1048576, 'shape': '1024x1024'}, {'name': 'codebook_matmul', 'accesses': 32768, 'shape': '32x1024'}], 'deployment_accesses': 1441792, 'deployment_ratio': 0.34, 'deployment_breakdown': [{'name': 'codebook_deploy', 'accesses': 131072, 'shape': 'codes=32×n=4096'}, {'name': 'trunk_deploy', 'accesses': 1048576, 'shape': 'r=256×n=4096'}, {'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 3080192, 'combined_ratio': 0.73, 'combined_budget_ratio': 0.49, 'combined_feasible': True}
+
+codex
+结构型低成本 probe 最近两轮都给了负信号，继续在这两条线上压成本大概率只是换一种方式变差。现在更合理的是把当前最强 `<0.5x` 点当作主线低成本锚点，做一次真正单变量的 recipe probe。
+exec
+/bin/bash -lc "rg -n '\"family_name\": \"topk\"|AUXK_ALPHA|\"LR\"|optimizer' research/history/round_summaries -g 'round_*.json' | tail -n 80" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0070.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0070.json:81:      "If the result is mixed, do one more LR probe before changing optimizer."
+research/history/round_summaries/round_0070.json:102:    "self_review": "This keeps the search on the active mainline family, respects the fixed `EXPANSION_FACTOR=12` rule, uses an allowed `K`, and changes exactly one primary variable: `lr`. It also directly fixes the recent policy-reject cause by using `primary_variable=\"lr\"` rather than `learning_rate`. The main risk is that the baseline may already be near-optimal and `1.6e-3` may simply converge more slowly, but that is the highest-value single question before opening the optimizer branch.",
+research/history/round_summaries/round_0158.json:19:    "hypothesis": "\u8be5 family \u7684\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = U(Vx) + \u03a3_m pi_m c_m + \u03a3_i alpha_i^(1) b_i + \u03a3_j alpha_j^(2) b_j\u3002\u5176\u4e2d U(Vx) \u53ef\u79bb\u7ebf\u5bfc\u51fa\u4e3a\u9759\u6001 trunk \u5411\u91cf\u5e93\uff0c{c_m} \u4e3a\u9759\u6001 soft-codebook \u5e93\uff0c{b_i} \u4e3a\u9759\u6001 residual \u5b57\u5178\u5e93\uff0c\u56e0\u6b64\u6700\u7ec8\u91cd\u6784\u4ecd\u662f\u591a\u4e2a\u9759\u6001\u5411\u91cf\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff0c\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u63a8\u7406\u94fe\u8def\uff1b\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u6269\u5c55\u517c\u5bb9\u3002\u8be5 family \u5728 EF=2 \u4e0b encoder selection_cost \u7ea6 1.25x h\u00d7n\uff0c\u6ee1\u8db3 \u22641.5x \u786c\u7ea6\u675f\u3002r157 \u5df2\u5728\u5f53\u524d\u4f4e EF \u4e3b\u7ebf\u4e0b\u518d\u6b21\u7ed9\u51fa adam \u7684\u7206\u70b8\u6027\u8d1f\u4fe1\u53f7\uff0c\u56e0\u6b64 optimizer \u5206\u652f\u53ef\u89c6\u4e3a\u5df2\u88ab\u660e\u786e\u5173\u95ed\u3002\u6309\u63a8\u8350\u987a\u5e8f\uff0c\u4e0b\u4e00\u6b65\u5e94\u8f6c\u5411 loss/preprocess \u8f74\uff1b\u672c\u8f6e\u53ea\u56de\u7b54\u4e00\u4e2a\u95ee\u9898\uff1a\u5728\u4fdd\u6301 family\u3001EF\u3001K\u3001\u4e3b\u4f18\u5316\u5668\u548c LR \u4e0d\u53d8\u7684\u524d\u63d0\u4e0b\uff0c\u5b8c\u5168\u53bb\u6389 auxiliary K loss\uff08AUXK_ALPHA=0.0\uff09\u662f\u5426\u80fd\u51cf\u5c11\u5bf9\u4e3b\u91cd\u6784\u76ee\u6807\u7684\u5e72\u6270\uff0c\u5e26\u6765\u66f4\u597d\u7684\u66f2\u7ebf\u5f62\u72b6\u6216\u81f3\u5c11\u786e\u8ba4\u8be5\u8f85\u52a9\u9879\u5728\u5f53\u524d\u53ef\u90e8\u7f72 regime \u4e0b\u5df2\u65e0\u5fc5\u8981\u3002",
+research/history/round_summaries/round_0158.json:20:    "summary": "\u7ee7\u7eed\u56f4\u7ed5\u4e3b\u7ebf family \u63a8\u8fdb\uff0c\u4e0d\u5f00\u65b0 family\uff1b\u5728 lowrank_two_stage_soft_codebook_residual\u3001EF=2\u3001K=128\u3001signum\u3001LR=3.0e-3 \u56fa\u5b9a\u7684\u524d\u63d0\u4e0b\uff0c\u4ec5\u5c06 AUXK_ALPHA \u8bbe\u4e3a 0.0\uff0c\u5224\u65ad\u53bb\u6389 auxiliary K loss \u662f\u5426\u80fd\u6539\u5584\u5f53\u524d\u53ef\u90e8\u7f72 regime \u7684\u8bad\u7ec3\u66f2\u7ebf\u6216\u786e\u8ba4\u5176\u5df2\u65e0\u5fc5\u8981\u3002",
+research/history/round_summaries/round_0158.json:25:    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u53ea\u6539\u4e00\u4e2a\u4e3b\u53d8\u91cf AUXK_ALPHA\uff0cfamily\u3001EF\u3001K\u3001optimizer\u3001LR \u5168\u90e8\u56fa\u5b9a\uff0c\u7b26\u5408\u5355\u53d8\u91cf\u539f\u5219\u3002\u5f53\u524d\u7b56\u7565\u987a\u5e8f\u5728 optimizer \u4e4b\u540e\u672c\u5c31\u5e94\u8f6c\u5411 loss/preprocess\uff0c\u800c r157 \u5df2\u628a optimizer \u95ee\u9898\u56de\u7b54\u5f97\u8db3\u591f\u6e05\u695a\uff1b\u56e0\u6b64\u7ee7\u7eed\u505c\u7559\u5728 optimizer \u5206\u652f\u4ef7\u503c\u5f88\u4f4e\uff0c\u4e0d\u5982\u7528\u6700\u5c0f\u6539\u52a8\u68c0\u67e5\u8f85\u52a9\u635f\u5931\u5728\u5f53\u524d\u4f4e\u6210\u672c\u4e3b\u7ebf\u4e2d\u7684\u5fc5\u8981\u6027\u3002",
+research/history/round_summaries/round_0158.json:45:        "key": "LR",
+research/history/round_summaries/round_0158.json:49:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0158.json:57:      "r157 \u5728\u5f53\u524d\u4e3b\u7ebf regime \u4e0b\u518d\u6b21\u590d\u73b0\u4e86 adam \u7684\u5f3a\u8d1f\u4fe1\u53f7\uff0coptimizer \u5206\u652f\u5e94\u6b63\u5f0f\u5173\u95ed\u3002",
+research/history/round_summaries/round_0158.json:61:      "\u82e5 AUXK_ALPHA=0.0 \u5728\u4e0d\u6076\u5316\u541e\u5410\u4e0e\u603b\u65f6\u957f\u7684\u524d\u63d0\u4e0b\u6539\u5584\u66f2\u7ebf\u6216\u7ec8\u70b9\uff0c\u5219\u4e0b\u4e00\u8f6e\u505a\u4e00\u6b21\u540c\u914d\u65b9 clean repeat \u786e\u8ba4\u3002",
+research/history/round_summaries/round_0158.json:62:      "\u82e5 AUXK_ALPHA=0.0 \u4e0e\u57fa\u7ebf\u51e0\u4e4e\u7b49\u4ef7\uff0c\u5219\u8bb0\u5f55 auxiliary loss \u5728\u8be5 regime \u4e0b\u975e\u5173\u952e\uff0c\u968f\u540e\u518d\u8003\u8651\u66f4\u8d34\u8fd1\u7cfb\u7edf\u6210\u672c\u7684 K \u8f74\u3002",
+research/history/round_summaries/round_0158.json:63:      "\u82e5 AUXK_ALPHA=0.0 \u660e\u663e\u9000\u5316\uff0c\u5219\u6062\u590d\u9ed8\u8ba4\u8f85\u52a9\u9879\u5e76\u7ed3\u675f loss \u8f74\u8bd5\u63a2\u3002"
+research/history/round_summaries/round_0158.json:83:    "description": "\u7ee7\u7eed\u56f4\u7ed5\u4e3b\u7ebf family \u63a8\u8fdb\uff0c\u4e0d\u5f00\u65b0 family\uff1b\u5728 lowrank_two_stage_soft_codebook_residual\u3001EF=2\u3001K=128\u3001signum\u3001LR=3.0e-3 \u56fa\u5b9a\u7684\u524d\u63d0\u4e0b\uff0c\u4ec5\u5c06 AUXK_ALPHA \u8bbe\u4e3a 0.0\uff0c\u5224\u65ad\u53bb\u6389 auxiliary K loss \u662f\u5426\u80fd\u6539\u5584\u5f53\u524d\u53ef\u90e8\u7f72 regime \u7684\u8bad\u7ec3\u66f2\u7ebf\u6216\u786e\u8ba4\u5176\u5df2\u65e0\u5fc5\u8981\u3002",
+research/history/round_summaries/round_0158.json:84:    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u53ea\u6539\u4e00\u4e2a\u4e3b\u53d8\u91cf AUXK_ALPHA\uff0cfamily\u3001EF\u3001K\u3001optimizer\u3001LR \u5168\u90e8\u56fa\u5b9a\uff0c\u7b26\u5408\u5355\u53d8\u91cf\u539f\u5219\u3002\u5f53\u524d\u7b56\u7565\u987a\u5e8f\u5728 optimizer \u4e4b\u540e\u672c\u5c31\u5e94\u8f6c\u5411 loss/preprocess\uff0c\u800c r157 \u5df2\u628a optimizer \u95ee\u9898\u56de\u7b54\u5f97\u8db3\u591f\u6e05\u695a\uff1b\u56e0\u6b64\u7ee7\u7eed\u505c\u7559\u5728 optimizer \u5206\u652f\u4ef7\u503c\u5f88\u4f4e\uff0c\u4e0d\u5982\u7528\u6700\u5c0f\u6539\u52a8\u68c0\u67e5\u8f85\u52a9\u635f\u5931\u5728\u5f53\u524d\u4f4e\u6210\u672c\u4e3b\u7ebf\u4e2d\u7684\u5fc5\u8981\u6027\u3002",
+research/history/round_summaries/round_0099.json:17:    "hypothesis": "Round 98 was the first signum LR probe on `lowrank_asymmetric_two_stage_soft_codebook_residual` to beat the archived `LR=2.0e-3` K128 baseline, so before opening the optimizer branch the next single question should be whether `LR=2.4e-3` is a reproducible new anchor rather than a one-off improvement. Re-running the exact same `2.4e-3` recipe is the cleanest way to judge whether the full curve remains stronger than the `2.0e-3` and `1.6e-3` runs, especially in early/mid descent and late stability, rather than trusting the endpoint alone.",
+research/history/round_summaries/round_0099.json:23:    "self_review": "This stays within the same family, keeps `K` and `EXPANSION_FACTOR=12` fixed, and changes no new axis beyond confirming the only signum LR setting that has actually improved the endpoint so far. The tradeoff is spending one round on confirmation instead of opening the optimizer branch immediately, but that is justified because the mainline anchor should be localized on a reproducible LR before optimizer comparisons are made.",
+research/history/round_summaries/round_0099.json:43:        "key": "LR",
+research/history/round_summaries/round_0099.json:51:      "Only after confirming whether `LR=2.4e-3` is a stable anchor should the optimizer branch open on this family."
+research/history/round_summaries/round_0099.json:56:      "Do not change loss, preprocess, or `K` until the optimizer question has been isolated from the settled signum baseline."
+research/history/round_summaries/round_0168.json:45:        "key": "LR",
+research/history/round_summaries/round_0077.json:45:        "key": "LR",
+research/history/round_summaries/round_0077.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0139.json:19:    "hypothesis": "最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) b_j。low-rank trunk 基库 U、soft codebook 库 {c_m}、两阶段 residual 字典库 {b_i} 都是静态可导出的固定向量库，因此可导出到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路；兼容性判断为扩展兼容。该 family 在 EF=2 时 encoder selection_cost 约 1.25x h×n，满足 ≤1.5x 硬约束；本轮只改两阶段预算分配，不改变 family、EF、K、optimizer、LR，也不改变最终导出形式。r138 表明把 LR 下调到 2.4e-3 会在相同吞吐和相同总 token 下把整条曲线都拉差，说明“LR 偏大”假设已基本排除；而 `adam` 在该可行主线上已有明确负信号，AUXK/TRUNK_RANK/NUM_CODES 近几轮也未给出新增益。当前尚未被回答的单一问题是：在相同总 K=128 下，将两阶段预算从默认近似 50/50 改为更前置的 STAGE1_RATIO=0.75，是否能让第一阶段承担更多粗重构，从而改善低 EF regime 的中后段收敛并把 FVU 压回 0.0581 以下。",
+research/history/round_summaries/round_0139.json:25:    "self_review": "遵守单变量原则：只改 STAGE1_RATIO，family、EF、K、optimizer、LR 保持当前主线参考配方不变。该动作保持 LUTurbo 导出契约不变，且不应触碰 encoder 选择成本硬约束；风险是 75/25 过于激进，可能重演历史上非对称预算的负信号，因此评估时必须同时看完整曲线、tokens_per_sec、总耗时和 final_total_tokens，而不是只看最终 FVU。",
+research/history/round_summaries/round_0139.json:45:        "key": "LR",
+research/history/round_summaries/round_0139.json:57:      "在 optimizer 与常见 loss 轴都缺乏正信号后，STAGE1_RATIO 是当前仍未回答、且不改变导出契约的两阶段内部预算问题。"
+research/history/round_summaries/round_0139.json:83:    "self_review": "遵守单变量原则：只改 STAGE1_RATIO，family、EF、K、optimizer、LR 保持当前主线参考配方不变。该动作保持 LUTurbo 导出契约不变，且不应触碰 encoder 选择成本硬约束；风险是 75/25 过于激进，可能重演历史上非对称预算的负信号，因此评估时必须同时看完整曲线、tokens_per_sec、总耗时和 final_total_tokens，而不是只看最终 FVU。",
+research/history/round_summaries/round_0139.json:110:      "LR": "3.0e-3",
+research/history/round_summaries/round_0139.json:117:      "LR",
+research/history/round_summaries/round_0139.json:124:      "LR",
+research/history/round_summaries/round_0029.json:37:        "key": "LR",
+research/history/round_summaries/round_0029.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0031.json:19:    "hypothesis": "Within the `gated` mainline at `K=128, EF=12, optimizer=signum`, a conservative LR step down from `1.6e-3` to `1.2e-3` may improve stability and early-to-mid training curve smoothness enough to beat the current `0.149866` result; this round asks only whether the matched `gated` recipe is slightly overdriven at the reference LR.",
+research/history/round_summaries/round_0031.json:20:    "summary": "Round 30's clean-baseline proposal was rejected by policy, so the next valid mainline move is the first LR callback while holding family, K, EF, and optimizer fixed. This stays on `gated`, changes only LR, and is explicitly aimed at reading the curve shape: if `1.2e-3` descends more smoothly and avoids late flattening or noise while matching or improving terminal FVU, keep sweeping LR inside `gated`; if it is simply slower and worse throughout, the reference LR remains the right anchor.",
+research/history/round_summaries/round_0031.json:25:    "self_review": "This obeys the one-variable rule by changing only LR, keeps EF at 12 and K at 128, and follows the prescribed mainline order after the clean-baseline step was unavailable. I am not changing optimizer yet because LR remains the highest-value unresolved variable inside the current gated recipe.",
+research/history/round_summaries/round_0031.json:45:        "key": "LR",
+research/history/round_summaries/round_0031.json:56:      "If `gated` at LR=1.2e-3 is clearly worse across the curve, keep `1.6e-3` as the gated anchor and consider optimizer swap next."
+research/history/round_summaries/round_0031.json:76:    "description": "Round 30's clean-baseline proposal was rejected by policy, so the next valid mainline move is the first LR callback while holding family, K, EF, and optimizer fixed. This stays on `gated`, changes only LR, and is explicitly aimed at reading the curve shape: if `1.2e-3` descends more smoothly and avoids late flattening or noise while matching or improving terminal FVU, keep sweeping LR inside `gated`; if it is simply slower and worse throughout, the reference LR remains the right anchor.",
+research/history/round_summaries/round_0031.json:77:    "self_review": "This obeys the one-variable rule by changing only LR, keeps EF at 12 and K at 128, and follows the prescribed mainline order after the clean-baseline step was unavailable. I am not changing optimizer yet because LR remains the highest-value unresolved variable inside the current gated recipe.",
+research/history/round_summaries/round_0172.json:45:        "key": "LR",
+research/history/round_summaries/round_0044.json:20:    "summary": "Run a clean control on the updated `gated` preprocess recipe. Keep `ARCHITECTURE=gated`, `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and the same runtime knobs fixed, and explicitly keep `USE_HADAMARD=1` to verify that the large Round 43 improvement is reproducible. Judge this run by the full trajectory, not just terminal FVU: if the start, mid, and late curve again sit materially below the plain-input anchor and finish near `0.142923`, promote Hadamard as the true `gated` reference recipe; if it falls back toward the non-Hadamard curve, treat the improvement as less stable and avoid overcommitting before K mapping.",
+research/history/round_summaries/round_0044.json:45:        "key": "LR",
+research/history/round_summaries/round_0044.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0044.json:104:    "description": "Run a clean control on the updated `gated` preprocess recipe. Keep `ARCHITECTURE=gated`, `K=128`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and the same runtime knobs fixed, and explicitly keep `USE_HADAMARD=1` to verify that the large Round 43 improvement is reproducible. Judge this run by the full trajectory, not just terminal FVU: if the start, mid, and late curve again sit materially below the plain-input anchor and finish near `0.142923`, promote Hadamard as the true `gated` reference recipe; if it falls back toward the non-Hadamard curve, treat the improvement as less stable and avoid overcommitting before K mapping.",
+research/history/round_summaries/round_0051.json:20:    "summary": "Continue the active `gated` mainline and keep the improved recipe fixed: `ARCHITECTURE=gated`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and `USE_HADAMARD=1`. Change only `K` from `8` to `4` to test whether the current recipe improvement extends to the minimum allowed support level. Judge the run by the full trajectory as well as the endpoint: if training remains smooth and finishes clearly below the current `K=4` control (`0.462789`), then `gated` has established a full low-K transfer across the entire allowed grid; if the curve degrades sharply or the endpoint lands near or above that control, treat `K=8` as the practical lower bound of the current gated recipe.",
+research/history/round_summaries/round_0051.json:25:    "self_review": "This stays on the active `gated` family, respects the fixed `EXPANSION_FACTOR=12` rule, and changes exactly one primary variable: `K`. It follows the current mainline logic because the baseline, LR, optimizer, loss, and preprocess questions have already been resolved on this recipe, and the recent K sweep has now shown successful transfer at `K=96`, `K=64`, `K=32`, `K=24`, `K=16`, and `K=8`. The main risk is that `K=4` may be beyond the useful regime for the improved gating recipe, but that is exactly the final high-value single-variable question needed to map the LUTurbo cost-quality boundary on the allowed K grid.",
+research/history/round_summaries/round_0051.json:45:        "key": "LR",
+research/history/round_summaries/round_0051.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0051.json:104:    "description": "Continue the active `gated` mainline and keep the improved recipe fixed: `ARCHITECTURE=gated`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and `USE_HADAMARD=1`. Change only `K` from `8` to `4` to test whether the current recipe improvement extends to the minimum allowed support level. Judge the run by the full trajectory as well as the endpoint: if training remains smooth and finishes clearly below the current `K=4` control (`0.462789`), then `gated` has established a full low-K transfer across the entire allowed grid; if the curve degrades sharply or the endpoint lands near or above that control, treat `K=8` as the practical lower bound of the current gated recipe.",
+research/history/round_summaries/round_0051.json:105:    "self_review": "This stays on the active `gated` family, respects the fixed `EXPANSION_FACTOR=12` rule, and changes exactly one primary variable: `K`. It follows the current mainline logic because the baseline, LR, optimizer, loss, and preprocess questions have already been resolved on this recipe, and the recent K sweep has now shown successful transfer at `K=96`, `K=64`, `K=32`, `K=24`, `K=16`, and `K=8`. The main risk is that `K=4` may be beyond the useful regime for the improved gating recipe, but that is exactly the final high-value single-variable question needed to map the LUTurbo cost-quality boundary on the allowed K grid.",
+research/history/round_summaries/round_0121.json:45:        "key": "LR",
+research/history/round_summaries/round_0121.json:52:      "\u672c\u8f6e\u4e25\u683c\u4fdd\u6301 family/K/EF/optimizer \u4e0d\u53d8\uff0c\u53ea\u6d4b LR\uff0c\u5bf9 frontier \u5f52\u56e0\u5e72\u51c0\u3002",
+research/history/round_summaries/round_0121.json:57:      "\u82e5 signum \u5728 EF=2, K=128 \u4e0b\u5df2\u660e\u663e\u5e73\u53f0\u5316\uff0c\u518d\u505a optimizer \u8f74\u5207\u6362\u5e76\u8054\u52a8 LR retune\u3002",
+research/history/round_summaries/round_0021.json:7:  "family_name": "topk",
+research/history/round_summaries/round_0021.json:23:    "family_name": "topk",
+research/history/round_summaries/round_0021.json:37:        "key": "LR",
+research/history/round_summaries/round_0133.json:25:    "self_review": "遵守单变量原则：family、EF、K、optimizer、LR 均固定，只改 TRUNK_RANK。该动作直接服务于 LUTurbo 的真实目标，因为它同时触碰 encoder 选择成本与部署 trunk 成本；风险是 trunk 容量下降可能导致 coarse branch 表达不足，因此必须结合 FVU、tokens_per_sec、总耗时和最终 token 数一起判断是否值得保留。",
+research/history/round_summaries/round_0133.json:45:        "key": "LR",
+research/history/round_summaries/round_0133.json:57:      "r132 表明 AUXK_ALPHA=0.0 与 baseline 基本等价，因此暂时结束 loss 轴试探，转向更有系统价值的成本轴。"
+research/history/round_summaries/round_0133.json:83:    "self_review": "遵守单变量原则：family、EF、K、optimizer、LR 均固定，只改 TRUNK_RANK。该动作直接服务于 LUTurbo 的真实目标，因为它同时触碰 encoder 选择成本与部署 trunk 成本；风险是 trunk 容量下降可能导致 coarse branch 表达不足，因此必须结合 FVU、tokens_per_sec、总耗时和最终 token 数一起判断是否值得保留。",
+research/history/round_summaries/round_0133.json:110:      "LR": "3.0e-3",
+research/history/round_summaries/round_0133.json:117:      "LR",
+research/history/round_summaries/round_0133.json:124:      "LR",
+research/history/round_summaries/round_0152.json:7:  "family_name": "topk",
+research/history/round_summaries/round_0152.json:23:    "family_name": "topk",
+research/history/round_summaries/round_0152.json:45:        "key": "LR",
+research/history/round_summaries/round_0152.json:51:      "\u672c\u8f6e\u662f\u5355\u6b21 matched architecture probe\uff0c\u4e25\u683c\u53ea\u6539 architecture\uff0c\u5176\u4f59 K\u3001EF\u3001optimizer\u3001LR \u5168\u90e8\u4e0e\u4e3b\u7ebf\u53c2\u8003\u914d\u65b9\u4e00\u81f4\u3002",
+research/history/round_summaries/round_0129.json:45:        "key": "LR",
+research/history/round_summaries/round_0129.json:57:      "\u82e5 2.4e-3 \u660e\u663e\u53d8\u6162\u6216\u6b20\u6536\u655b\uff0c\u5219\u56de\u5230 3.0e-3\uff0c\u5e76\u628a\u4e0b\u4e00\u8f6e\u4e3b\u53d8\u91cf\u5207\u5230 optimizer\uff08\u5982\u5728\u56fa\u5b9a family/EF/K \u4e0b\u6d4b\u8bd5 Adam \u914d\u5957\u91cd\u8c03 LR\uff09\u3002",
+research/history/round_summaries/round_0114.json:25:    "self_review": "\u8fd9\u7b26\u5408\u5f53\u524d\u4e3b\u7ebf\u987a\u5e8f\uff1aEF \u5df2\u786e\u8ba4\u53ef\u884c\uff0cclean baseline \u5df2\u8865\u9f50\uff0c\u4e0b\u4e00\u6b65\u5e94\u53ea\u505a\u5b66\u4e60\u7387\u5c40\u90e8\u5316\u3002\u9009\u62e9\u5411\u4e0a\u63a2\u6d4b\u800c\u4e0d\u662f\u6539 optimizer\uff0c\u662f\u56e0\u4e3a\u73b0\u6709 EF=2 \u66f2\u7ebf\u5df2\u7a33\u5b9a\u4f46\u4ecd\u6709\u7ee7\u7eed\u4e0b\u964d\u8ff9\u8c61\uff0c\u6700\u503c\u5f97\u5148\u6d4b\u8bd5\u7684\u662f\u66f4\u79ef\u6781\u4e00\u6b65\u957f\u662f\u5426\u80fd\u5e26\u6765\u66f4\u597d\u7684\u6536\u655b\u6548\u7387\uff1b\u540c\u65f6\u6ca1\u6709\u5f15\u5165\u7b2c\u4e8c\u4e2a\u53d8\u91cf\uff0c\u5f52\u56e0\u6e05\u6670\u3002",
+research/history/round_summaries/round_0114.json:45:        "key": "LR",
+research/history/round_summaries/round_0114.json:58:      "\u5728 LR \u8f74\u7ed3\u8bba\u660e\u786e\u524d\uff0c\u4e0d\u5207\u6362 optimizer\u3001\u4e0d\u6539 K\uff0c\u4e5f\u4e0d\u6539\u5176\u4ed6\u6210\u672c\u76f8\u5173\u7ed3\u6784\u53c2\u6570\u3002"
+research/history/round_summaries/round_0114.json:79:    "self_review": "\u8fd9\u7b26\u5408\u5f53\u524d\u4e3b\u7ebf\u987a\u5e8f\uff1aEF \u5df2\u786e\u8ba4\u53ef\u884c\uff0cclean baseline \u5df2\u8865\u9f50\uff0c\u4e0b\u4e00\u6b65\u5e94\u53ea\u505a\u5b66\u4e60\u7387\u5c40\u90e8\u5316\u3002\u9009\u62e9\u5411\u4e0a\u63a2\u6d4b\u800c\u4e0d\u662f\u6539 optimizer\uff0c\u662f\u56e0\u4e3a\u73b0\u6709 EF=2 \u66f2\u7ebf\u5df2\u7a33\u5b9a\u4f46\u4ecd\u6709\u7ee7\u7eed\u4e0b\u964d\u8ff9\u8c61\uff0c\u6700\u503c\u5f97\u5148\u6d4b\u8bd5\u7684\u662f\u66f4\u79ef\u6781\u4e00\u6b65\u957f\u662f\u5426\u80fd\u5e26\u6765\u66f4\u597d\u7684\u6536\u655b\u6548\u7387\uff1b\u540c\u65f6\u6ca1\u6709\u5f15\u5165\u7b2c\u4e8c\u4e2a\u53d8\u91cf\uff0c\u5f52\u56e0\u6e05\u6670\u3002",
+research/history/round_summaries/round_0046.json:20:    "summary": "Continue the active `gated` mainline and keep the improved recipe fixed: `ARCHITECTURE=gated`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and `USE_HADAMARD=1`. Change only `K` from `96` to `64` to test whether the new recipe yields a stronger lower-cost deployment point at the next allowed support level. Judge the run by the full trajectory as well as the endpoint: if it stays smooth and finishes materially below the old `gated@64` control (`0.195828`), the improved recipe is genuinely useful beyond the `K=128` anchor; if it falls back toward the old curve, treat the current gain as mainly a high-K effect.",
+research/history/round_summaries/round_0046.json:25:    "self_review": "This stays on the current mainline family, respects the fixed `EXPANSION_FACTOR=12` rule, and changes exactly one primary variable: `K`. It follows the prescribed order because the clean baseline, LR, optimizer, loss, and preprocess questions have already been answered on this recipe, and Round 45 provided positive evidence that the improved recipe transfers at least to `K=96`. The main risk is that `K=64` may sit past the regime where Hadamard helps, but that is the highest-value remaining single-question probe for LUTurbo-relevant cost reduction.",
+research/history/round_summaries/round_0046.json:45:        "key": "LR",
+research/history/round_summaries/round_0046.json:61:        "key": "AUXK_ALPHA",
+research/history/round_summaries/round_0046.json:79:      "Rounds 43-45 established a stronger `gated` mainline recipe: `signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and `USE_HADAMARD=1`, with reproducible improvement at `K=128` and successful transfer to `K=96`.",
+research/history/round_summaries/round_0046.json:104:    "description": "Continue the active `gated` mainline and keep the improved recipe fixed: `ARCHITECTURE=gated`, `EXPANSION_FACTOR=12`, `OPTIMIZER=signum`, `LR=2.0e-3`, `AUXK_ALPHA=0.03125`, and `USE_HADAMARD=1`. Change only `K` from `96` to `64` to test whether the new recipe yields a stronger lower-cost deployment point at the next allowed support level. Judge the run by the full trajectory as well as the endpoint: if it stays smooth and finishes materially below the old `gated@64` control (`0.195828`), the improved recipe is genuinely useful beyond the `K=128` anchor; if it falls back toward the old curve, treat the current gain as mainly a high-K effect.",
+research/history/round_summaries/round_0046.json:105:    "self_review": "This stays on the current mainline family, respects the fixed `EXPANSION_FACTOR=12` rule, and changes exactly one primary variable: `K`. It follows the prescribed order because the clean baseline, LR, optimizer, loss, and preprocess questions have already been answered on this recipe, and Round 45 provided positive evidence that the improved recipe transfers at least to `K=96`. The main risk is that `K=64` may sit past the regime where Hadamard helps, but that is the highest-value remaining single-question probe for LUTurbo-relevant cost reduction.",
+
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"AUXK_ALPHA","value":"0.0"}],"expected_win":"better_fvu_within_low_cost_region","experiment_tier":"full","family_name":"topk","family_stage":"mainline","hypothesis":"候选 family: topk。最终重构公式为 x_hat = Σ_i α_i b_i，其中 {b_i} 来自单个静态向量库；在线侧只做单样本 top-k 选择与系数计算，部署侧仍是单库查表 + 加权求和 + 选择性补偿，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容。基于 r218 已在 total_cost=0.49x 处给出当前 <0.5x 区域最佳 FVU=0.1462，而最近两轮更复杂低成本结构 probe（factorized_topk、lowrank_factorized_residual@TRUNK_RANK=32）分别给出明显更差 FVU，且 r221 还把吞吐压到 111k tokens/s、总时长拉到 760s，说明当前更值得在最强低开销锚点上做不增加系统成本的单变量 recipe 探针。本轮严格锚定 r218，只改 `AUXK_ALPHA=0.0`，测试在 EF=1、K=248、字典容量已很紧、支持集已很大的低成本 regime 下，去掉 auxiliary-K loss 是否能减少对主重构目标的干扰，在不恶化 tokens_per_sec、总耗时和 final_total_tokens 的前提下，把 <0.5x 前沿 FVU 继续压低。","needs_sanity":false,"next_hypotheses":["如果 `AUXK_ALPHA=0.0` 在保持接近 r218 吞吐与总时长的同时把 FVU 压到 0.1462 以下，则下一轮对该无辅助损失配方做一次 clean repeat 确认，再考虑继续围绕 topk 低成本主线做 recipe 局部化。","如果 `AUXK_ALPHA=0.0` 与 r218 基本等价，则记录 auxiliary loss 在 `topk@EF1,K248` 低成本主线中不是关键因子，随后转向同一锚点上的单变量 LR probe。","如果 `AUXK_ALPHA=0.0` 明显退化，则恢复默认 auxiliary loss，并将 loss 轴在该 low-cost topk 主线上暂时关闭。"],"notes_to_memory":["r221 证明低秩 trunk 压缩在 lowrank_factorized_residual 上同时伤害质量与运行代价，不应继续占用 <0.5x 主线轮次。","当前最有价值的动作是在已知最强 <0.5x 点 `topk@EF1,K248` 上做不改变部署成本的单变量 recipe probe，而不是继续引入更长选择链路。","若 `AUXK_ALPHA=0.0` 成功，则说明在高 K、低 EF 的单库 topk 低成本 regime 中，auxiliary K loss 可能只是训练干扰项而非必要正则。"],"reference_round":218,"self_review":"该提案满足单变量原则：相对有效参考轮 r218 只改 `AUXK_ALPHA`，不改 family、K、EF、optimizer、LR 或其他结构参数。相比继续做新的 architecture probe，这一步信息更干净，因为它直接回答当前最强 <0.5x 锚点是否还有零部署增量的可挖掘训练收益；风险是 auxiliary loss 可能仍对活跃特征利用有帮助，但这正是本轮要隔离验证的问题。","summary":"相对 r218 的 `topk@EF1,K248` 做一次严格 param_only loss 轴验证，仅将 `AUXK_ALPHA` 设为 0.0，判断去掉 auxiliary-K loss 能否在不增加系统成本和运行时负担的前提下继续压低 <0.5x 前沿 FVU。","touched_files":[]}
+tokens used
+472,643
