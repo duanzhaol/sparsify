@@ -1,0 +1,585 @@
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权和，因此可直接导出到 LUTurbo/Lottable 推理链路；`shared_routed_expert_topk` 继续按直接兼容处理。明确排除不兼容 family：`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled 结构不能进入 frontier，也不能驱动本轮决策。r110→r111 已经完成 width knee 的连续左移，并在 `K=96, ACTIVE_EXPERTS=2` 下得到新的非支配点 `0.30x / FVU 0.1228`，说明 shared+routed 低成本线仍成立；因此本轮应换到 deployment 轴，相对 r111 只把 `K` 从 96 降到 80，在保持 `LATENTS_PER_EXPERT=256`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变时，把 total_cost 进一步压到约 0.28x，同时不改变已验证的 shared+routed 结构假设。如果 FVU 只温和退化，则会新增一个更靠左的兼容 Pareto 点，并回答当前低成本线下一步更该压 lookup budget 还是已经触及部署侧 knee。","summary":"Round 112 以 r111 为 reference，保持 `shared_routed_expert_topk` 的已验证结构不变，只改 `K=80`。width 轴已经连续给出新非支配点，本轮切到 deployment 轴，测当前 shared+routed 低成本前沿在 `LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2` 下还能否继续向左推进。","change_type":"param_only","expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"prototype","self_review":"满足单轮单变量约束：相对 r111 只改 `K`。这不是回到旧 family 的局部扫点，而是在已经确认有效的 shared+routed 兼容主线上，从 encoder-width knee 切换到 deployment knee。选择 `K=80` 而不是继续压 `LATENTS_PER_EXPERT`，是因为 r111 已经把 width 轴推进到 256 并形成新非支配点；继续连压宽度的边际信息已经下降，而 `K=80` 能更直接回答 lookup budget 的剩余空间。主要风险是 `K=96→80` 的退化幅度超过预期，但这同样是高价值结论，因为它会说明当前 shared+routed 线在约 0.30x 附近更受部署预算约束，不宜再继续向更低 K 推。","needs_sanity":false,"env_overrides":[{"key":"K","value":"80"}],"touched_files":[],"notes_to_memory":["本地兼容低成本 frontier 已形成 shared+routed 五段线，其中 r111 (`K=96, LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2`) 达到 total≈0.30x、FVU=0.1228，并继续优于旧 `expert_topk` anchors。","在 `shared_routed_expert_topk` 下，`K=80, LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2` 的 selection 仍约 0.20x，deployment 约 0.08x，combined ratio 约 0.28x，显著低于 1.5×h×n 硬预算。","r110→r111 已经证明继续压每-expert width 仍能形成新非支配点；本轮因此切到 `K` 轴，补 deployment-side knee，而不是继续重复宽度压缩。"],"next_hypotheses":["如果 `K=80` 仍把 FVU 控制在约 0.13 左右或更低，则下一轮可继续保持 family 不变，只改 `K=64`，完成 shared+routed 在更低部署预算处的左边界定位。","如果 `K=80` 相比 r111 明显退化，则可初步判定当前 shared+routed 低成本线更接近 deployment knee，后续不应再继续降 K，而应回到 `ACTIVE_EXPERTS` 或切到 matched `lowrank_expert_residual` 对照。","如果 `K=80` 与 r111 接近但未形成新非支配点，则下一轮必须换轴，不再连续压 `K`。"],"reference_round":111}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3b17-3317-7d11-b965-022780475db6
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 112。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 112 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.3149，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前主线 family：lowrank_expert_residual
+当前主线参考配方：ARCHITECTURE=lowrank_expert_residual K=192 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前主线完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=192
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. plain `EF=1` selector 结果现在主要作为 cost anchor；除 matched baseline 外，不应继续占用大部分搜索预算。
+4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。
+5. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。
+6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=111, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=7
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：结构扩展优先。
+  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。
+  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。
+
+当前高优先级未充分验证方向：
+  1. `expert_topk` / 轻量 MoE-like 子库路由。
+     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. `lowrank + expert`。
+     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。
+  3. `lowrank + expert + residual`。
+     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。
+  4. `two-stage residual expert`。
+     先 coarse library，再用局部 expert residual 做第二段修正。
+  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.68x (sel=0.53x + deploy=0.15x)  fvu=0.09726757556200027  arch=lowrank_expert_residual  K=112 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.69x (sel=0.53x + deploy=0.16x)  fvu=0.09202119708061218  arch=lowrank_expert_residual  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.75x (sel=0.25x + deploy=0.5x)  fvu=0.06265510618686676  arch=topk  K=512 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=1.06x (sel=0.5x + deploy=0.56x)  fvu=0.04238538444042206  arch=lowrank_expert_residual  K=192 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  !! <0.5x 区域仅有 2 个点，当前最佳 FVU=0.3149，仍明显欠覆盖。
+
+成本状态：
+  当前最佳 <0.5x 点 → expert_topk (K=128, EF=1) [FEASIBLE]:
+    总成本: 0.19x | 预算比率: 0.13x | encoder: 0.06x | 部署: 0.12x | FVU: 0.3148818016052246
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构）：
+  （最近没有兼容 family 的新结果）
+
+最近可用 reference_round 的完整配置：
+  r100 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r96 lowrank_expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r93 expert_topk (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_topk
+  EXPANSION_FACTOR=1
+  K=160
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  NUM_EXPERTS=128
+
+  r99 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+操作提示：
+  1. 当前 <0.5x total_cost 的有效主线是 `lowrank_expert_topk`。优先围绕已验证 recipe 做 knee 定位：先完成 `TRUNK_RANK=40-48` 与 `K=96-128` 的压缩边界，再决定是否切到 matched `lowrank_expert_residual` 对照。
+  2. 防重复：如果同一 family 的同一结构假设连续 2 轮结果接近且未形成新非支配点，下一轮必须换轴或换 family；当前不要再重复 `factorized_expert_topk` 或 routed-only `ACTIVE_EXPERTS>1`。
+  3. 后续高优先级新 family 可直接参考 DeepSeek 风格异构 MoE：区分 `shared experts` 与 `routed experts`，让 shared experts 始终激活、每个 token 再额外路由少量 expert（例如 ACTIVE_EXPERTS=1-4），必要时再叠 low-rank trunk 或 residual cleanup。不要把 `expert_topk ACTIVE_EXPERTS>1` 这类同质 experts 的负信号外推为对 `shared+routed experts` 的否定；如果现有 family 不支持 shared experts，应优先新增最小可运行原型，而不是继续用 `factorized_expert_topk` 充当长期替身。
+  4. 对 `shared_routed_expert_topk`，不要只沿 `NUM_EXPERTS=32->64->128` 做容量扩张。当前真正未验证、且更有信息量的方向是“更窄的每-expert 宽度 + 更多 active routed experts”的 matched-cost 扫描：例如保持 `(shared_experts + ACTIVE_EXPERTS) * per_expert_width` 近似不变，用更小的 per-expert width 换取 `ACTIVE_EXPERTS=2-4`，比较它是否优于当前 `EF=1, ACTIVE_EXPERTS=1` 的单路 routed 方案。
+  5. 注意：当前系统里的 `EXPANSION_FACTOR` 仍按整数处理，不能直接表达 `EF<1`。如果 agent 判断“低于 1 的 expert 宽度 + 更多 ACTIVE_EXPERTS”值得探索，不要直接返回无效参数；应先做最小工程接线，支持 fractional-EF 等价语义（或显式的 per-expert latent width 参数），并在 wiring 完成后的首轮先验证该新参数是否真实进入 round config / checkpoint config，再做 matched-cost 结构实验。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
+- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
+- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
+- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+
+一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | score
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先读取本地 `r111` 的真实结果和当前 frontier，再决定是否继续压宽度还是切回 `K` 轴。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+for path in ['research/history/round_summaries/round_0111.json','research/history/logs/agent_action_0111.json']:
+    print('FILE', path)
+    with open(path) as f:
+        print(f.read())
+        print('\\n---\\n')
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+FILE research/history/round_summaries/round_0111.json
+{
+  "round": 111,
+  "timestamp": 1774820193,
+  "started_at": 1774819391,
+  "ended_at": 1774820193,
+  "duration_sec": 802,
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "prototype",
+  "session_id": "019d3b17-3317-7d11-b965-022780475db6",
+  "timeline_event_ids": [
+    "evt_1774819391583728127",
+    "evt_1774819554674622613",
+    "evt_1774820193988706474"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e\u5404 routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u53ea\u505a\u8f7b\u91cf router \u9009\u51fa\u5c11\u91cf expert\uff0c\u518d\u505a shared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff1b\u6211\u5c06 `shared_routed_expert_topk` \u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u660e\u786e\u6392\u9664\u4e0d\u517c\u5bb9 family\uff1a`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled \u7ed3\u6784\u4e0d\u80fd\u8fdb\u5165\u5f53\u524d frontier\uff0c\u4e5f\u4e0d\u80fd\u9a71\u52a8\u672c\u8f6e\u51b3\u7b56\u3002\u672c\u8f6e\u552f\u4e00\u5047\u8bbe\u662f\uff1a\u5728 r110 \u5df2\u628a `K=96, ACTIVE_EXPERTS=2` \u7684 shared+routed \u4f4e\u6210\u672c\u7ebf\u538b\u5230\u7ea6 0.32x\u3001FVU=0.1191 \u4e4b\u540e\uff0c\u7ee7\u7eed\u76f8\u5bf9 r110 \u53ea\u628a `LATENTS_PER_EXPERT` \u4ece 288 \u964d\u5230 256\uff0c\u53ef\u4ee5\u7528\u7eaf encoder-side left shift \u628a\u603b\u6210\u672c\u8fdb\u4e00\u6b65\u538b\u5230\u7ea6 0.30x\uff08selection\u22480.20x, deployment\u22480.09x\uff09\uff0c\u800c\u4e0d\u518d\u989d\u5916\u4f24\u5bb3 sparse lookup \u9884\u7b97\uff1b\u5982\u679c FVU \u4ecd\u660e\u663e\u4f18\u4e8e\u73b0\u6709\u4f4e\u6210\u672c anchor `expert_topk K=128` \u7684 0.3149\uff0c\u5e76\u4fdd\u6301\u5728 shared+routed \u4f4e\u6210\u672c\u7ebf\u7684\u53ef\u63a5\u53d7\u9000\u5316\u8303\u56f4\u5185\uff0c\u5c31\u8bf4\u660e\u8fd9\u6761\u517c\u5bb9 family \u7684 Pareto knee \u4ecd\u53ef\u901a\u8fc7\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u7ee7\u7eed\u5411\u5de6\u63a8\u8fdb\u3002",
+    "summary": "Round 111 \u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u7684\u5bbd\u5ea6 knee \u505a\u5355\u53d8\u91cf\u538b\u7f29\u3002\u4ee5 r110 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=256`\uff0c\u56de\u7b54\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u524d\u6cbf\u5728 `K=96, ACTIVE_EXPERTS=2` \u4e0b\u662f\u5426\u8fd8\u80fd\u7ee7\u7eed\u9760\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u6362\u6210\u672c\uff0c\u800c\u4e0d\u5fc5\u5148\u56de\u5230 `K` \u8f74\u3002",
+    "change_type": "param_only",
+    "expected_win": "lower_cost",
+    "family_name": "shared_routed_expert_topk",
+    "family_stage": "prototype",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r110 \u53ea\u6539 `LATENTS_PER_EXPERT`\u3002\u8fd9\u6bd4\u6539 `K=80` \u66f4\u4fe1\u606f\u5bc6\u96c6\uff0c\u56e0\u4e3a r108\u2192r109 \u5df2\u7ecf\u56de\u7b54\u8fc7\u7ee7\u7eed\u538b lookup budget \u4f1a\u4f24\u8d28\u91cf\uff0c\u800c r109\u2192r110 \u53c8\u8868\u660e shared+routed \u5bbd\u5ea6\u8fd8\u80fd\u518d\u538b\u4e00\u6863\uff1b\u672c\u8f6e\u628a\u5bbd\u5ea6\u5e8f\u5217\u8865\u5230 256\uff0c\u80fd\u66f4\u6e05\u695a\u5b9a\u4f4d\u8fd9\u6761\u517c\u5bb9 family \u7684 encoder-side knee\u3002`LATENTS_PER_EXPERT` \u7684 allowlist\u3001runtime wiring\u3001checkpoint config \u6301\u4e45\u5316\u90fd\u5df2\u5728\u672c\u5730\u786e\u8ba4\uff0c\u65e0\u9700 `edit_sae_code`\u3002\u4e3b\u8981\u98ce\u9669\u662f 256 \u8fc7\u7a84\u5bfc\u81f4 FVU \u660e\u663e\u52a3\u4e8e r110\uff1b\u4f46\u8fd9\u540c\u6837\u662f\u9ad8\u4ef7\u503c\u8d1f\u7ed3\u679c\uff0c\u56e0\u4e3a\u5b83\u4f1a\u76f4\u63a5\u8868\u660e\u5f53\u524d <0.5x \u7ed3\u6784\u524d\u6cbf\u4e0d\u5e94\u7ee7\u7eed\u538b expert \u5bbd\u5ea6\uff0c\u800c\u5e94\u5207\u56de `K` \u6216\u522b\u7684\u517c\u5bb9 family\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "LATENTS_PER_EXPERT",
+        "value": "256"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "\u672c\u5730\u517c\u5bb9\u4f4e\u6210\u672c frontier \u5df2\u5f62\u6210 shared+routed \u56db\u6bb5\u7ebf\uff1ar107 (LP=384,K=128) FVU=0.1010\uff0cr108 (320,128) FVU=0.1072\uff0cr109 (320,96) FVU=0.1147\uff0cr110 (288,96) FVU=0.1191\u3002",
+      "\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c`shared_routed_expert_topk K=96 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=256` \u7684 selection\u22480.20x\u3001deployment\u22480.09x\u3001total\u22480.30x\uff0c\u663e\u8457\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002",
+      "\u5f53\u524d <0.5x \u533a\u57df\u6700\u6709\u4fe1\u606f\u91cf\u7684\u517c\u5bb9\u4e3b\u7ebf\u5df2\u7ecf\u4ece\u65e7 `expert_topk` anchor \u8f6c\u5230 `shared_routed_expert_topk`\uff1b\u672c\u8f6e\u7ee7\u7eed\u8865\u5b83\u7684 encoder-width knee\uff0c\u800c\u4e0d\u662f\u56de\u5230 old-family \u5c40\u90e8\u626b\u70b9\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c `LATENTS_PER_EXPERT=256` \u5728\u7ea6 0.30x \u4e0b\u4ecd\u628a FVU \u63a7\u5236\u5728\u7ea6 0.12-0.13 \u6216\u66f4\u4f4e\uff0c\u5219\u4e0b\u4e00\u8f6e\u53ef\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `K=80`\uff0c\u7ee7\u7eed\u5411\u66f4\u4f4e\u90e8\u7f72\u9884\u7b97\u63a8\u8fdb\u3002",
+      "\u5982\u679c `LATENTS_PER_EXPERT=256` \u76f8\u6bd4 r110 \u660e\u663e\u9000\u5316\uff0c\u5219\u53ef\u521d\u6b65\u5224\u5b9a\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u7ebf\u5df2\u7ecf\u63a5\u8fd1 width floor\uff0c\u540e\u7eed\u4e0d\u5e94\u518d\u538b\u6bcf-expert \u5bbd\u5ea6\uff0c\u800c\u5e94\u8f6c\u5411 `K`\u3001`ACTIVE_EXPERTS` \u6216 matched `lowrank_expert_residual` \u5bf9\u7167\u3002",
+      "\u5982\u679c `LATENTS_PER_EXPERT=256` \u7ed3\u679c\u4e0e r110 \u63a5\u8fd1\u4f46\u672a\u5f62\u6210\u65b0\u975e\u652f\u914d\u70b9\uff0c\u5219\u4e0b\u4e00\u8f6e\u5fc5\u987b\u6362\u8f74\uff0c\u4e0d\u518d\u8fde\u7eed\u538b\u5bbd\u5ea6\u3002"
+    ],
+    "reference_round": 110
+  },
+  "result": {
+    "decision": "keep",
+    "status": "ok",
+    "timestamp": "1774820193",
+    "val_fvu": "0.12280605733394623",
+    "observed_fvu": "0.122806",
+    "k": "96",
+    "architecture": "shared_routed_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "66632.293225",
+    "baseline_ratio": "0.999997",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0111/round0111_standard_1774819554_dp2_bs1_ga8_ef1_k96_20260330_052600",
+    "experiment_id": "r111_1774820193",
+    "head_commit": "a64cff75f4d3cef1d0e4bcb0ed930b9da028fc41",
+    "description": "Round 111 \u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u7684\u5bbd\u5ea6 knee \u505a\u5355\u53d8\u91cf\u538b\u7f29\u3002\u4ee5 r110 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=256`\uff0c\u56de\u7b54\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u524d\u6cbf\u5728 `K=96, ACTIVE_EXPERTS=2` \u4e0b\u662f\u5426\u8fd8\u80fd\u7ee7\u7eed\u9760\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u6362\u6210\u672c\uff0c\u800c\u4e0d\u5fc5\u5148\u56de\u5230 `K` \u8f74\u3002",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r110 \u53ea\u6539 `LATENTS_PER_EXPERT`\u3002\u8fd9\u6bd4\u6539 `K=80` \u66f4\u4fe1\u606f\u5bc6\u96c6\uff0c\u56e0\u4e3a r108\u2192r109 \u5df2\u7ecf\u56de\u7b54\u8fc7\u7ee7\u7eed\u538b lookup budget \u4f1a\u4f24\u8d28\u91cf\uff0c\u800c r109\u2192r110 \u53c8\u8868\u660e shared+routed \u5bbd\u5ea6\u8fd8\u80fd\u518d\u538b\u4e00\u6863\uff1b\u672c\u8f6e\u628a\u5bbd\u5ea6\u5e8f\u5217\u8865\u5230 256\uff0c\u80fd\u66f4\u6e05\u695a\u5b9a\u4f4d\u8fd9\u6761\u517c\u5bb9 family \u7684 encoder-side knee\u3002`LATENTS_PER_EXPERT` \u7684 allowlist\u3001runtime wiring\u3001checkpoint config \u6301\u4e45\u5316\u90fd\u5df2\u5728\u672c\u5730\u786e\u8ba4\uff0c\u65e0\u9700 `edit_sae_code`\u3002\u4e3b\u8981\u98ce\u9669\u662f 256 \u8fc7\u7a84\u5bfc\u81f4 FVU \u660e\u663e\u52a3\u4e8e r110\uff1b\u4f46\u8fd9\u540c\u6837\u662f\u9ad8\u4ef7\u503c\u8d1f\u7ed3\u679c\uff0c\u56e0\u4e3a\u5b83\u4f1a\u76f4\u63a5\u8868\u660e\u5f53\u524d <0.5x \u7ed3\u6784\u524d\u6cbf\u4e0d\u5e94\u7ee7\u7eed\u538b expert \u5bbd\u5ea6\uff0c\u800c\u5e94\u5207\u56de `K` \u6216\u522b\u7684\u517c\u5bb9 family\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0111_standard_1774819554.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0111/round0111_standard_1774819554_dp2_bs1_ga8_ef1_k96_20260330_052600/metrics.jsonl",
+    "curve_start_fvu": "0.175346",
+    "curve_mid_fvu": "0.140133",
+    "curve_end_fvu": "0.122806",
+    "curve_late_slope": "-0.000000",
+    "curve_still_improving": "true",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "96",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "40",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "64",
+    "LATENTS_PER_EXPERT": "288",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "96",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "40",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "64",
+    "LATENTS_PER_EXPERT": "256",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "changed_keys": [
+    "LATENTS_PER_EXPERT"
+  ],
+  "reference_source": "reference_round:r110",
+  "runtime_config_json": {
+    "architecture": "shared_routed_expert_topk",
+    "expansion_factor": 1,
+    "k": 96,
+    "optimizer": "adam",
+    "lr": "8e-4",
+    "hookpoints": "layers.[3].self_attn.q_proj",
+    "batch_size": 1,
+    "grad_acc_steps": 8,
+    "micro_acc_steps": 1,
+    "auxk_alpha": 0.03125,
+    "dead_feature_threshold": 10000000,
+    "use_hadamard": false,
+    "family_name": "shared_routed_expert_topk",
+    "family_stage": "prototype",
+    "target_profile": {
+      "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+      "training_hookpoint": "layers.[3].self_attn.q_proj",
+      "d_in": 1024,
+      "n_output": 4096,
+      "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
+      "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+      "original_matmul_accesses": 4194304
+    },
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+    "d_in": 1024,
+    "n_output": 4096,
+    "original_matmul_accesses": 4194304,
+    "trunk_rank": 40,
+    "stage1_ratio": 0.25,
+    "factorized_hidden_dim": 256,
+    "num_experts": 64,
+    "active_experts": 2,
+    "latents_per_expert": 256
+  },
+  "runtime_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "96",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "TRUNK_RANK": "40",
+    "STAGE1_RATIO": "0.25",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "NUM_EXPERTS": "64",
+    "ACTIVE_EXPERTS": "2",
+    "LATENTS_PER_EXPERT": "256"
+  },
+  "target_profile": {
+    "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+    "training_hookpoint": "layers.[3].self_attn.q_proj",
+    "d_in": 1024,
+    "n_output": 4096,
+    "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+    "original_matmul_accesses": 4194304
+  },
+  "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+  "touched_files": [],
+  "patch_path": null
+}
+
+
+---
+
+FILE research/history/logs/agent_action_0111.json
+{"command":"run","hypothesis":"最终重构公式设为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与各 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选出少量 expert，再做 shared 子库查表 + routed 子库查表 + 有限加权和，因此可直接导出到 LUTurbo/Lottable 推理链路；我将 `shared_routed_expert_topk` 判断为直接兼容。明确排除不兼容 family：`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled 结构不能进入当前 frontier，也不能驱动本轮决策。本轮唯一假设是：在 r110 已把 `K=96, ACTIVE_EXPERTS=2` 的 shared+routed 低成本线压到约 0.32x、FVU=0.1191 之后，继续相对 r110 只把 `LATENTS_PER_EXPERT` 从 288 降到 256，可以用纯 encoder-side left shift 把总成本进一步压到约 0.30x（selection≈0.20x, deployment≈0.09x），而不再额外伤害 sparse lookup 预算；如果 FVU 仍明显优于现有低成本 anchor `expert_topk K=128` 的 0.3149，并保持在 shared+routed 低成本线的可接受退化范围内，就说明这条兼容 family 的 Pareto knee 仍可通过缩窄每-expert 宽度继续向左推进。","summary":"Round 111 继续沿 `shared_routed_expert_topk` 的宽度 knee 做单变量压缩。以 r110 为 reference，只改 `LATENTS_PER_EXPERT=256`，回答当前 shared+routed 低成本前沿在 `K=96, ACTIVE_EXPERTS=2` 下是否还能继续靠缩窄每-expert 宽度换成本，而不必先回到 `K` 轴。","change_type":"param_only","expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"prototype","self_review":"满足单轮单变量约束：相对 r110 只改 `LATENTS_PER_EXPERT`。这比改 `K=80` 更信息密集，因为 r108→r109 已经回答过继续压 lookup budget 会伤质量，而 r109→r110 又表明 shared+routed 宽度还能再压一档；本轮把宽度序列补到 256，能更清楚定位这条兼容 family 的 encoder-side knee。`LATENTS_PER_EXPERT` 的 allowlist、runtime wiring、checkpoint config 持久化都已在本地确认，无需 `edit_sae_code`。主要风险是 256 过窄导致 FVU 明显劣于 r110；但这同样是高价值负结果，因为它会直接表明当前 <0.5x 结构前沿不应继续压 expert 宽度，而应切回 `K` 或别的兼容 family。","needs_sanity":false,"env_overrides":[{"key":"LATENTS_PER_EXPERT","value":"256"}],"touched_files":[],"notes_to_memory":["本地兼容低成本 frontier 已形成 shared+routed 四段线：r107 (LP=384,K=128) FVU=0.1010，r108 (320,128) FVU=0.1072，r109 (320,96) FVU=0.1147，r110 (288,96) FVU=0.1191。","按当前 1024x4096 cost proxy 估算，`shared_routed_expert_topk K=96 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=256` 的 selection≈0.20x、deployment≈0.09x、total≈0.30x，显著低于 1.5×h×n 硬预算。","当前 <0.5x 区域最有信息量的兼容主线已经从旧 `expert_topk` anchor 转到 `shared_routed_expert_topk`；本轮继续补它的 encoder-width knee，而不是回到 old-family 局部扫点。"],"next_hypotheses":["如果 `LATENTS_PER_EXPERT=256` 在约 0.30x 下仍把 FVU 控制在约 0.12-0.13 或更低，则下一轮可保持 family 不变，只改 `K=80`，继续向更低部署预算推进。","如果 `LATENTS_PER_EXPERT=256` 相比 r110 明显退化，则可初步判定当前 shared+routed 低成本线已经接近 width floor，后续不应再压每-expert 宽度，而应转向 `K`、`ACTIVE_EXPERTS` 或 matched `lowrank_expert_residual` 对照。","如果 `LATENTS_PER_EXPERT=256` 结果与 r110 接近但未形成新非支配点，则下一轮必须换轴，不再连续压宽度。"],"reference_round":110}
+
+---
+
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+front=json.load(open('research/history/frontier.json'))
+for k,v in front.items():
+    fam=v.get('family_name') or v.get('architecture')
+    if fam in {'shared_routed_expert_topk','expert_topk','lowrank_expert_residual','lowrank_expert_topk','topk'}:
+        print(k, json.dumps(v, ensure_ascii=False))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+r18 {"total_cost": 3145728.0, "selection_cost": 1048576.0, "fvu": 0.06265510618686676, "k": 512, "ef": 1, "architecture": "topk", "commit": "647f8041b487a43db1b7bac9455cd1d16cb15d38", "config": {"architecture": "topk", "expansion_factor": 1, "k": 512, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "topk", "family_stage": "mainline", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0018/round0018_standard_1774713544_dp2_bs1_ga8_ef1_k512_20260328_235910", "peak_memory_gb": null, "deployment_accesses": 2097152.0, "deployment_ratio": 0.5, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r23 {"total_cost": 528384.0, "selection_cost": 266240.0, "fvu": 0.36355817317962646, "k": 64, "ef": 1, "architecture": "expert_topk", "commit": "04ca83baa39f3ca469fbed9264840998a78ceea6", "config": {"architecture": "expert_topk", "expansion_factor": 1, "k": 64, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0023/round0023_standard_1774715727_dp2_bs1_ga8_ef1_k64_20260329_003533", "peak_memory_gb": null, "deployment_accesses": 262144.0, "deployment_ratio": 0.06, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r25 {"total_cost": 790528.0, "selection_cost": 266240.0, "fvu": 0.3148818016052246, "k": 128, "ef": 1, "architecture": "expert_topk", "commit": "da1e04771bfdabee653c76e9669311b386d9f727", "config": {"architecture": "expert_topk", "expansion_factor": 1, "k": 128, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0025/round0025_standard_1774716273_dp2_bs1_ga8_ef1_k128_20260329_004440", "peak_memory_gb": null, "deployment_accesses": 524288.0, "deployment_ratio": 0.12, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r37 {"total_cost": 4460544.0, "selection_cost": 2101248.0, "fvu": 0.04238538444042206, "k": 192, "ef": 1, "architecture": "lowrank_expert_residual", "commit": "ed4d2bf343a3e3cee498b852f1d6f8f09e404089", "config": {"architecture": "lowrank_expert_residual", "expansion_factor": 1, "k": 192, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "lowrank_expert_residual", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "factorized_hidden_dim": 256}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0037/round0037_standard_1774722018_dp2_bs1_ga8_ef1_k192_20260329_022025", "peak_memory_gb": null, "deployment_accesses": 2359296.0, "deployment_ratio": 0.56, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r99 {"total_cost": 2834432.0, "selection_cost": 2211840.0, "fvu": 0.09726757556200027, "k": 112, "ef": 1, "architecture": "lowrank_expert_residual", "commit": "8dd2709d68c4fc75de9586f5911a09b777137658", "config": {"architecture": "lowrank_expert_residual", "expansion_factor": 1, "k": 112, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "lowrank_expert_residual", "family_stage": "mainline", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 32}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0099/round0099_standard_1774806953_dp2_bs1_ga8_ef1_k112_20260330_015559", "peak_memory_gb": null, "deployment_accesses": 622592.0, "deployment_ratio": 0.15, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r100 {"total_cost": 2899968.0, "selection_cost": 2211840.0, "fvu": 0.09202119708061218, "k": 128, "ef": 1, "architecture": "lowrank_expert_residual", "commit": "9e79d5c6e3759a59b2338551a7fd8d26f2623cca", "config": {"architecture": "lowrank_expert_residual", "expansion_factor": 1, "k": 128, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "lowrank_expert_residual", "family_stage": "mainline", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 32}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0100/round0100_standard_1774808200_dp2_bs1_ga8_ef1_k128_20260330_021646", "peak_memory_gb": null, "deployment_accesses": 688128.0, "deployment_ratio": 0.16, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r107 {"total_cost": 1769472.0, "selection_cost": 1245184.0, "fvu": 0.10104858130216599, "k": 128, "ef": 1, "architecture": "shared_routed_expert_topk", "commit": "b34c936f14266e4e2d90bbd7fcdc4045a791c9b9", "config": {"architecture": "shared_routed_expert_topk", "expansion_factor": 1, "k": 128, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "shared_routed_expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 64, "active_experts": 2, "latents_per_expert": 384}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0107/round0107_standard_1774815912_dp2_bs1_ga8_ef1_k128_20260330_042519", "peak_memory_gb": null, "deployment_accesses": 524288, "deployment_ratio": 0.12, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r108 {"total_cost": 1572864.0, "selection_cost": 1048576.0, "fvu": 0.10720480978488922, "k": 128, "ef": 1, "architecture": "shared_routed_expert_topk", "commit": "4e9bb654fdf291082b4fc4196a4a98666fee1d68", "config": {"architecture": "shared_routed_expert_topk", "expansion_factor": 1, "k": 128, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "shared_routed_expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 64, "active_experts": 2, "latents_per_expert": 320}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0108/round0108_standard_1774816876_dp2_bs1_ga8_ef1_k128_20260330_044123", "peak_memory_gb": null, "deployment_accesses": 524288, "deployment_ratio": 0.12, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r109 {"total_cost": 1441792.0, "selection_cost": 1048576.0, "fvu": 0.11468100547790527, "k": 96, "ef": 1, "architecture": "shared_routed_expert_topk", "commit": "50a889e94b65ff64fbaf292ade4b4317ea7394c8", "config": {"architecture": "shared_routed_expert_topk", "expansion_factor": 1, "k": 96, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "shared_routed_expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 64, "active_experts": 2, "latents_per_expert": 320}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0109/round0109_standard_1774817795_dp2_bs1_ga8_ef1_k96_20260330_045641", "peak_memory_gb": null, "deployment_accesses": 393216, "deployment_ratio": 0.09, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r110 {"total_cost": 1343488.0, "selection_cost": 950272.0, "fvu": 0.1190691888332367, "k": 96, "ef": 1, "architecture": "shared_routed_expert_topk", "commit": "8b1206220ad2c35047b9d3a08c7212ee8939ad09", "config": {"architecture": "shared_routed_expert_topk", "expansion_factor": 1, "k": 96, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "shared_routed_expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 64, "active_experts": 2, "latents_per_expert": 288}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0110/round0110_standard_1774818692_dp2_bs1_ga8_ef1_k96_20260330_051139", "peak_memory_gb": null, "deployment_accesses": 393216, "deployment_ratio": 0.09, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+r111 {"total_cost": 1245184.0, "selection_cost": 851968.0, "fvu": 0.12280605733394623, "k": 96, "ef": 1, "architecture": "shared_routed_expert_topk", "commit": "a64cff75f4d3cef1d0e4bcb0ed930b9da028fc41", "config": {"architecture": "shared_routed_expert_topk", "expansion_factor": 1, "k": 96, "optimizer": "adam", "lr": "8e-4", "hookpoints": "layers.[3].self_attn.q_proj", "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "use_hadamard": false, "family_name": "shared_routed_expert_topk", "family_stage": "prototype", "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "d_in": 1024, "n_output": 4096, "original_matmul_accesses": 4194304, "trunk_rank": 40, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 64, "active_experts": 2, "latents_per_expert": 256}, "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0111/round0111_standard_1774819554_dp2_bs1_ga8_ef1_k96_20260330_052600", "peak_memory_gb": null, "deployment_accesses": 393216, "deployment_ratio": 0.09, "target_profile": {"profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1", "training_hookpoint": "layers.[3].self_attn.q_proj", "d_in": 1024, "n_output": 4096, "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json", "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "original_matmul_accesses": 4194304}, "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096", "metric_version": "total_cost_v2"}
+
+codex
+`r111` 的真实结果比预期更稳：`0.30x / FVU 0.1228`，仍是清晰的新非支配点。下一步我只在 `K` 与 `ACTIVE_EXPERTS` 两个单轴里做选择，并先把成本算精确。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+for r in [107,108,109,110,111]:
+ d=json.load(open(f'research/history/round_summaries/round_{r:04d}.json'))
+ cfg=d['resolved_candidate_env_config']
+ total=d['result']['val_fvu']
+ print(r, cfg['K'], cfg['LATENTS_PER_EXPERT'], cfg['ACTIVE_EXPERTS'], total)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+107 128 384 2 0.10104858130216599
+108 128 320 2 0.10720480978488922
+109 96 320 2 0.11468100547790527
+110 96 288 2 0.1190691888332367
+111 96 256 2 0.12280605733394623
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+cases=[
+ ('shared_routed_expert_topk',80,{'num_experts':64,'latents_per_expert':256,'active_experts':2}),
+ ('shared_routed_expert_topk',96,{'num_experts':64,'latents_per_expert':256,'active_experts':1}),
+ ('shared_routed_expert_topk',80,{'num_experts':64,'latents_per_expert':256,'active_experts':1}),
+ ('shared_routed_expert_topk',112,{'num_experts':64,'latents_per_expert':256,'active_experts':2}),
+]
+for arch,k,extra in cases:
+ c=compute_selection_cost(arch,k=k,ef=1,d_in=1024,n_output=4096,extra_config=extra)
+ print(arch,'k=',k,extra,'=>',c)
+PY" in /root/sparsify-ascend
+codex
+我把候选单轴的精确成本都在跑了。若 `K=80` 的 total 仍显著低于 `0.30x`，它会是最干净的下一步；若不是，再考虑用 `ACTIVE_EXPERTS` 做结构对照。
+2026-03-29T21:37:50.443633Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open
+ succeeded in 16816ms:
+shared_routed_expert_topk k= 80 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 2} => {'total_accesses': 851968, 'original_matmul_accesses': 4194304, 'ratio': 0.2, 'budget_ratio': 0.14, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'shared_expert_encoder', 'accesses': 262144, 'shape': 'shared=1×1024x256'}, {'name': 'active_routed_expert_encoder', 'accesses': 524288, 'shape': 'active=2×1024x256'}], 'deployment_accesses': 327680, 'deployment_ratio': 0.08, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 327680, 'shape': 'K=80×n=4096'}], 'combined_accesses': 1179648, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+shared_routed_expert_topk k= 96 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 1} => {'total_accesses': 589824, 'original_matmul_accesses': 4194304, 'ratio': 0.14, 'budget_ratio': 0.09, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'shared_expert_encoder', 'accesses': 262144, 'shape': 'shared=1×1024x256'}, {'name': 'active_routed_expert_encoder', 'accesses': 262144, 'shape': 'active=1×1024x256'}], 'deployment_accesses': 393216, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 393216, 'shape': 'K=96×n=4096'}], 'combined_accesses': 983040, 'combined_ratio': 0.23, 'combined_budget_ratio': 0.16, 'combined_feasible': True}
+shared_routed_expert_topk k= 80 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 1} => {'total_accesses': 589824, 'original_matmul_accesses': 4194304, 'ratio': 0.14, 'budget_ratio': 0.09, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'shared_expert_encoder', 'accesses': 262144, 'shape': 'shared=1×1024x256'}, {'name': 'active_routed_expert_encoder', 'accesses': 262144, 'shape': 'active=1×1024x256'}], 'deployment_accesses': 327680, 'deployment_ratio': 0.08, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 327680, 'shape': 'K=80×n=4096'}], 'combined_accesses': 917504, 'combined_ratio': 0.22, 'combined_budget_ratio': 0.15, 'combined_feasible': True}
+shared_routed_expert_topk k= 112 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 2} => {'total_accesses': 851968, 'original_matmul_accesses': 4194304, 'ratio': 0.2, 'budget_ratio': 0.14, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'shared_expert_encoder', 'accesses': 262144, 'shape': 'shared=1×1024x256'}, {'name': 'active_routed_expert_encoder', 'accesses': 524288, 'shape': 'active=2×1024x256'}], 'deployment_accesses': 458752, 'deployment_ratio': 0.11, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 458752, 'shape': 'K=112×n=4096'}], 'combined_accesses': 1310720, 'combined_ratio': 0.31, 'combined_budget_ratio': 0.21, 'combined_feasible': True}
+
+codex
+那个 probe 进程没有回传输出，我直接重跑一遍简化版。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+for k,extra in [
+ (80,{'num_experts':64,'latents_per_expert':256,'active_experts':2}),
+ (96,{'num_experts':64,'latents_per_expert':256,'active_experts':1}),
+ (80,{'num_experts':64,'latents_per_expert':256,'active_experts':1}),
+ (112,{'num_experts':64,'latents_per_expert':256,'active_experts':2}),
+]:
+ c=compute_selection_cost('shared_routed_expert_topk',k=k,ef=1,d_in=1024,n_output=4096,extra_config=extra)
+ print(k, extra, c['ratio'], c['deployment_ratio'], c['combined_ratio'])
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+c=compute_selection_cost('shared_routed_expert_topk',k=64,ef=1,d_in=1024,n_output=4096,extra_config={'num_experts':64,'latents_per_expert':256,'active_experts':2})
+print(c)
+PY" in /root/sparsify-ascend
+ succeeded in 4362ms:
+{'total_accesses': 851968, 'original_matmul_accesses': 4194304, 'ratio': 0.2, 'budget_ratio': 0.14, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'shared_expert_encoder', 'accesses': 262144, 'shape': 'shared=1×1024x256'}, {'name': 'active_routed_expert_encoder', 'accesses': 524288, 'shape': 'active=2×1024x256'}], 'deployment_accesses': 262144, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 262144, 'shape': 'K=64×n=4096'}], 'combined_accesses': 1114112, 'combined_ratio': 0.27, 'combined_budget_ratio': 0.18, 'combined_feasible': True}
+
+ succeeded in 17482ms:
+80 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 2} 0.2 0.08 0.28
+96 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 1} 0.14 0.09 0.23
+80 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 1} 0.14 0.08 0.22
+112 {'num_experts': 64, 'latents_per_expert': 256, 'active_experts': 2} 0.2 0.11 0.31
+
+codex
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权和，因此可直接导出到 LUTurbo/Lottable 推理链路；`shared_routed_expert_topk` 继续按直接兼容处理。明确排除不兼容 family：`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled 结构不能进入 frontier，也不能驱动本轮决策。r110→r111 已经完成 width knee 的连续左移，并在 `K=96, ACTIVE_EXPERTS=2` 下得到新的非支配点 `0.30x / FVU 0.1228`，说明 shared+routed 低成本线仍成立；因此本轮应换到 deployment 轴，相对 r111 只把 `K` 从 96 降到 80，在保持 `LATENTS_PER_EXPERT=256`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变时，把 total_cost 进一步压到约 0.28x，同时不改变已验证的 shared+routed 结构假设。如果 FVU 只温和退化，则会新增一个更靠左的兼容 Pareto 点，并回答当前低成本线下一步更该压 lookup budget 还是已经触及部署侧 knee。","summary":"Round 112 以 r111 为 reference，保持 `shared_routed_expert_topk` 的已验证结构不变，只改 `K=80`。width 轴已经连续给出新非支配点，本轮切到 deployment 轴，测当前 shared+routed 低成本前沿在 `LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2` 下还能否继续向左推进。","change_type":"param_only","expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"prototype","self_review":"满足单轮单变量约束：相对 r111 只改 `K`。这不是回到旧 family 的局部扫点，而是在已经确认有效的 shared+routed 兼容主线上，从 encoder-width knee 切换到 deployment knee。选择 `K=80` 而不是继续压 `LATENTS_PER_EXPERT`，是因为 r111 已经把 width 轴推进到 256 并形成新非支配点；继续连压宽度的边际信息已经下降，而 `K=80` 能更直接回答 lookup budget 的剩余空间。主要风险是 `K=96→80` 的退化幅度超过预期，但这同样是高价值结论，因为它会说明当前 shared+routed 线在约 0.30x 附近更受部署预算约束，不宜再继续向更低 K 推。","needs_sanity":false,"env_overrides":[{"key":"K","value":"80"}],"touched_files":[],"notes_to_memory":["本地兼容低成本 frontier 已形成 shared+routed 五段线，其中 r111 (`K=96, LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2`) 达到 total≈0.30x、FVU=0.1228，并继续优于旧 `expert_topk` anchors。","在 `shared_routed_expert_topk` 下，`K=80, LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2` 的 selection 仍约 0.20x，deployment 约 0.08x，combined ratio 约 0.28x，显著低于 1.5×h×n 硬预算。","r110→r111 已经证明继续压每-expert width 仍能形成新非支配点；本轮因此切到 `K` 轴，补 deployment-side knee，而不是继续重复宽度压缩。"],"next_hypotheses":["如果 `K=80` 仍把 FVU 控制在约 0.13 左右或更低，则下一轮可继续保持 family 不变，只改 `K=64`，完成 shared+routed 在更低部署预算处的左边界定位。","如果 `K=80` 相比 r111 明显退化，则可初步判定当前 shared+routed 低成本线更接近 deployment knee，后续不应再继续降 K，而应回到 `ACTIVE_EXPERTS` 或切到 matched `lowrank_expert_residual` 对照。","如果 `K=80` 与 r111 接近但未形成新非支配点，则下一轮必须换轴，不再连续压 `K`。"],"reference_round":111}
+tokens used
+953,933
