@@ -219,6 +219,7 @@ class TrainConfig(Serializable):
             "gated",
             "routed",
             "expert_topk",
+            "factorized_expert_topk",
             "lowrank_expert_topk",
             "lowrank_expert_residual",
             "two_stage_residual_expert",

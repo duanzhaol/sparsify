@@ -1,0 +1,1673 @@
+{"change_type":"edit_sae_code","command":"run","family_name":"factorized_expert_topk","family_stage":"prototype","reference_round":69,"env_overrides":[{"key":"ARCHITECTURE","value":"factorized_expert_topk"}],"expected_win":"explore_unknown","needs_sanity":true,"hypothesis":"最终重构公式设为 x_hat = Σ_{i∈S_{e(h(x))}(h(x))} α_{e,i}(h(x)) b_{e,i}，其中 h(x)=ReLU(Bx) 是共享低维投影，e(h(x)) 是轻量 router 选出的单个 expert，{b_{e,i}} 是各 expert 的静态子库原子。导出到 LUTurbo/Lottable 的链路是：先做共享低维投影 h(x)，再做 router 选单个静态 expert 子库，再由该 expert 的小型 head 在低维空间上打分并做 local top-k，最后把 (e,i) 扁平化为静态库查表上的有限加权和；静态库本身不随样本动态生成，因此该 family 判定为扩展兼容。兼容性先验在本轮保持清晰：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert` 与本轮新增的 `factorized_expert_topk` 都属扩展兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 属不兼容，只能留作历史参考，不能继续驱动 frontier。相对 r69 仅把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=160`、`NUM_EXPERTS=32`、`EF=1` 与训练 recipe 不变，直接回答当前高优先级问题：把 shared low-rank basis 放进 expert 内部 head，而不是放在 expert 外部做全局 trunk，是否能在不拉长 active path 的前提下形成新的低成本 Pareto 段。按当前 proxy 粗估，shared basis + active expert head 的 encoder 成本应仍落在约 0.3x 量级，配合 `K=160` 的部署成本后总成本预计仍在约 0.45x-0.5x 带，低于 1.5×h×n 硬约束。","summary":"Round 70 已经说明现有 `lowrank_expert_topk` 的 EF=1 外置 trunk 原型不足以继续支撑低成本前沿。本轮不再补旧 family 的局部点，而是新增一个更贴近当前高信息量假设的最小原型 `factorized_expert_topk`，并以 r69 为 matched reference 只改 `ARCHITECTURE`，验证“shared low-rank basis + routed expert head”是否优于纯 routed-only `expert_topk`。","self_review":"这满足单轮单变量约束：训练配置相对 r69 只改 `ARCHITECTURE`。代码侧只在 `sparsify/` 内完成最小 family 接线，不新增 tunable，因此不需要改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。选择开新 family 而不是继续扫 `expert_topk` 的 K 或 `lowrank_expert_residual` 的局部旋钮，是因为当前提示已明确指出更高信息量方向在 expert-internal low-rank；继续围绕 EF=1 旧原型做小修小补的信息增量已经不足。主要风险是 auto `FACTORIZED_HIDDEN_DIM` 可能偏大或偏小，导致首轮结果更多反映默认宽度而非结构上限；但这正符合新 family 第一轮先看结构是否值得继续、而不是先调宽度的要求。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Round 71 优先新增 `factorized_expert_topk`，覆盖当前未实现但高优先级的 `shared low-rank basis + expert-specific head` 结构槽位。","首轮原型不新增 tunable，复用现有 `NUM_EXPERTS` 与 `FACTORIZED_HIDDEN_DIM` 语义；训练配置相对 r69 仅切换 `ARCHITECTURE`，归因最干净。","必须按 sae-architecture-integration checklist 完成 whitelist、dispatch、class、exact-string instantiate/forward/backward smoke，然后再把真实训练结果当作结构证据。","不兼容 family 继续排除在 active frontier 外；本轮比较对象只限兼容 family。"],"next_hypotheses":["如果 `factorized_expert_topk` 在与 r69 相近总成本下明显优于 routed-only `expert_topk`，下一轮保持 family 不变，只显式设置 `FACTORIZED_HIDDEN_DIM`，测试共享 basis 宽度是否是该新结构的主控制旋钮。","如果它只小幅改善但仍明显弱于 `<0.5x` 最佳锚点，则下一轮可做 matched `K=128` 左移测试，判断这条新结构更适合低成本还是中成本带。","如果它没有改善或训练异常，则应快速归档该 family 的当前原型，并把结构预算转回 `lowrank_expert_residual` 或其他兼容的新 MoE-like 方向，而不是继续在旧 EF=1 原型上做邻域微调。"]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d386e-81b9-7f72-a068-86b3db752af2
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 71。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 71 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1026，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前主线 family：lowrank_expert_residual
+当前主线参考配方：ARCHITECTURE=lowrank_expert_residual K=192 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前主线完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=192
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. plain `EF=1` selector 结果现在主要作为 cost anchor；除 matched baseline 外，不应继续占用大部分搜索预算。
+4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。
+5. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。
+6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=70, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=20
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：结构扩展优先。
+  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。
+  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。
+
+当前高优先级未充分验证方向：
+  1. `expert_topk` / 轻量 MoE-like 子库路由。
+     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. `lowrank + expert`。
+     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。
+  3. `lowrank + expert + residual`。
+     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。
+  4. `two-stage residual expert`。
+     先 coarse library，再用局部 expert residual 做第二段修正。
+  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.21x (sel=0.07x + deploy=0.14x)  fvu=0.1402651071548462  arch=lowrank_expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.22x (sel=0.06x + deploy=0.16x)  fvu=0.13341990113258362  arch=expert_topk  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.25x (sel=0.06x + deploy=0.19x)  fvu=0.12482442706823349  arch=expert_topk  K=192 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.28x (sel=0.09x + deploy=0.19x)  fvu=0.11228560656309128  arch=lowrank_expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.49x (sel=0.33x + deploy=0.16x)  fvu=0.10535380244255066  arch=lowrank_expert_residual  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.49x (sel=0.32x + deploy=0.17x)  fvu=0.10261522233486176  arch=lowrank_expert_residual  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → lowrank_expert_topk (K=128, EF=1) [FEASIBLE]:
+    总成本: 0.48x | 预算比率: 0.32x | encoder: 0.29x | 部署: 0.19x | FVU: 0.11228560656309128
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r67 lowrank_expert_topk param_only -> discard fvu=0.11357318609952927 1050s | 最终重构公式保持为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x-t(x))}(x-t(x))} α_{e,i}...
+  r68 expert_topk param_only -> keep fvu=0.12482442706823349 960s | 最终重构公式为 x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 e(x) 由轻量 router 选出单个 e...
+  r69 expert_topk param_only -> keep fvu=0.13341990113258362 944s | 最终重构公式保持为 x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 e(x) 由轻量 router 选出单个...
+  r70 lowrank_expert_topk param_only -> discard fvu=0.13399776816368103 1125s | Final reconstruction stays x_hat = sum_{r=1..R} beta_r(x) u_r + sum_{i in S_{...
+
+最近可用 reference_round 的完整配置：
+  r69 expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_topk
+  EXPANSION_FACTOR=1
+  K=160
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  NUM_EXPERTS=32
+
+  r65 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=32
+
+  r60 lowrank_expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=64
+
+  r53 two_stage_residual_expert (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=192
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  NUM_EXPERTS=16
+
+操作提示：
+  1. 当前阶段已完成 plain EF=1 selector family 的初步 K 轴覆盖；除 matched baseline 或 sanity 外，不要再把 plain topk/jumprelu/factorized_topk 的局部 K/LR 微调作为默认主任务。
+  2. 接下来优先回答结构问题：expert_topk / MoE-like、lowrank + expert、lowrank + expert + residual、two-stage residual expert 是否能形成新的 Pareto 段。
+  3. EF=1 允许作为新架构起始锚点或 matched baseline，但它不再是当前默认最优 recipe；如果新结构需要更高 EF、trunk_rank、num_codes 才有意义，可以允许进入 0.3x-0.8x total_cost 带做清晰验证。
+  4. 如果新增 expert/lowrank/residual 组合参数，第一轮必须只验证参数接线与 config/checkpoint 生效，再根据结果判断架构价值。
+  5. 当前 `lowrank_expert_topk` 的 EF=1 原型只是把同一份 latent budget 切成 expert 子库，更像结构探针，不是真正的 sparse-capacity expansion；不要因为这个原型的成败就过早否定 `MoE-like` 方向。
+  6. 高优先级方向是真正的 MoE 稀疏扩容：总容量可以很大（例如 total_EF 16-32），但每个 token 只激活很少 expert（ACTIVE_EXPERTS=1-4）；关键是把 total capacity 与 active path 解耦，而不是继续围绕 plain EF=1 做小修小补。
+  7. 如果继续扩展 MoE-like family，优先考虑能表达“总宽度、expert 数、每 token 激活 expert 数、每 expert 宽度、shared 容量”的 tunable，例如 `NUM_EXPERTS` / `ACTIVE_EXPERTS` / `EXPERT_LATENTS` 或 `EXPERT_EF` / `SHARED_LATENTS` 或 `SHARED_TRUNK_RANK` / `K_PER_EXPERT` 或 `K_TOTAL`。可优先验证 `shared + routed experts` 或 `lowrank trunk + shared expert + routed expert residual`。
+  8. 高信息量新结构方向是 `expert 内 low-rank`，而不只是 `expert 外全局 trunk`。优先考虑 `shared low-rank basis + expert-specific head`：先做共享低维投影 `z = Bx`，再由 router 选 1-2 个 expert，在 expert 内用小型 low-rank head `A_e z` 做 local scoring / top-k，必要时再加 residual cleanup。这比每个 expert 完全独立的 low-rank 更参数高效、更稳定，也更适合 large NUM_EXPERTS、wide experts、short active path 的 low-cost sparse-activation regime。当现有 family 进入局部微调收益递减时，优先考虑新增 family 来实现 `expert-internal low-rank / shared-basis expert routing`，而不是继续细扫已有结构的小参数。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
+- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
+- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
+- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+
+一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | score
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+当前要为 Round 71 选一个单变量动作。我先检查现有 family 是否已经覆盖“expert 内 low-rank / shared-basis expert routing”，避免把本该新开 family 的问题误写成旧 family 微调。
+exec
+/bin/bash -lc "rg -n \"expert.*lowrank|lowrank.*expert|shared.*expert|expert.*shared|ACTIVE_EXPERTS|EXPERT_LATENTS|EXPERT_EF|K_PER_EXPERT|K_TOTAL|shared_basis|shared low-rank|expert head|lowrank head\" sparsify research/AutoResearch -g '"'!**/.git/**'"'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/AutoResearch/override_registry.py:39:    "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+research/AutoResearch/override_registry.py:40:    "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+research/AutoResearch/policy.py:244:            "6. 如果需要新的结构信息，优先考虑 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert` 这些方向。",
+research/AutoResearch/policy.py:261:            "4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。",
+research/AutoResearch/policy.py:279:            "3. probe 应优先用于结构信息增量高的 family，例如 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`；不要优先再做 plain selector family 之间的重复对照。",
+research/AutoResearch/policy.py:295:        "5. 当前优先的结构方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`；plain `EF=1` selector 只保留作 matched baseline 或 sanity。",
+research/AutoResearch/prompt.py:73:- 当前优先探索的方向是：轻量 expert 子库 / MoE-like 路由、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+research/AutoResearch/prompt.py:180:        "     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。",
+research/AutoResearch/prompt.py:181:        "  2. `lowrank + expert`。",
+research/AutoResearch/prompt.py:183:        "  3. `lowrank + expert + residual`。",
+sparsify/config.py:222:            "lowrank_expert_topk",
+sparsify/config.py:223:            "lowrank_expert_residual",
+research/AutoResearch/prior_research_history.md:27:- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+research/AutoResearch/prior_research_history.md:62:| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+research/AutoResearch/prior_research_history.md:64:| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+research/AutoResearch/prior_research_history.md:139:- `lowrank + expert`
+research/AutoResearch/prior_research_history.md:140:- `lowrank + expert + residual`
+research/AutoResearch/prior_research_history.md:153:- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+research/AutoResearch/prior_research_history.md:169:- 如果已实现 family 持续不能给出满意结果，应优先抽出一部分预算转向高优先级未验证方向，尤其是 `expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`
+sparsify/sparse_coder.py:427:    if architecture == "lowrank_expert_topk":
+sparsify/sparse_coder.py:429:    if architecture == "lowrank_expert_residual":
+sparsify/sparse_coder.py:1269:                "lowrank_expert_topk requires k <= latents_per_expert, "
+sparsify/sparse_coder.py:1473:                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
+
+exec
+/bin/bash -lc "sed -n '200,260p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+        if self.use_hadamard:
+            bs = self.hadamard_block_size
+            if bs <= 0 or (bs & (bs - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "expert_topk",
+            "lowrank_expert_topk",
+            "lowrank_expert_residual",
+            "two_stage_residual_expert",
+            "group_topk",
+            "factorized_topk",
+            "lowrank_residual",
+            "lowrank_two_stage_residual",
+            "routed_lowrank_two_stage_residual",
+            "bucketed_lowrank_residual",
+            "whitened_lowrank_residual",
+            "lowrank_adaptive_budget_residual",
+            "lowrank_gated_residual",
+            "lowrank_jumprelu_residual",
+            "lowrank_multi_branch_residual",
+            "lowrank_factorized_residual",
+            "lowrank_soft_codebook_residual",
+            "lowrank_gated_soft_codebook_residual",
+            "lowrank_grouped_soft_codebook_residual",
+            "lowrank_two_stage_soft_codebook_residual",
+            "bucketed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_two_stage_soft_codebook_residual",
+            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+            "routed_lowrank_two_stage_soft_codebook_residual",
+            "whitened_lowrank_gated_residual",
+            "lowrank_grouped_residual",
+            "whitened_topk",
+            "two_stage_residual",
+            "multi_branch_gated",
+        )
+        if self.sae.architecture not in valid_archs:
+            raise ValueError(
+                f"Unknown architecture: {self.sae.architecture!r}. "
+                f"Must be one of {valid_archs}"
+            )
+
+        if self.sae.jumprelu_bandwidth <= 0:
+            raise ValueError(
+                "jumprelu_bandwidth must be positive, "
+
+exec
+/bin/bash -lc "sed -n '400,460p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "lowrank_expert_topk":
+        return LowRankExpertTopKSparseCoder
+    if architecture == "lowrank_expert_residual":
+        return LowRankExpertResidualSparseCoder
+    if architecture == "two_stage_residual_expert":
+        return TwoStageResidualExpertSparseCoder
+    if architecture == "group_topk":
+        return GroupTopKSparseCoder
+    if architecture == "factorized_topk":
+        return FactorizedTopKSparseCoder
+    if architecture == "lowrank_residual":
+        return LowRankResidualSparseCoder
+    if architecture == "lowrank_two_stage_residual":
+        return LowRankTwoStageResidualSparseCoder
+    if architecture == "routed_lowrank_two_stage_residual":
+        return RoutedLowRankTwoStageResidualSparseCoder
+    if architecture == "bucketed_lowrank_residual":
+        return BucketedLowRankResidualSparseCoder
+    if architecture == "whitened_lowrank_residual":
+        return WhitenedLowRankResidualSparseCoder
+    if architecture == "lowrank_adaptive_budget_residual":
+        return LowRankAdaptiveBudgetResidualSparseCoder
+    if architecture == "lowrank_gated_residual":
+        return LowRankGatedResidualSparseCoder
+    if architecture == "lowrank_jumprelu_residual":
+        return LowRankJumpReLUResidualSparseCoder
+    if architecture == "lowrank_multi_branch_residual":
+        return LowRankMultiBranchResidualSparseCoder
+    if architecture == "lowrank_factorized_residual":
+        return LowRankFactorizedResidualSparseCoder
+    if architecture == "lowrank_soft_codebook_residual":
+        return LowRankSoftCodebookResidualSparseCoder
+    if architecture == "lowrank_gated_soft_codebook_residual":
+        return LowRankGatedSoftCodebookResidualSparseCoder
+
+codex
+现有实现里没有看到“shared-basis expert routing / expert 内 low-rank”现成 family。下一步我读一下新增架构接线的 repo 规范，然后决定 Round 71 是开一个最小原型还是继续在已有兼容 family 上做更高信息量的 matched 结构试验。
+exec
+/bin/bash -lc "sed -n '1,220p' /root/.codex/skills/sae-architecture-integration/SKILL.md" in /root/sparsify-ascend
+ succeeded in 0ms:
+---
+name: sae-architecture-integration
+description: Use when adding a new SAE architecture family in sparsify-ascend, or when a run fails with Unknown architecture, missing factory dispatch, or other architecture-registration issues. This skill gives a repo-specific checklist for wiring new sparse coder families into sparsify/config.py and sparsify/sparse_coder.py, plus the exact smoke-validation sequence to run before declaring the family runnable.
+---
+
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+codex
+Round 70 给了一个明确负信号：`lowrank_expert_topk` 的 EF=1 trunk 压缩原型没有在低成本带形成新段。现在要判断的是该 family 是否需要新结构，而不是再补旧轴点，所以我在核对现有默认参数能否支持一个“shared low-rank basis + routed expert head”的最小原型。
+exec
+/bin/bash -lc 'rg -n "factorized_hidden_dim|num_experts|trunk_rank|stage1_ratio" sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/config.py:43:    trunk_rank: int | None = None
+sparsify/config.py:49:    stage1_ratio: float | None = None
+sparsify/config.py:52:    factorized_hidden_dim: int | None = None
+sparsify/config.py:55:    num_experts: int | None = None
+sparsify/config.py:278:        if self.sae.num_experts is not None and self.sae.num_experts <= 0:
+sparsify/config.py:280:                "num_experts must be positive when set, "
+sparsify/config.py:281:                f"got {self.sae.num_experts}"
+sparsify/sparse_coder.py:1142:        if cfg.num_experts is None:
+sparsify/sparse_coder.py:1143:            self.num_experts = 4
+sparsify/sparse_coder.py:1144:            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1149:            self.num_experts = cfg.num_experts
+sparsify/sparse_coder.py:1152:        self.num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1159:        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+sparsify/sparse_coder.py:1162:                self.num_experts,
+sparsify/sparse_coder.py:1171:                self.num_experts,
+sparsify/sparse_coder.py:1211:        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
+sparsify/sparse_coder.py:1259:        if cfg.num_experts is None:
+sparsify/sparse_coder.py:1260:            self.num_experts = 4
+sparsify/sparse_coder.py:1261:            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1263:            self.num_experts = cfg.num_experts
+sparsify/sparse_coder.py:1266:        self.num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1273:        trunk_rank = (
+sparsify/sparse_coder.py:1274:            cfg.trunk_rank
+sparsify/sparse_coder.py:1275:            if cfg.trunk_rank is not None
+sparsify/sparse_coder.py:1279:            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:1282:            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:1284:        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+sparsify/sparse_coder.py:1287:                self.num_experts,
+sparsify/sparse_coder.py:1296:                self.num_experts,
+sparsify/sparse_coder.py:1353:            hard_expert_idx, num_classes=self.num_experts
+sparsify/sparse_coder.py:1453:        if cfg.num_experts is None:
+sparsify/sparse_coder.py:1454:            self.num_experts = 4
+sparsify/sparse_coder.py:1455:            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1457:            self.num_experts = cfg.num_experts
+sparsify/sparse_coder.py:1461:        self.expert_num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1465:        if cfg.stage1_ratio is not None:
+sparsify/sparse_coder.py:1466:            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+sparsify/sparse_coder.py:1478:        trunk_rank = (
+sparsify/sparse_coder.py:1479:            cfg.trunk_rank
+sparsify/sparse_coder.py:1480:            if cfg.trunk_rank is not None
+sparsify/sparse_coder.py:1484:            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:1487:            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:1489:        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+sparsify/sparse_coder.py:1492:                self.num_experts,
+sparsify/sparse_coder.py:1501:                self.num_experts,
+sparsify/sparse_coder.py:1572:            hard_expert_idx, num_classes=self.num_experts
+sparsify/sparse_coder.py:1715:        if cfg.num_experts is None:
+sparsify/sparse_coder.py:1716:            self.num_experts = 4
+sparsify/sparse_coder.py:1717:            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+sparsify/sparse_coder.py:1719:            self.num_experts = cfg.num_experts
+sparsify/sparse_coder.py:1724:        self.expert_num_latents = self.num_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1727:        if cfg.stage1_ratio is not None:
+sparsify/sparse_coder.py:1728:            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+sparsify/sparse_coder.py:1745:        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+sparsify/sparse_coder.py:1748:                self.num_experts,
+sparsify/sparse_coder.py:1757:                self.num_experts,
+sparsify/sparse_coder.py:1809:            hard_expert_idx, num_classes=self.num_experts
+sparsify/sparse_coder.py:1960:        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+sparsify/sparse_coder.py:2013:        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
+sparsify/sparse_coder.py:2015:            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2018:            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2205:        if cfg.stage1_ratio is not None:
+sparsify/sparse_coder.py:2206:            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+sparsify/sparse_coder.py:2502:        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
+sparsify/sparse_coder.py:2504:            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2507:            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2836:        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
+sparsify/sparse_coder.py:2838:            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2841:            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+sparsify/sparse_coder.py:2844:        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+sparsify/sparse_coder.py:3238:        self.factorized_hidden_dim = cfg.factorized_hidden_dim
+sparsify/sparse_coder.py:3239:        if self.factorized_hidden_dim is not None:
+sparsify/sparse_coder.py:3246:                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+sparsify/sparse_coder.py:3249:                self.factorized_hidden_dim,
+sparsify/sparse_coder.py:3255:                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+sparsify/sparse_coder.py:3258:                self.factorized_hidden_dim,
+sparsify/sparse_coder.py:3269:        if self.factorized_hidden_dim is not None:
+
+exec
+/bin/bash -lc "sed -n '1,220p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+from dataclasses import dataclass
+from pathlib import Path
+
+from simple_parsing import Serializable, list_field
+
+
+@dataclass
+class SparseCoderConfig(Serializable):
+    """Configuration for a sparse coder (SAE) architecture."""
+
+    expansion_factor: int = 32
+    """Multiple of the input dimension to use as the sparse coder dimension."""
+
+    normalize_decoder: bool = True
+    """Normalize the decoder weights to have unit norm."""
+
+    num_latents: int = 0
+    """Number of latents to use. If 0, use `expansion_factor`."""
+
+    k: int = 32
+    """Number of nonzero features."""
+
+    # Architecture selection
+    architecture: str = "topk"
+    """Encoding architecture."""
+
+    jumprelu_init_threshold: float = 0.0
+    """Initial per-latent JumpReLU threshold before softplus."""
+
+    jumprelu_bandwidth: float = 0.1
+    """Bandwidth for the smooth JumpReLU gate surrogate."""
+
+    gated_temperature: float = 1.0
+    """Temperature for the sigmoid gate in gated encoders."""
+
+    gated_init_logit: float = 2.0
+    """Initial bias logit for gated encoders."""
+
+    group_topk_size: int = 4
+    """Number of latents per local competition group for group-topk encoders."""
+
+    # Architecture-specific structural parameters (None = auto-computed)
+    trunk_rank: int | None = None
+    """Rank of the dense low-rank trunk. None = auto: min(d_in, max(k*2, d_in//4))."""
+
+    num_codes: int | None = None
+    """Number of soft/hard codebook entries. None = auto: min(256, max(32, k*2))."""
+
+    stage1_ratio: float | None = None
+    """Fraction of K budget for stage 1 in two-stage architectures. None = 0.5."""
+
+    factorized_hidden_dim: int | None = None
+    """Hidden dimension for factorized encoders. None = auto."""
+
+    num_experts: int | None = None
+    """Expert count for MoE-like families. None keeps the legacy fixed-layout expert split."""
+
+
+# Support different naming conventions for the same configuration
+SaeConfig = SparseCoderConfig
+
+
+@dataclass
+class TrainConfig(Serializable):
+    sae: SparseCoderConfig
+
+    batch_size: int = 32
+    """Batch size measured in sequences."""
+
+    grad_acc_steps: int = 1
+    """Number of steps over which to accumulate gradients."""
+
+    micro_acc_steps: int = 1
+    """Chunk the activations into this number of microbatches for training."""
+
+    max_tokens: int | None = None
+    """Maximum number of tokens to train on. Training stops when this limit is reached."""
+
+    lr: float | None = None
+    """Base LR. If None, it is automatically chosen based on the number of latents."""
+
+    auxk_alpha: float = 0.0
+    """Weight of the auxiliary loss term."""
+
+    dead_feature_threshold: int = 10_000_000
+    """Number of tokens after which a feature is considered dead."""
+
+    # Exceed evaluation metrics
+    exceed_alphas: list[float] = list_field(0.05, 0.10, 0.25, 0.50)
+    """List of alpha coefficients for exceed metrics (error > alpha * elbow_value)."""
+
+    elbow_threshold_path: str | None = None
+    """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
+
+    # Hookpoint selection
+    hookpoints: list[str] = list_field()
+    """List of hookpoints to train sparse coders on."""
+
+    init_seeds: list[int] = list_field(0)
+    """List of random seeds to use for initialization. If more than one, train a sparse
+    coder for each seed."""
+
+    layers: list[int] = list_field()
+    """List of layer indices to train sparse coders on."""
+
+    layer_stride: int = 1
+    """Stride between layers to train sparse coders on."""
+
+    # Tiling
+    num_tiles: int = 1
+    """Number of tiles to split input activations. Each tile trains a separate SAE.
+    d_in must be divisible by num_tiles. Set to 1 (default) for standard training."""
+
+    global_topk: bool = False
+    """Use global top-k selection across all tiles instead of per-tile top-k.
+    Only effective when num_tiles > 1."""
+
+    input_mixing: bool = False
+    """Apply learnable T×T mixing matrix on tile dimension before encoding.
+    Only effective when num_tiles > 1."""
+
+    # Hadamard rotation
+    use_hadamard: bool = False
+    """Apply block-diagonal Hadamard rotation to activations before SAE."""
+
+    hadamard_block_size: int = 128
+    """Block size for Hadamard transform (must be power of 2)."""
+
+    hadamard_seed: int = 0
+    """Random seed for Hadamard permutation."""
+
+    hadamard_use_perm: bool = True
+    """Whether to use random permutation before Hadamard transform."""
+
+    # Compilation
+    compile_model: bool = False
+    """Compile transformer layers with torch.compile to fuse small kernels.
+    Reduces kernel launch overhead from elementwise/layernorm/dtype ops."""
+
+    # Saving & logging
+    save_every: int = 1000
+    """Save sparse coders every `save_every` steps."""
+
+    save_best: bool = False
+    """Save the best checkpoint found for each hookpoint."""
+
+    save_dir: str = "checkpoints"
+
+    log_to_wandb: bool = True
+    run_name: str | None = None
+    wandb_project: str | None = None
+    """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
+    wandb_log_frequency: int = 1
+
+    # Lifecycle
+    finetune: str | None = None
+    """Finetune the sparse coders from a pretrained checkpoint."""
+
+    # Optimizer selection
+    optimizer: str = "signum"
+    """Optimizer: 'signum' | 'adam'."""
+
+    # Matryoshka multi-K training
+    matryoshka_ks: list[int] = list_field()
+    """List of K values for Matryoshka multi-K loss. Empty = disabled."""
+
+    matryoshka_weights: list[float] = list_field()
+    """Weights for each Matryoshka K. Must match len(matryoshka_ks). Empty = uniform."""
+
+    # Orthogonality regularization
+    ortho_lambda: float = 0.0
+    """Weight for orthogonality regularization on active decoder columns."""
+
+    # Residual SAE training
+    residual_from: str | None = None
+    """Level 1 SAE checkpoint path. When set, trains Level 2 SAE on residual."""
+
+    # Local metrics saving
+    save_metrics_jsonl: bool = True
+    """Save per-step metrics to JSONL file alongside W&B."""
+
+    def __post_init__(self):
+        """Validate the configuration."""
+        if self.layers and self.layer_stride != 1:
+            raise ValueError("Cannot specify both `layers` and `layer_stride`.")
+
+        if not self.init_seeds:
+            raise ValueError("Must specify at least one random seed.")
+
+        if self.exceed_alphas and not all(alpha > 0 for alpha in self.exceed_alphas):
+            raise ValueError("All exceed_alphas must be positive.")
+
+        if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
+            raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        if self.compile_model:
+            from .device import get_device_type
+            if get_device_type() != "cuda":
+                self.compile_model = False
+
+        if self.use_hadamard:
+            bs = self.hadamard_block_size
+            if bs <= 0 or (bs & (bs - 1)) != 0:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+
+exec
+/bin/bash -lc "sed -n '1120,1365p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        scores = acts + 0.1 * torch.tanh(gate_logits)
+        _, top_indices = torch.topk(scores, self.cfg.k, dim=-1, sorted=False)
+        top_acts = acts.gather(-1, top_indices)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class ExpertTopKSparseCoder(SparseCoder):
+    """Route each token to one expert-local dictionary before local top-k."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            # Explicit NUM_EXPERTS switches expert families into sparse-capacity
+            # expansion mode: each routed expert keeps the base width while the
+            # total static library grows with the expert count.
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.latents_per_expert:
+            raise ValueError(
+                "expert_topk requires k <= latents_per_expert, "
+                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+            )
+
+        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.d_in * self.latents_per_expert,
+                f"active=1×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        router_probs = torch.softmax(router_logits, dim=-1)
+        hard_expert_idx = router_probs.argmax(dim=-1)
+        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
+        expert_gate = hard_gate + router_probs - router_probs.detach()
+
+        selected_weight = torch.einsum(
+            "be,eld->bld", expert_gate, self.expert_encoders
+        )
+        selected_bias = torch.einsum(
+            "be,el->bl", expert_gate, self.expert_encoder_bias
+        )
+        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts)
+        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
+        top_indices = local_indices + expert_offsets
+
+        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).unsqueeze(0)
+        full_indices = expert_offsets + local_offsets
+        full_acts.scatter_(1, full_indices, acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class LowRankExpertTopKSparseCoder(SparseCoder):
+    """Low-rank trunk followed by expert-local sparse residual selection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.latents_per_expert:
+            raise ValueError(
+                "lowrank_expert_topk requires k <= latents_per_expert, "
+                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+            )
+
+        trunk_rank = (
+            cfg.trunk_rank
+            if cfg.trunk_rank is not None
+            else min(d_in, max(cfg.k * 2, d_in // 4))
+        )
+        self.trunk_encoder = nn.Linear(
+            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+        )
+        self.trunk_decoder = nn.Linear(
+            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [
+            ("trunk_encoder", self.trunk_encoder),
+            ("trunk_decoder", self.trunk_decoder),
+            ("router", self.router),
+        ]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.d_in * self.latents_per_expert,
+                f"active=1×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def _deployment_lookup_accesses(self, n_output):
+        return [
+            (
+                "trunk_deploy",
+                self.trunk_encoder.out_features * n_output,
+                f"r={self.trunk_encoder.out_features}×n={n_output}",
+            ),
+            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+        ]
+
+    def _encode_residual(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        router_probs = torch.softmax(router_logits, dim=-1)
+        hard_expert_idx = router_probs.argmax(dim=-1)
+        hard_gate = F.one_hot(
+            hard_expert_idx, num_classes=self.num_experts
+        ).to(flat_x.dtype)
+        expert_gate = hard_gate + router_probs - router_probs.detach()
+
+        selected_weight = torch.einsum(
+            "be,eld->bld", expert_gate, self.expert_encoders
+        )
+        selected_bias = torch.einsum(
+            "be,el->bl", expert_gate, self.expert_encoder_bias
+        )
+        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts)
+        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+exec
+/bin/bash -lc "sed -n '1440,1595p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
+
+        self.expert_num_latents = self.num_experts * self.latents_per_expert
+        self.residual_num_latents = base_num_latents
+        self.num_latents = self.expert_num_latents + self.residual_num_latents
+
+        if cfg.stage1_ratio is not None:
+            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+        else:
+            self.stage1_k = max(1, cfg.k // 2)
+        self.stage2_k = max(1, cfg.k - self.stage1_k)
+
+        if self.stage1_k > self.latents_per_expert:
+            raise ValueError(
+                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
+                f"got stage1_k={self.stage1_k} and "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        trunk_rank = (
+            cfg.trunk_rank
+            if cfg.trunk_rank is not None
+            else min(d_in, max(cfg.k * 2, d_in // 4))
+        )
+        self.trunk_encoder = nn.Linear(
+            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+        )
+        self.trunk_decoder = nn.Linear(
+            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.residual_encoder = nn.Linear(
+            d_in, self.residual_num_latents, device=device, dtype=dtype
+        )
+        self.residual_encoder.bias.data.zero_()
+
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            expert_decoder = self.expert_encoders.data.reshape(
+                self.expert_num_latents, d_in
+            )
+            decoder_init = torch.cat(
+                (expert_decoder, self.residual_encoder.weight.data.clone()), dim=0
+            )
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [
+            ("trunk_encoder", self.trunk_encoder),
+            ("trunk_decoder", self.trunk_decoder),
+            ("router", self.router),
+            ("residual_encoder", self.residual_encoder),
+        ]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.d_in * self.latents_per_expert,
+                f"active=1×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def _deployment_lookup_accesses(self, n_output):
+        return [
+            (
+                "trunk_deploy",
+                self.trunk_encoder.out_features * n_output,
+                f"r={self.trunk_encoder.out_features}×n={n_output}",
+            ),
+            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+        ]
+
+    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+
+    def _encode_expert_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        router_probs = torch.softmax(router_logits, dim=-1)
+        hard_expert_idx = router_probs.argmax(dim=-1)
+        hard_gate = F.one_hot(
+            hard_expert_idx, num_classes=self.num_experts
+        ).to(flat_x.dtype)
+        expert_gate = hard_gate + router_probs - router_probs.detach()
+
+        selected_weight = torch.einsum(
+            "be,eld->bld", expert_gate, self.expert_encoders
+        )
+        selected_bias = torch.einsum(
+            "be,el->bl", expert_gate, self.expert_encoder_bias
+        )
+        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts)
+        top_acts, local_indices = torch.topk(
+            acts, self.stage1_k, dim=-1, sorted=False
+        )
+
+        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
+        top_indices = local_indices + expert_offsets
+
+        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).unsqueeze(0)
+        full_indices = expert_offsets + local_offsets
+
+exec
+/bin/bash -lc "sed -n '1710,1825p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
+
+        self.stage1_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        self.expert_num_latents = self.num_experts * self.latents_per_expert
+        self.num_latents = self.stage1_num_latents + self.expert_num_latents
+
+        if cfg.stage1_ratio is not None:
+            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
+        else:
+            self.stage1_k = max(1, cfg.k // 2)
+        self.stage2_k = max(1, cfg.k - self.stage1_k)
+
+        if self.stage2_k > self.latents_per_expert:
+            raise ValueError(
+                "two_stage_residual_expert requires stage2_k <= latents_per_expert, "
+                f"got stage2_k={self.stage2_k} and "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        self.encoder = nn.Linear(
+            d_in, self.stage1_num_latents, device=device, dtype=dtype
+        )
+        self.encoder.bias.data.zero_()
+
+        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            expert_decoder = self.expert_encoders.data.reshape(
+                self.expert_num_latents, d_in
+            )
+            decoder_init = torch.cat(
+                (self.encoder.weight.data.clone(), expert_decoder.clone()), dim=0
+            )
+            self.W_dec = nn.Parameter(decoder_init)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("encoder", self.encoder), ("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.d_in * self.latents_per_expert,
+                f"active=1×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+
+    def _encode_expert_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        router_probs = torch.softmax(router_logits, dim=-1)
+        hard_expert_idx = router_probs.argmax(dim=-1)
+        hard_gate = F.one_hot(
+            hard_expert_idx, num_classes=self.num_experts
+        ).to(flat_x.dtype)
+        expert_gate = hard_gate + router_probs - router_probs.detach()
+
+        selected_weight = torch.einsum(
+            "be,eld->bld", expert_gate, self.expert_encoders
+        )
+        selected_bias = torch.einsum(
+            "be,el->bl", expert_gate, self.expert_encoder_bias
+        )
+        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts)
+        top_acts, local_indices = torch.topk(
+            acts, self.stage2_k, dim=-1, sorted=False
+        )
+
+        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
+
+codex
+我已经确认现有 expert family 只支持“全输入维度上的 expert encoder”，没有“共享低维投影后再进 expert head”的实现。为避免空想，我再看一眼 factorized encoder 的实现路径，确认能否复用已有 `FACTORIZED_HIDDEN_DIM` 语义做一个最小新 family。
+exec
+/bin/bash -lc "sed -n '1935,2028p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            winner_acts, self.cfg.k, dim=-1, sorted=False
+        )
+
+        top_offsets = winner_offsets.gather(-1, top_group_indices)
+        top_indices = top_group_indices * group_size + top_offsets
+        return EncoderOutput(top_group_acts, top_indices, acts)
+
+
+class FactorizedTopKSparseCoder(SparseCoder):
+    """Top-k SAE with a low-rank ReLU mixing stage before latent scoring."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        hidden_dim = cfg.factorized_hidden_dim if cfg.factorized_hidden_dim is not None else min(self.num_latents, max(d_in // 2, cfg.k * 4))
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.encoder = nn.Linear(
+            hidden_dim, self.num_latents, device=device, dtype=dtype
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.encoder.bias.data.zero_()
+
+        if decoder:
+            effective_encoder = self.encoder.weight.data @ self.factor_encoder.weight.data
+            self.W_dec = nn.Parameter(effective_encoder)
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("encoder", self.encoder)]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        hidden = F.relu(
+            F.linear(x, self.factor_encoder.weight, self.factor_encoder.bias)
+        )
+        acts = F.relu(F.linear(hidden, self.encoder.weight, self.encoder.bias))
+        top_acts, top_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+        return EncoderOutput(top_acts, top_indices, acts)
+
+
+class LowRankResidualSparseCoder(SparseCoder):
+    """Model a dense low-rank trunk, then sparsely code the remaining residual."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+
+        # Keep a meaningfully expressive dense trunk before sparse residual
+        # coding. Tying trunk rank too tightly to expansion factor made the
+        # prototype collapse to a minimal rank under the strong EF=16 recipe.
+        trunk_rank = cfg.trunk_rank if cfg.trunk_rank is not None else min(d_in, max(cfg.k * 2, d_in // 4))
+        self.trunk_encoder = nn.Linear(
+            d_in, trunk_rank, bias=False, device=device, dtype=dtype
+        )
+        self.trunk_decoder = nn.Linear(
+            trunk_rank, d_in, bias=False, device=device, dtype=dtype
+        )
+        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
+        self.encoder.bias.data.zero_()
+
+        if decoder:
+            self.W_dec = nn.Parameter(self.encoder.weight.data.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+exec
+/bin/bash -lc "sed -n '3228,3278p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        self.num_codes = cfg.num_codes if cfg.num_codes is not None else min(256, max(32, cfg.k * 2))
+        self.codebook = nn.Parameter(
+            torch.randn(self.num_codes, d_in, device=device, dtype=dtype) * 0.02
+        )
+        self.code_router = nn.Linear(d_in, self.num_codes, device=device, dtype=dtype)
+        self.code_router.bias.data.zero_()
+        self.factorized_hidden_dim = cfg.factorized_hidden_dim
+        if self.factorized_hidden_dim is not None:
+            self.encoder.weight.requires_grad_(False)
+            self.encoder.bias.requires_grad_(False)
+            self.residual_encoder.weight.requires_grad_(False)
+            self.residual_encoder.bias.requires_grad_(False)
+
+            self.stage1_factor_encoder = nn.Linear(
+                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+            )
+            self.stage1_factor_projector = nn.Linear(
+                self.factorized_hidden_dim,
+                self.num_latents,
+                device=device,
+                dtype=dtype,
+            )
+            self.stage2_factor_encoder = nn.Linear(
+                d_in, self.factorized_hidden_dim, device=device, dtype=dtype
+            )
+            self.stage2_factor_projector = nn.Linear(
+                self.factorized_hidden_dim,
+                self.num_latents,
+                device=device,
+                dtype=dtype,
+            )
+            self.stage1_factor_encoder.bias.data.zero_()
+            self.stage1_factor_projector.bias.data.zero_()
+            self.stage2_factor_encoder.bias.data.zero_()
+            self.stage2_factor_projector.bias.data.zero_()
+
+    def _encoder_linear_layers(self):
+        if self.factorized_hidden_dim is not None:
+            return [
+                ("trunk_encoder", self.trunk_encoder),
+                ("trunk_decoder", self.trunk_decoder),
+                ("code_router", self.code_router),
+                ("stage1_factor_encoder", self.stage1_factor_encoder),
+                ("stage1_factor_projector", self.stage1_factor_projector),
+                ("stage2_factor_encoder", self.stage2_factor_encoder),
+                ("stage2_factor_projector", self.stage2_factor_projector),
+            ]
+
+codex
+我已经确认可以做一个不引入新 tunable 的最小新 family：复用现有 `NUM_EXPERTS` 和 `FACTORIZED_HIDDEN_DIM` 语义，把共享低维投影放到 expert 内部头之前。这样 Round 71 可以保持“只改 `ARCHITECTURE`”的单变量约束，把新增结构和参数接线风险分开。
+exec
+/bin/bash -lc 'rg -n "agent_action_0035|r35 .*edit_sae_code|lowrank_expert_topk edit_sae_code" research/history/logs research/history/results.tsv' in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/logs/agent_round_0059.stdout.log:3179:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0059.stdout.log:3180:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0059.stdout.log:3181:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0059.stdout.log:3182:research/history/memory.json:10:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0059.stdout.log:3183:research/history/memory.json:11:    "r50 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0059.stdout.log:3226:research/history/memory.json:859:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0059.stdout.log:3230:research/history/memory.json:863:    "r50 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0059.stdout.log:3294:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0049.stdout.log:404:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0049.stdout.log:405:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0049.stdout.log:406:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0049.stdout.log:428:research/history/memory.json:818:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0049.stdout.log:433:research/history/memory.json:838:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0049.stdout.log:1147:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0049.stdout.log:1409:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0049.stdout.log:1492:research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0049.stdout.log:1493:research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0049.stdout.log:1510:research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0049.stdout.log:1520:research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0049.stdout.log:1707:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0049.stdout.log:1779:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0070.stdout.log:338:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0070.stdout.log:339:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:340:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:341:research/history/memory.json:10:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:342:research/history/memory.json:11:    "r50 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0070.stdout.log:507:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0070.stdout.log:650:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0070.stdout.log:653:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:654:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:655:research/history/memory.json:10:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0070.stdout.log:656:research/history/memory.json:11:    "r50 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0070.stdout.log:1442:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:669:research/history/logs/agent_action_0035.json
+research/history/logs/agent_round_0051.stdout.log:1740:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:2127:research/history/logs/agent_round_0049.stdout.log:404:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:2128:research/history/logs/agent_round_0049.stdout.log:405:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0051.stdout.log:2129:research/history/logs/agent_round_0049.stdout.log:406:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:2151:research/history/logs/agent_round_0049.stdout.log:428:research/history/memory.json:818:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0051.stdout.log:2155:research/history/logs/agent_round_0049.stdout.log:433:research/history/memory.json:838:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:2395:research/history/logs/agent_round_0049.stdout.log:1147:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:2477:research/history/logs/agent_round_0049.stdout.log:1409:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:2556:research/history/logs/agent_round_0049.stdout.log:1492:research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:2557:research/history/logs/agent_round_0049.stdout.log:1493:research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:2574:research/history/logs/agent_round_0049.stdout.log:1510:research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:2584:research/history/logs/agent_round_0049.stdout.log:1520:research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:2771:research/history/logs/agent_round_0049.stdout.log:1707:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:2941:research/history/logs/agent_round_0050.stdout.log:1629:research/history/logs/agent_round_0049.stdout.log:1147:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:3023:research/history/logs/agent_round_0050.stdout.log:1740:research/history/logs/agent_round_0049.stdout.log:1409:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:3102:research/history/logs/agent_round_0050.stdout.log:1822:research/history/logs/agent_round_0049.stdout.log:1492:research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:3103:research/history/logs/agent_round_0050.stdout.log:1823:research/history/logs/agent_round_0049.stdout.log:1493:research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:3120:research/history/logs/agent_round_0050.stdout.log:1840:research/history/logs/agent_round_0049.stdout.log:1510:research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:3130:research/history/logs/agent_round_0050.stdout.log:1850:research/history/logs/agent_round_0049.stdout.log:1520:research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0051.stdout.log:3317:research/history/logs/agent_round_0050.stdout.log:2037:research/history/logs/agent_round_0049.stdout.log:1707:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:3389:research/history/logs/agent_round_0050.stdout.log:2109:research/history/logs/agent_round_0049.stdout.log:1779:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4123:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0051.stdout.log:4126:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk — blocked)",
+research/history/logs/agent_round_0051.stdout.log:4127:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk — blocked)",
+research/history/logs/agent_round_0051.stdout.log:4128:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk — blocked)",
+research/history/logs/agent_round_0051.stdout.log:4129:    "r50 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk — blocked)"
+research/history/logs/agent_round_0051.stdout.log:4417:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4502:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4527:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4648:research/history/logs/agent_round_0050.stdout.log:817:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4715:research/history/logs/agent_round_0050.stdout.log:1221:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4729:research/history/logs/agent_round_0050.stdout.log:1293:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4777:research/history/logs/agent_round_0050.stdout.log:1629:research/history/logs/agent_round_0049.stdout.log:1147:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4795:research/history/logs/agent_round_0050.stdout.log:1740:research/history/logs/agent_round_0049.stdout.log:1409:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4855:research/history/logs/agent_round_0050.stdout.log:2037:research/history/logs/agent_round_0049.stdout.log:1707:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0051.stdout.log:4869:research/history/logs/agent_round_0050.stdout.log:2109:research/history/logs/agent_round_0049.stdout.log:1779:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:543:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0050.stdout.log:544:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0050.stdout.log:545:research/history/memory.json:9:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0050.stdout.log:546:research/history/memory.json:10:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:572:research/history/memory.json:811:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0050.stdout.log:577:research/history/memory.json:831:    "r48 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)",
+research/history/logs/agent_round_0050.stdout.log:581:research/history/memory.json:835:    "r49 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:817:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:1006:research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0050.stdout.log:1007:research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:1024:research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0050.stdout.log:1034:research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:1221:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:1293:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:1629:research/history/logs/agent_round_0049.stdout.log:1147:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:1740:research/history/logs/agent_round_0049.stdout.log:1409:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:1822:research/history/logs/agent_round_0049.stdout.log:1492:research/history/logs/agent_round_0044.stdout.log:407:research/history/memory.json:5:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0050.stdout.log:1823:research/history/logs/agent_round_0049.stdout.log:1493:research/history/logs/agent_round_0044.stdout.log:408:research/history/memory.json:8:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:1840:research/history/logs/agent_round_0049.stdout.log:1510:research/history/logs/agent_round_0044.stdout.log:432:research/history/memory.json:773:    "r35 lowrank_expert_topk edit_sae_code k128 -> discard fvu=0.13181091845035553",
+research/history/logs/agent_round_0050.stdout.log:1850:research/history/logs/agent_round_0049.stdout.log:1520:research/history/logs/agent_round_0044.stdout.log:448:research/history/memory.json:810:    "r43 lowrank_expert_topk edit_sae_code k? -> policy_reject (Behavioral diff: lowrank_expert_topk encode() identical to topk \u2014 blocked)"
+research/history/logs/agent_round_0050.stdout.log:2037:research/history/logs/agent_round_0049.stdout.log:1707:research/history/logs/agent_round_0044.stdout.log:1181:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+research/history/logs/agent_round_0050.stdout.log:2109:research/history/logs/agent_round_0049.stdout.log:1779:research/history/logs/agent_round_0044.stdout.log:1483:research/history/logs/agent_round_0043.stdout.log:2300:research/history/logs/agent_action_0035.json:1:{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+
+exec
+/bin/bash -lc 'if [ -f research/history/logs/agent_action_0035.json ]; then cat research/history/logs/agent_action_0035.json; fi' in /root/sparsify-ascend
+ succeeded in 0ms:
+{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"expected_win":"explore_unknown","experiment_tier":"proxy","family_name":"lowrank_expert_topk","family_stage":"prototype","hypothesis":"最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 库，{B_e} 是静态 expert 子库；在线侧先算 trunk 系数 β_r(x)，再用轻量 router 选择一个静态 expert 子库 e(x)，并只在该子库内做 local top-k 得到 α_{e,i}(x)。因此它可直接导出到 LUTurbo 的“查表 + 加权求和 + 选择性补偿”链路，兼容性判定为扩展兼容。主假设：在 EF=1、K=128 的低开销带，lowrank trunk 先吸收平滑主干、expert local top-k 再处理残差，能比 plain expert_topk 与同带宽 plain selector 提供更好的 FVU/total_cost 权衡，并形成新的 Pareto 段。","needs_sanity":true,"next_hypotheses":["如果 r12->lowrank_expert_topk(K=128) 给出有效信号且 FVU 明显优于当前 0.38x-0.56x 邻域锚点，则下一轮保持 family 不变，只改 K 到 160，验证该 family 在 0.69x total_cost 处是否继续沿 Pareto 前进。","如果该原型训练不稳或收益不足，则优先继续实现 `lowrank + expert + residual`，而不是回到 plain topk/jumprelu 的局部扫点。"],"notes_to_memory":["已按 sae-architecture-integration checklist 完成新 family 接线：`lowrank_expert_topk` 已加入 `sparsify/config.py` whitelist，并加入 `sparsify/sparse_coder.py` dispatch。","新增原型 family 的导出形式为 trunk 静态库 + 单 expert 静态子库上的有限加权和，满足 LUTurbo 静态库约束，兼容性应视为扩展兼容。","已完成 instantiate/forward/backward smoke：`lowrank_expert_topk`, K=128, EF=1 通过。","当前原型采用固定 4 experts、active_experts=1、无新增 tunable 参数，因此本轮只需改 `ARCHITECTURE`，不需要修改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。","在 target proxy(1024x4096) 上，`lowrank_expert_topk` 的估算成本为：K=128 -> total 0.56x；K=160 -> total 0.69x；K=192 -> total 0.81x。低开销起点应优先从 K=128 开始。"],"reference_round":12,"self_review":"这轮只改了一个 env 参数 `ARCHITECTURE`，相对 r12 保持 K=128、EF=1、LR=8e-4、optimizer=adam 不变，归因清晰。代码侧只做最小 family 原型接线，没有引入新 tunable，因此不存在 override/runner 静默回退风险。风险是当前 prototype 的 expert 数和 active_experts 仍是固定值，若首轮效果一般，不能立刻下结论否定 `lowrank + expert` 方向本身。","summary":"已实现并 smoke 通过新的 `lowrank_expert_topk` family，用最小 lowrank+expert 原型覆盖当前高优先级未验证结构槽位。建议下一轮以 r12(topk K=128 EF=1) 为参考，只切换到 `ARCHITECTURE=lowrank_expert_topk`，先在约 0.56x total_cost 的低开销带验证该 family 是否能形成新的 Pareto 段。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"]}
+codex
+{"change_type":"edit_sae_code","command":"run","family_name":"factorized_expert_topk","family_stage":"prototype","reference_round":69,"env_overrides":[{"key":"ARCHITECTURE","value":"factorized_expert_topk"}],"expected_win":"explore_unknown","needs_sanity":true,"hypothesis":"最终重构公式设为 x_hat = Σ_{i∈S_{e(h(x))}(h(x))} α_{e,i}(h(x)) b_{e,i}，其中 h(x)=ReLU(Bx) 是共享低维投影，e(h(x)) 是轻量 router 选出的单个 expert，{b_{e,i}} 是各 expert 的静态子库原子。导出到 LUTurbo/Lottable 的链路是：先做共享低维投影 h(x)，再做 router 选单个静态 expert 子库，再由该 expert 的小型 head 在低维空间上打分并做 local top-k，最后把 (e,i) 扁平化为静态库查表上的有限加权和；静态库本身不随样本动态生成，因此该 family 判定为扩展兼容。兼容性先验在本轮保持清晰：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert` 与本轮新增的 `factorized_expert_topk` 都属扩展兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 属不兼容，只能留作历史参考，不能继续驱动 frontier。相对 r69 仅把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=160`、`NUM_EXPERTS=32`、`EF=1` 与训练 recipe 不变，直接回答当前高优先级问题：把 shared low-rank basis 放进 expert 内部 head，而不是放在 expert 外部做全局 trunk，是否能在不拉长 active path 的前提下形成新的低成本 Pareto 段。按当前 proxy 粗估，shared basis + active expert head 的 encoder 成本应仍落在约 0.3x 量级，配合 `K=160` 的部署成本后总成本预计仍在约 0.45x-0.5x 带，低于 1.5×h×n 硬约束。","summary":"Round 70 已经说明现有 `lowrank_expert_topk` 的 EF=1 外置 trunk 原型不足以继续支撑低成本前沿。本轮不再补旧 family 的局部点，而是新增一个更贴近当前高信息量假设的最小原型 `factorized_expert_topk`，并以 r69 为 matched reference 只改 `ARCHITECTURE`，验证“shared low-rank basis + routed expert head”是否优于纯 routed-only `expert_topk`。","self_review":"这满足单轮单变量约束：训练配置相对 r69 只改 `ARCHITECTURE`。代码侧只在 `sparsify/` 内完成最小 family 接线，不新增 tunable，因此不需要改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。选择开新 family 而不是继续扫 `expert_topk` 的 K 或 `lowrank_expert_residual` 的局部旋钮，是因为当前提示已明确指出更高信息量方向在 expert-internal low-rank；继续围绕 EF=1 旧原型做小修小补的信息增量已经不足。主要风险是 auto `FACTORIZED_HIDDEN_DIM` 可能偏大或偏小，导致首轮结果更多反映默认宽度而非结构上限；但这正符合新 family 第一轮先看结构是否值得继续、而不是先调宽度的要求。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["Round 71 优先新增 `factorized_expert_topk`，覆盖当前未实现但高优先级的 `shared low-rank basis + expert-specific head` 结构槽位。","首轮原型不新增 tunable，复用现有 `NUM_EXPERTS` 与 `FACTORIZED_HIDDEN_DIM` 语义；训练配置相对 r69 仅切换 `ARCHITECTURE`，归因最干净。","必须按 sae-architecture-integration checklist 完成 whitelist、dispatch、class、exact-string instantiate/forward/backward smoke，然后再把真实训练结果当作结构证据。","不兼容 family 继续排除在 active frontier 外；本轮比较对象只限兼容 family。"],"next_hypotheses":["如果 `factorized_expert_topk` 在与 r69 相近总成本下明显优于 routed-only `expert_topk`，下一轮保持 family 不变，只显式设置 `FACTORIZED_HIDDEN_DIM`，测试共享 basis 宽度是否是该新结构的主控制旋钮。","如果它只小幅改善但仍明显弱于 `<0.5x` 最佳锚点，则下一轮可做 matched `K=128` 左移测试，判断这条新结构更适合低成本还是中成本带。","如果它没有改善或训练异常，则应快速归档该 family 的当前原型，并把结构预算转回 `lowrank_expert_residual` 或其他兼容的新 MoE-like 方向，而不是继续在旧 EF=1 原型上做邻域微调。"]}
+tokens used
+169,024

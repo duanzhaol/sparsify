@@ -424,6 +424,8 @@ def _get_sae_class(architecture: str) -> type:
         return RoutedSparseCoder
     if architecture == "expert_topk":
         return ExpertTopKSparseCoder
+    if architecture == "factorized_expert_topk":
+        return FactorizedExpertTopKSparseCoder
     if architecture == "lowrank_expert_topk":
         return LowRankExpertTopKSparseCoder
     if architecture == "lowrank_expert_residual":
@@ -1218,6 +1220,133 @@ class ExpertTopKSparseCoder(SparseCoder):
             "be,el->bl", expert_gate, self.expert_encoder_bias
         )
         pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts)
+        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
+
+        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
+        top_indices = local_indices + expert_offsets
+
+        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).unsqueeze(0)
+        full_indices = expert_offsets + local_offsets
+        full_acts.scatter_(1, full_indices, acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class FactorizedExpertTopKSparseCoder(SparseCoder):
+    """Route into an expert-local top-k head after a shared low-rank projection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.latents_per_expert:
+            raise ValueError(
+                "factorized_expert_topk requires k <= latents_per_expert, "
+                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(
+            hidden_dim, self.num_experts, device=device, dtype=dtype
+        )
+        self.expert_heads = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.expert_heads, a=5**0.5)
+
+        if decoder:
+            effective_encoder = torch.einsum(
+                "elh,hd->eld", self.expert_heads.data, self.factor_encoder.weight.data
+            ).reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(effective_encoder.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_head",
+                self.factor_encoder.out_features * self.latents_per_expert,
+                f"active=1×{self.factor_encoder.out_features}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        router_logits = self.router(hidden)
+        router_probs = torch.softmax(router_logits, dim=-1)
+        hard_expert_idx = router_probs.argmax(dim=-1)
+        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(
+            hidden.dtype
+        )
+        expert_gate = hard_gate + router_probs - router_probs.detach()
+
+        selected_weight = torch.einsum("be,elh->blh", expert_gate, self.expert_heads)
+        selected_bias = torch.einsum("be,el->bl", expert_gate, self.expert_head_bias)
+        pre_acts = torch.einsum("bh,blh->bl", hidden, selected_weight) + selected_bias
         acts = F.relu(pre_acts)
         top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
 
