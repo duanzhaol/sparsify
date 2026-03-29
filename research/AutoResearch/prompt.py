@@ -217,6 +217,45 @@ def _summary_round_ids(round_summaries: list[dict[str, Any]]) -> set[int]:
     return round_ids
 
 
+def _recent_summaries_with_latest(state: Any, limit: int = 20) -> list[dict[str, Any]]:
+    """Return recent round summaries, forcing inclusion of the latest completed round.
+
+    In resume-session mode the next worker should always see the immediately
+    preceding round. Relying on a plain tail of round_summaries can miss that
+    last round if prompt assembly observes a stale recent-summaries window.
+    """
+    recent_summaries = list(state.recent_round_summaries(limit=limit) or [])
+
+    latest_round_id = int(getattr(state, "round_index", 0) or 0)
+    if latest_round_id <= 0:
+        return recent_summaries
+
+    latest_summary = state.load_round_summary(latest_round_id)
+    if not isinstance(latest_summary, dict) or not latest_summary:
+        return recent_summaries
+
+    latest_key = latest_round_id
+    deduped: list[dict[str, Any]] = []
+    seen_latest = False
+    for summary in recent_summaries:
+        try:
+            round_id = int(summary.get("round"))
+        except (TypeError, ValueError, AttributeError):
+            deduped.append(summary)
+            continue
+        if round_id == latest_key:
+            if not seen_latest:
+                deduped.append(latest_summary)
+                seen_latest = True
+            continue
+        deduped.append(summary)
+
+    if not seen_latest:
+        deduped.append(latest_summary)
+
+    return deduped[-limit:]
+
+
 def section_frontier(
     frontier: dict[str, Any],
     registry: dict[str, str],
@@ -891,7 +930,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
     sections: list[str] = []
 
     registry = state.load_compatibility_registry()
-    recent_summaries = state.recent_round_summaries(limit=20)
+    recent_summaries = _recent_summaries_with_latest(state, limit=20)
 
     # Layer 1
     sections.append(section_hard_constraints())
@@ -943,7 +982,7 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     sections: list[str] = []
 
     registry = state.load_compatibility_registry()
-    recent_summaries = state.recent_round_summaries(limit=20)
+    recent_summaries = _recent_summaries_with_latest(state, limit=20)
     target_recent_summaries = _current_target_summaries(recent_summaries)
 
     sections.append(f"继续 LUTurbo 研究会话。当前轮次：Round {round_id}。")
