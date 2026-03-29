@@ -1,0 +1,41 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{e∈E(x-t(x))} Σ_{i∈S_e(x-t(x))} α_{e,i}(x) b_{e,i}，其中 t(x)=Σ_{r=1..R} β_r(x) u_r，U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，E(x) 是轻量 router 选出的少量 active experts，且 |E(x)| = ACTIVE_EXPERTS 很小。导出到 LUTurbo/Lottable 的在线链路仍是“trunk 查表 + 少量 expert 子库查表 + 有限加权和”，静态库不随样本动态生成，因此 `lowrank_expert_topk` 仍属扩展兼容。兼容性先筛清楚：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert` 属扩展兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 不兼容，不能驱动 frontier。最近 r82 与 r83 已给出清晰负信号：现有单-expert 路由下，单纯压粗 expert 粒度在 `lowrank_expert_topk` 与 `lowrank_expert_residual` 都会退化。这说明当前真正未验证的高优先级问题已不再是旧轴微调，而是提示里反复强调的“总容量与 active path 解耦”是否值得做最小原型。因此本轮不再继续 param_only 细扫，而是对 `lowrank_expert_topk` 增加新 tunable `ACTIVE_EXPERTS`，并以 r60 为参考做第一轮接线验证：只新增 env 参数 `ACTIVE_EXPERTS=2`，保持 `K=128`、`TRUNK_RANK=64`、`NUM_EXPERTS=32`、`STAGE1_RATIO=0.25`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 不变，验证 shared trunk + 2-expert routed lookup 是否能在总 active path 仍短的前提下改善质量。首轮目标不是宣称新前沿，而是先确保 `round*.config.json` 与 checkpoint config 中都真实出现 `active_experts=2`，并拿到第一条兼容、可计成本、可导出的 MoE-like 证据。",
+  "summary": "Round 84 转入高信息量结构扩展：不再继续压 `TRUNK_RANK`、`NUM_EXPERTS` 或 `STAGE1_RATIO` 这些已出现负信号的旧轴，而是给 `lowrank_expert_topk` 做最小 MoE-like 扩展，新增 `ACTIVE_EXPERTS` tunable 并做首轮接线验证。相对 r60，仅新增一个 env 参数 `ACTIVE_EXPERTS=2`；本轮重点是把参数贯通到 `sparsify/ + research/AutoResearch/ + scripts/autoresearch_test.sh`，确认 config/checkpoint 生效，然后再看 2-expert active path 是否值得继续。",
+  "change_type": "edit_sae_code",
+  "experiment_tier": "proxy",
+  "expected_win": "explore_unknown",
+  "family_name": "lowrank_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "这轮故意不再做 `param_only`，因为最近连续七轮已经把当前已实现 family 的主要低成本旧轴基本扫清：`lowrank_expert_residual` 上提高 `STAGE1_RATIO`、压 `TRUNK_RANK`、压粗 `NUM_EXPERTS` 都退化，`lowrank_expert_topk` 上把 `NUM_EXPERTS` 改到 16/64 也都不优于 32，`two_stage_residual_expert` 的 matched probe 也明显偏弱。继续在这些轴上细扫的信息增量已经很低。相反，提示里明确要求把预算转向真正的 MoE-like 稀疏扩容，并优先补 `ACTIVE_EXPERTS` 这类能把总容量与 active path 解耦的 tunable。本轮只新增一个 env 参数 `ACTIVE_EXPERTS`，并把接线范围限制在 `sparsify/`、`research/AutoResearch/` 和 `scripts/autoresearch_test.sh`，符合约束。主要风险是首轮更多是在做工程接线与可导出性验证，数值可能不会立刻优于 frontier；但这是当前最必要的最小原型步骤，否则后续搜索会继续被单-expert 旧结构困住。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ACTIVE_EXPERTS",
+      "value": "2"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py",
+    "research/AutoResearch/override_registry.py",
+    "research/AutoResearch/config_resolution.py",
+    "research/AutoResearch/runner.py",
+    "research/AutoResearch/controller.py",
+    "research/AutoResearch/policy.py",
+    "research/AutoResearch/rebuild_runtime_state.py",
+    "research/AutoResearch/audit_history_execution.py",
+    "scripts/autoresearch_test.sh"
+  ],
+  "notes_to_memory": [
+    "`lowrank_expert_topk` 在加入 `ACTIVE_EXPERTS` 后的导出形式仍是静态 trunk 库 + 少量静态 expert 子库上的有限加权和，兼容性仍为扩展兼容。",
+    "Round 84 的成功标准首先是工程正确性而不是 frontier 改善：至少要在 round config 和 checkpoint config 中看到 `active_experts=2`，否则结果一律按接线失败处理。",
+    "如果 `ACTIVE_EXPERTS=2` 接线成功，则这是当前 target 上第一条真正把 total capacity 与 active path 部分解耦的兼容 MoE-like 原型，比继续扫旧 family 的局部参数更符合当前阶段目标。"
+  ],
+  "next_hypotheses": [
+    "如果 `ACTIVE_EXPERTS=2` 接线成功且 FVU 有改善，则下一轮保持 family 不变，只改 `NUM_EXPERTS=64` 或更大，直接测试“总容量增大但 active path 仍短”的真实 MoE-like 假设。",
+    "如果 `ACTIVE_EXPERTS=2` 接线成功但数值无明显改善，则下一轮保持 family 不变，只改回 `ACTIVE_EXPERTS=1` 或继续到 `3`，明确当前 target 的最佳 active-expert 数是否仍是单 expert。",
+    "如果本轮未在 round config 或 checkpoint config 中看到 `ACTIVE_EXPERTS`，则下一轮优先修复接线与持久化链路，不把训练指标当结构证据。"
+  ],
+  "reference_round": 60
+}
