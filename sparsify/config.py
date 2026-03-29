@@ -55,6 +55,9 @@ class SparseCoderConfig(Serializable):
     num_experts: int | None = None
     """Expert count for MoE-like families. None keeps the legacy fixed-layout expert split."""
 
+    active_experts: int | None = None
+    """Number of routed experts to activate per token for expert families."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -280,6 +283,21 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "num_experts must be positive when set, "
                 f"got {self.sae.num_experts}"
+            )
+        if self.sae.active_experts is not None and self.sae.active_experts <= 0:
+            raise ValueError(
+                "active_experts must be positive when set, "
+                f"got {self.sae.active_experts}"
+            )
+        if (
+            self.sae.num_experts is not None
+            and self.sae.active_experts is not None
+            and self.sae.active_experts > self.sae.num_experts
+        ):
+            raise ValueError(
+                "active_experts must be <= num_experts when both are set, "
+                f"got active_experts={self.sae.active_experts} "
+                f"and num_experts={self.sae.num_experts}"
             )
 
         # Optimizer validation

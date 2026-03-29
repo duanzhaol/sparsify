@@ -1125,6 +1125,70 @@ class RoutedSparseCoder(SparseCoder):
         return EncoderOutput(top_acts, top_indices, acts)
 
 
+def _resolve_expert_layout(
+    cfg: SparseCoderConfig,
+    d_in: int,
+) -> tuple[int, int, int, int]:
+    base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+    if cfg.num_experts is None:
+        num_experts = 4
+        latents_per_expert = math.ceil(base_num_latents / num_experts)
+    else:
+        # Explicit NUM_EXPERTS switches expert families into sparse-capacity
+        # expansion mode: each routed expert keeps the base width while the
+        # total static library grows with the expert count.
+        num_experts = cfg.num_experts
+        latents_per_expert = base_num_latents
+
+    active_experts = cfg.active_experts or 1
+    if active_experts > num_experts:
+        raise ValueError(
+            "active_experts must be <= num_experts, "
+            f"got active_experts={active_experts} and num_experts={num_experts}"
+        )
+
+    return base_num_latents, num_experts, latents_per_expert, active_experts
+
+
+def _select_active_expert_indices(
+    router_logits: Tensor,
+    active_experts: int,
+) -> tuple[Tensor, Tensor]:
+    router_probs = torch.softmax(router_logits, dim=-1)
+    active_probs, active_indices = torch.topk(
+        router_probs, active_experts, dim=-1, sorted=False
+    )
+    norm = active_probs.sum(dim=-1, keepdim=True).clamp_min(
+        torch.finfo(active_probs.dtype).eps
+    )
+    return active_indices, active_probs / norm
+
+
+def _finalize_routed_expert_acts(
+    acts: Tensor,
+    selected_expert_idx: Tensor,
+    total_k: int,
+    latents_per_expert: int,
+    num_latents: int,
+    *,
+    index_offset: int = 0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    flat_acts = acts.reshape(acts.shape[0], -1)
+    top_acts, top_pos = torch.topk(flat_acts, total_k, dim=-1, sorted=False)
+
+    local_offsets = torch.arange(
+        latents_per_expert, device=acts.device
+    ).view(1, 1, latents_per_expert)
+    flat_indices = (
+        selected_expert_idx.unsqueeze(-1) * latents_per_expert + local_offsets
+    ).reshape(acts.shape[0], -1)
+    top_indices = flat_indices.gather(1, top_pos) + index_offset
+
+    full_acts = acts.new_zeros(acts.shape[0], num_latents)
+    full_acts.scatter_(1, flat_indices, flat_acts)
+    return top_acts, top_indices, full_acts
+
+
 class ExpertTopKSparseCoder(SparseCoder):
     """Route each token to one expert-local dictionary before local top-k."""
 
@@ -1140,22 +1204,18 @@ class ExpertTopKSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        if cfg.num_experts is None:
-            self.num_experts = 4
-            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
-        else:
-            # Explicit NUM_EXPERTS switches expert families into sparse-capacity
-            # expansion mode: each routed expert keeps the base width while the
-            # total static library grows with the expert count.
-            self.num_experts = cfg.num_experts
-            self.latents_per_expert = base_num_latents
-        self.active_experts = 1
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
         self.num_latents = self.num_experts * self.latents_per_expert
-        if cfg.k > self.latents_per_expert:
+        if cfg.k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "expert_topk requires k <= latents_per_expert, "
-                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+                "expert_topk requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
             )
 
         self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
@@ -1197,8 +1257,8 @@ class ExpertTopKSparseCoder(SparseCoder):
         return [
             (
                 "active_expert_encoder",
-                self.d_in * self.latents_per_expert,
-                f"active=1×{self.d_in}x{self.latents_per_expert}",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
             )
         ]
 
@@ -1208,30 +1268,20 @@ class ExpertTopKSparseCoder(SparseCoder):
         flat_x = x.reshape(-1, self.d_in)
 
         router_logits = self.router(flat_x)
-        router_probs = torch.softmax(router_logits, dim=-1)
-        hard_expert_idx = router_probs.argmax(dim=-1)
-        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(flat_x.dtype)
-        expert_gate = hard_gate + router_probs - router_probs.detach()
-
-        selected_weight = torch.einsum(
-            "be,eld->bld", expert_gate, self.expert_encoders
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
         )
-        selected_bias = torch.einsum(
-            "be,el->bl", expert_gate, self.expert_encoder_bias
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
         )
-        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
-        acts = F.relu(pre_acts)
-        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
-
-        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
-        top_indices = local_indices + expert_offsets
-
-        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
-        local_offsets = torch.arange(
-            self.latents_per_expert, device=flat_x.device
-        ).unsqueeze(0)
-        full_indices = expert_offsets + local_offsets
-        full_acts.scatter_(1, full_indices, acts)
 
         target_shape = (*original_shape, self.cfg.k)
         acts_shape = (*original_shape, self.num_latents)
@@ -1257,19 +1307,18 @@ class FactorizedExpertTopKSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        if cfg.num_experts is None:
-            self.num_experts = 4
-            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
-        else:
-            self.num_experts = cfg.num_experts
-            self.latents_per_expert = base_num_latents
-        self.active_experts = 1
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
         self.num_latents = self.num_experts * self.latents_per_expert
-        if cfg.k > self.latents_per_expert:
+        if cfg.k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "factorized_expert_topk requires k <= latents_per_expert, "
-                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+                "factorized_expert_topk requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
             )
 
         hidden_dim = (
@@ -1325,8 +1374,10 @@ class FactorizedExpertTopKSparseCoder(SparseCoder):
         return [
             (
                 "active_expert_head",
-                self.factor_encoder.out_features * self.latents_per_expert,
-                f"active=1×{self.factor_encoder.out_features}x{self.latents_per_expert}",
+                self.active_experts
+                * self.factor_encoder.out_features
+                * self.latents_per_expert,
+                f"active={self.active_experts}×{self.factor_encoder.out_features}x{self.latents_per_expert}",
             )
         ]
 
@@ -1337,28 +1388,20 @@ class FactorizedExpertTopKSparseCoder(SparseCoder):
 
         hidden = F.relu(self.factor_encoder(flat_x))
         router_logits = self.router(hidden)
-        router_probs = torch.softmax(router_logits, dim=-1)
-        hard_expert_idx = router_probs.argmax(dim=-1)
-        hard_gate = F.one_hot(hard_expert_idx, num_classes=self.num_experts).to(
-            hidden.dtype
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
         )
-        expert_gate = hard_gate + router_probs - router_probs.detach()
-
-        selected_weight = torch.einsum("be,elh->blh", expert_gate, self.expert_heads)
-        selected_bias = torch.einsum("be,el->bl", expert_gate, self.expert_head_bias)
-        pre_acts = torch.einsum("bh,blh->bl", hidden, selected_weight) + selected_bias
-        acts = F.relu(pre_acts)
-        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
-
-        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
-        top_indices = local_indices + expert_offsets
-
-        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
-        local_offsets = torch.arange(
-            self.latents_per_expert, device=flat_x.device
-        ).unsqueeze(0)
-        full_indices = expert_offsets + local_offsets
-        full_acts.scatter_(1, full_indices, acts)
+        selected_weight = self.expert_heads[selected_expert_idx]
+        selected_bias = self.expert_head_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
 
         target_shape = (*original_shape, self.cfg.k)
         acts_shape = (*original_shape, self.num_latents)
@@ -1384,19 +1427,18 @@ class LowRankExpertTopKSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        if cfg.num_experts is None:
-            self.num_experts = 4
-            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
-        else:
-            self.num_experts = cfg.num_experts
-            self.latents_per_expert = base_num_latents
-        self.active_experts = 1
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
         self.num_latents = self.num_experts * self.latents_per_expert
-        if cfg.k > self.latents_per_expert:
+        if cfg.k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "lowrank_expert_topk requires k <= latents_per_expert, "
-                f"got k={cfg.k} and latents_per_expert={self.latents_per_expert}"
+                "lowrank_expert_topk requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
             )
 
         trunk_rank = (
@@ -1454,8 +1496,8 @@ class LowRankExpertTopKSparseCoder(SparseCoder):
         return [
             (
                 "active_expert_encoder",
-                self.d_in * self.latents_per_expert,
-                f"active=1×{self.d_in}x{self.latents_per_expert}",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
             )
         ]
 
@@ -1476,32 +1518,20 @@ class LowRankExpertTopKSparseCoder(SparseCoder):
         flat_x = residual.reshape(-1, self.d_in)
 
         router_logits = self.router(flat_x)
-        router_probs = torch.softmax(router_logits, dim=-1)
-        hard_expert_idx = router_probs.argmax(dim=-1)
-        hard_gate = F.one_hot(
-            hard_expert_idx, num_classes=self.num_experts
-        ).to(flat_x.dtype)
-        expert_gate = hard_gate + router_probs - router_probs.detach()
-
-        selected_weight = torch.einsum(
-            "be,eld->bld", expert_gate, self.expert_encoders
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
         )
-        selected_bias = torch.einsum(
-            "be,el->bl", expert_gate, self.expert_encoder_bias
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
         )
-        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
-        acts = F.relu(pre_acts)
-        top_acts, local_indices = torch.topk(acts, self.cfg.k, dim=-1, sorted=False)
-
-        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
-        top_indices = local_indices + expert_offsets
-
-        full_acts = acts.new_zeros(acts.shape[0], self.num_latents)
-        local_offsets = torch.arange(
-            self.latents_per_expert, device=flat_x.device
-        ).unsqueeze(0)
-        full_indices = expert_offsets + local_offsets
-        full_acts.scatter_(1, full_indices, acts)
 
         target_shape = (*original_shape, self.cfg.k)
         acts_shape = (*original_shape, self.num_latents)
@@ -1578,14 +1608,12 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        if cfg.num_experts is None:
-            self.num_experts = 4
-            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
-        else:
-            self.num_experts = cfg.num_experts
-            self.latents_per_expert = base_num_latents
-        self.active_experts = 1
+        (
+            base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
 
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.residual_num_latents = base_num_latents
@@ -1597,10 +1625,11 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
             self.stage1_k = max(1, cfg.k // 2)
         self.stage2_k = max(1, cfg.k - self.stage1_k)
 
-        if self.stage1_k > self.latents_per_expert:
+        if self.stage1_k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "lowrank_expert_residual requires stage1_k <= latents_per_expert, "
+                "lowrank_expert_residual requires stage1_k <= active_experts * latents_per_expert, "
                 f"got stage1_k={self.stage1_k} and "
+                f"active_experts={self.active_experts} and "
                 f"latents_per_expert={self.latents_per_expert}"
             )
 
@@ -1669,8 +1698,8 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
         return [
             (
                 "active_expert_encoder",
-                self.d_in * self.latents_per_expert,
-                f"active=1×{self.d_in}x{self.latents_per_expert}",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
             )
         ]
 
@@ -1695,34 +1724,20 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
         flat_x = residual.reshape(-1, self.d_in)
 
         router_logits = self.router(flat_x)
-        router_probs = torch.softmax(router_logits, dim=-1)
-        hard_expert_idx = router_probs.argmax(dim=-1)
-        hard_gate = F.one_hot(
-            hard_expert_idx, num_classes=self.num_experts
-        ).to(flat_x.dtype)
-        expert_gate = hard_gate + router_probs - router_probs.detach()
-
-        selected_weight = torch.einsum(
-            "be,eld->bld", expert_gate, self.expert_encoders
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
         )
-        selected_bias = torch.einsum(
-            "be,el->bl", expert_gate, self.expert_encoder_bias
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage1_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
         )
-        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
-        acts = F.relu(pre_acts)
-        top_acts, local_indices = torch.topk(
-            acts, self.stage1_k, dim=-1, sorted=False
-        )
-
-        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
-        top_indices = local_indices + expert_offsets
-
-        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
-        local_offsets = torch.arange(
-            self.latents_per_expert, device=flat_x.device
-        ).unsqueeze(0)
-        full_indices = expert_offsets + local_offsets
-        full_acts.scatter_(1, full_indices, acts)
 
         target_shape = (*original_shape, self.stage1_k)
         acts_shape = (*original_shape, self.expert_num_latents)
@@ -1840,16 +1855,14 @@ class TwoStageResidualExpertSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        if cfg.num_experts is None:
-            self.num_experts = 4
-            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
-        else:
-            self.num_experts = cfg.num_experts
-            self.latents_per_expert = base_num_latents
-        self.active_experts = 1
+        (
+            base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
 
-        self.stage1_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        self.stage1_num_latents = base_num_latents
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.num_latents = self.stage1_num_latents + self.expert_num_latents
 
@@ -1859,10 +1872,11 @@ class TwoStageResidualExpertSparseCoder(SparseCoder):
             self.stage1_k = max(1, cfg.k // 2)
         self.stage2_k = max(1, cfg.k - self.stage1_k)
 
-        if self.stage2_k > self.latents_per_expert:
+        if self.stage2_k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "two_stage_residual_expert requires stage2_k <= latents_per_expert, "
+                "two_stage_residual_expert requires stage2_k <= active_experts * latents_per_expert, "
                 f"got stage2_k={self.stage2_k} and "
+                f"active_experts={self.active_experts} and "
                 f"latents_per_expert={self.latents_per_expert}"
             )
 
@@ -1916,8 +1930,8 @@ class TwoStageResidualExpertSparseCoder(SparseCoder):
         return [
             (
                 "active_expert_encoder",
-                self.d_in * self.latents_per_expert,
-                f"active=1×{self.d_in}x{self.latents_per_expert}",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
             )
         ]
 
@@ -1932,34 +1946,21 @@ class TwoStageResidualExpertSparseCoder(SparseCoder):
         flat_x = residual.reshape(-1, self.d_in)
 
         router_logits = self.router(flat_x)
-        router_probs = torch.softmax(router_logits, dim=-1)
-        hard_expert_idx = router_probs.argmax(dim=-1)
-        hard_gate = F.one_hot(
-            hard_expert_idx, num_classes=self.num_experts
-        ).to(flat_x.dtype)
-        expert_gate = hard_gate + router_probs - router_probs.detach()
-
-        selected_weight = torch.einsum(
-            "be,eld->bld", expert_gate, self.expert_encoders
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
         )
-        selected_bias = torch.einsum(
-            "be,el->bl", expert_gate, self.expert_encoder_bias
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage2_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.stage1_num_latents,
         )
-        pre_acts = torch.einsum("bd,bld->bl", flat_x, selected_weight) + selected_bias
-        acts = F.relu(pre_acts)
-        top_acts, local_indices = torch.topk(
-            acts, self.stage2_k, dim=-1, sorted=False
-        )
-
-        expert_offsets = hard_expert_idx.unsqueeze(-1) * self.latents_per_expert
-        top_indices = local_indices + expert_offsets + self.stage1_num_latents
-
-        full_acts = acts.new_zeros(acts.shape[0], self.expert_num_latents)
-        local_offsets = torch.arange(
-            self.latents_per_expert, device=flat_x.device
-        ).unsqueeze(0)
-        full_indices = expert_offsets + local_offsets
-        full_acts.scatter_(1, full_indices, acts)
 
         target_shape = (*original_shape, self.stage2_k)
         acts_shape = (*original_shape, self.expert_num_latents)

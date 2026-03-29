@@ -532,6 +532,7 @@ def _check_total_cost_feasibility(
         ("STAGE1_RATIO", "stage1_ratio"),
         ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
         ("NUM_EXPERTS", "num_experts"),
+        ("ACTIVE_EXPERTS", "active_experts"),
     ]:
         val = cfg.get(env_key)
         if val is not None and val != "":

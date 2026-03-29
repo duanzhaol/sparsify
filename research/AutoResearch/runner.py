@@ -37,6 +37,7 @@ _STRUCTURAL_RUNTIME_KEYS: tuple[tuple[str, str, type], ...] = (
     ("STAGE1_RATIO", "stage1_ratio", float),
     ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim", int),
     ("NUM_EXPERTS", "num_experts", int),
+    ("ACTIVE_EXPERTS", "active_experts", int),
 )
 
 
@@ -605,6 +606,7 @@ def _build_env(
         "MATRYOSHKA_KS": ("matryoshka_ks", lambda x: [int(v) for v in x.split(",") if v]),
         "MATRYOSHKA_WEIGHTS": ("matryoshka_weights", lambda x: [float(v) for v in x.split(",") if v]),
         "NUM_EXPERTS": ("num_experts", int),
+        "ACTIVE_EXPERTS": ("active_experts", int),
     }
     for env_key, (cfg_key, caster) in _OPTIONAL.items():
         value = merged.get(env_key)
