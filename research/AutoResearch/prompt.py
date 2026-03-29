@@ -917,7 +917,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         registry,
         limit=4,
     ))
-    sections.append(section_tactical_hints(state.get_pending_hints()[:8]))
+    sections.append(section_tactical_hints(state.get_pending_hints()))
 
     # Layer 3
     sections.append(section_memory_brief(state.memory, state.frontier, registry, recent_summaries))
@@ -971,7 +971,7 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         registry,
         limit=4,
     ))
-    sections.append(section_tactical_hints(state.get_pending_hints()[:4]))
+    sections.append(section_tactical_hints(state.get_pending_hints()))
     sections.append(section_prior_research_digest(
         state.load_prior_research(),
     ))
