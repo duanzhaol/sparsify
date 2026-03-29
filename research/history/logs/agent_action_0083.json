@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i} + Σ_j γ_j(x) c_j，其中 U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，C={c_j} 是静态 residual 补偿库。导出到 LUTurbo/Lottable 的在线链路仍是“trunk 查表 + 单 expert 子库查表 + residual 查表 + 有限加权和”，静态库不随样本动态生成，因此 `lowrank_expert_residual` 属于扩展兼容。兼容性先筛清楚：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert` 属扩展兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 不兼容，不能驱动 frontier。r79 与 r81 已表明继续动 `STAGE1_RATIO` 或继续压 `TRUNK_RANK` 会退化，r82 又表明在 `lowrank_expert_topk` 上把 expert 粒度压粗到 16 会明显变差；因此当前最值得回答的问题是：在保留 residual cleanup 的三段式主线里，更粗的 expert 粒度是否仍然可行。相对 r76 只把 `NUM_EXPERTS` 从 64 降到 16，在保持 `ARCHITECTURE=lowrank_expert_residual`、`K=128`、`TRUNK_RANK=32`、`STAGE1_RATIO=0.25`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 与其余训练配方不变时，直接测试 residual 分支是否足以弥补更粗 expert 划分带来的局部容量损失，并在几乎不增部署成本的前提下把 selection cost 再向左推一小段。如果 `lowrank_expert_topk` 的粗 expert 失败主要因为缺少 residual cleanup，那么这个三段式 family 仍有机会在低到中成本带形成新的 Pareto 段。",
+  "summary": "Round 83 不回到 plain selector 的 K/LR 微调，也不重复已经给出负信号的 `TRUNK_RANK` / `STAGE1_RATIO` 轴，而是回到当前最强的兼容三段式主线 `lowrank_expert_residual` 做一次高信息量 expert 粒度 probe。以 r76 为 reference，只改 `NUM_EXPERTS=16`，验证 residual cleanup 是否能让更粗的 expert 子库在低到中成本带保持质量，从而补出新的结构性前沿。",
+  "change_type": "param_only",
+  "experiment_tier": "proxy",
+  "expected_win": "lower_cost",
+  "family_name": "lowrank_expert_residual",
+  "family_stage": "mainline",
+  "self_review": "满足单轮单变量约束：相对 r76 只改 `NUM_EXPERTS`。这比继续扫 `K`、继续压 `TRUNK_RANK`、继续调 `STAGE1_RATIO`，或回到已被 r82 进一步否定的 `lowrank_expert_topk` expert 粒度轴更符合当前证据，因为最近四轮已经分别否定了 higher stage1 budget、trunk compression、trunk-free staged、以及无 residual 的粗 expert 路线。当前最有信息量的问题是：`lowrank + expert + residual` 是否能依靠 residual cleanup 支撑更粗的 expert 划分，从而把这条 family 的低成本段进一步左移。主要风险是 `NUM_EXPERTS=16` 同样会因为局部专门化不足而退化；但无论正负，都能直接回答 residual 分支到底有没有把 MoE-like 粒度空间重新打开。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "16"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`lowrank_expert_residual` 的 LUTurbo 形式不变：静态 trunk 库 + 静态 expert 子库 + 静态 residual 库上的有限加权和，兼容性为扩展兼容。",
+    "按当前成本模型估算，`lowrank_expert_residual K=128 TRUNK_RANK=32 STAGE1_RATIO=0.25 NUM_EXPERTS=16` 仍明显低于 1.5×h×n 硬约束，combined ratio 约 0.68，略低于 r76 的约 0.69。",
+    "r82 说明没有 residual cleanup 的 `lowrank_expert_topk` 在 `NUM_EXPERTS=16` 下明显退化；Round 83 用 matched 三段式 recipe 复测同一粒度方向，专门判断 residual 分支是否改变 coarse-expert 结论。"
+  ],
+  "next_hypotheses": [
+    "如果 `NUM_EXPERTS=16` 接近或优于 r76，则下一轮保持 family 不变，只改 `K=160`，确认更粗 expert 粒度下这条三段式主线是否能沿 deployment 侧继续改善。",
+    "如果 `NUM_EXPERTS=16` 明显退化，则可较清楚地判断当前 target 上 `lowrank_expert_residual` 的有效 expert 粒度已经不宜再压粗，后续应把预算转向更高信息量的新结构方向，而不是继续在现有粒度轴上细扫。",
+    "如果结果接近但不明确，则下一轮保持 family 不变，只改 `NUM_EXPERTS=32` 或 `48` 做更窄的 matched 对照，确认这条三段式主线的最佳 expert 粒度区间。"
+  ],
+  "reference_round": 76
+}
