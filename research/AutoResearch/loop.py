@@ -250,9 +250,6 @@ def _bootstrap_runtime(
     allow_reset_failure_counters: bool,
 ) -> tuple[StateManager, Agent]:
     """Initialize state, tracked paths, and preflight checks for a worker."""
-    state = StateManager()
-    state.ensure_directories()
-    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
     agent = Agent(config)
 
     init_tracked_paths(
@@ -267,6 +264,14 @@ def _bootstrap_runtime(
         print("Preflight: checking clean worktree...")
         ensure_clean_worktree_for_auto_commit()
         print("Preflight: worktree clean")
+
+    # Do not let startup normalization mutate tracked history before the
+    # preflight clean-worktree gate. Any in-memory sanitization will be
+    # persisted later as part of a normal round outcome.
+    state = StateManager(persist_load_fixes=False)
+    state.ensure_directories()
+    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+
     if allow_reset_failure_counters and config.reset_failure_counters:
         state.reset_crash_counters()
 

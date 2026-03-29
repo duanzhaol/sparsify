@@ -98,8 +98,14 @@ _DEFAULT_MEMORY: dict[str, Any] = {
 class StateManager:
     """Single source of truth for all autoresearch persistent state."""
 
-    def __init__(self, history_dir: Path = HISTORY_DIR) -> None:
+    def __init__(
+        self,
+        history_dir: Path = HISTORY_DIR,
+        *,
+        persist_load_fixes: bool = True,
+    ) -> None:
         self.history_dir = history_dir
+        self._persist_load_fixes = persist_load_fixes
         self._state: dict[str, Any] = {}
         self._memory: dict[str, Any] = {}
         self._load()
@@ -480,9 +486,9 @@ class StateManager:
             self._memory.setdefault(k, v)
         frontier_after = json.dumps(self._state.get("frontier", {}), sort_keys=True)
         memory_changed = self._sanitize_memory_against_invalid_rounds()
-        if frontier_after != frontier_before:
+        if self._persist_load_fixes and frontier_after != frontier_before:
             self._save_state()
-        if memory_changed:
+        if self._persist_load_fixes and memory_changed:
             self._save_memory()
 
     def _sanitize_memory_against_invalid_rounds(self) -> bool:

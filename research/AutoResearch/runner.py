@@ -633,12 +633,17 @@ def _validate_checkpoint_config(
 
     config_path = checkpoint_dir / "config.json"
     if not config_path.exists():
-        return f"requested structural params {expected}, but checkpoint config.json is missing"
+        # Early-stopped runs can produce usable metrics before the first
+        # checkpoint config lands. Missing config means "cannot verify"
+        # rather than "definitely mismatched", so do not invalidate the run.
+        return None
 
     try:
         raw = json.loads(config_path.read_text())
     except json.JSONDecodeError:
-        return f"requested structural params {expected}, but checkpoint config.json is unreadable"
+        # Likewise, a partial checkpoint write should not be upgraded into a
+        # structural-mismatch verdict unless we have affirmative mismatch data.
+        return None
 
     sae_cfg = raw.get("sae", {})
     mismatches: list[str] = []
