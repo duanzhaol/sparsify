@@ -1,0 +1,325 @@
+{"change_type":"param_only","command":"run","family_name":"expert_topk","family_stage":"mainline","reference_round":73,"env_overrides":[{"key":"NUM_EXPERTS","value":"128"}],"expected_win":"explore_unknown","needs_sanity":false,"hypothesis":"最终重构公式保持为 x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 e(x) 由轻量 router 选出的单个 expert，{B_e} 是静态 expert 子库。导出到 LUTurbo/Lottable 的在线链路仍是“router 选单个静态子库 + 子库内 local top-k + 查表加权求和”，静态库不随样本动态生成，因此 `expert_topk` 属于直接兼容。兼容性先筛清楚：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert`、`factorized_expert_topk` 属扩展兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能继续驱动 frontier。相对 r73 仅把 `NUM_EXPERTS` 从 64 提到 128，在保持 `ARCHITECTURE=expert_topk`、`K=160`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 和其余训练配方不变时，继续回答当前低成本带最关键的问题：如果 r73 的改善来自 true sparse-capacity MoE-like 扩容仍未吃满，而不是偶然训练波动，那么进一步放大总静态 expert 容量、同时保持 `ACTIVE_EXPERTS=1` 和相同查表路径长度，应能在近同一 total_cost 下继续压低 FVU，并把这条直接兼容的 routed-only 前沿继续向下推进。","summary":"Round 74 不回到旧 family 的 K 轴，也不立刻切去别的结构；沿 r73 的正信号继续做单变量 sparse-capacity continuation。只把 `NUM_EXPERTS` 提到 128，直接判断 routed-only MoE-like 前沿的容量收益是否还在持续，而成本仍预计留在 <0.5x 的低成本带。","self_review":"满足单轮单变量约束：相对 r73 只改 `NUM_EXPERTS`。这一步比回头细扫 `K` 更符合当前阶段的结构问题，因为 r73 已经证明在 `K=160` 固定时容量扩容是有效方向。主要风险是 `expert_topk` 在 `NUM_EXPERTS=64` 后已接近收益饱和，但这正是本轮要回答的内容；若改善停止，就可以更有把握地结束 routed-only 容量线，而不是继续模糊投入。","touched_files":[],"notes_to_memory":["`expert_topk` 的 LUTurbo 形式保持为静态 expert 子库上的有限加权和，兼容性仍为直接兼容。","r73 已表明把 `NUM_EXPERTS` 从 32 提到 64 在 `K=160`、`EF=1` 下能把 FVU 从 0.1334 压到 0.1260，说明 routed-only 容量扩容在当前 target 上仍有正信号。","按当前 1024x4096 cost proxy 估算，`expert_topk K=160 EF=1 NUM_EXPERTS=128` 的成本约为 selection 0.28x、deployment 0.16x、total 0.44x，仍处于本轮要求的低成本带内，且明显低于 1.5×h×n 硬约束。","如果 `NUM_EXPERTS=128` 继续改善，则 routed-only MoE-like 将形成一条更完整的低成本直接兼容前沿；如果不再改善，可把后续预算更明确转回带 trunk 或 residual cleanup 的结构。"],"next_hypotheses":["如果 `NUM_EXPERTS=128` 在近同成本下继续明显优于 r73，则下一轮保持 family 不变，只改 `NUM_EXPERTS=256`，确认 routed capacity 收益何时饱和。","如果 `NUM_EXPERTS=128` 改善很弱或停止，则可较清晰判定当前 `expert_topk` 的低成本瓶颈已不主要在总子库容量，后续应把结构预算转回 `lowrank_expert_residual` 或 `factorized_expert_topk` 这类带 shared basis / residual cleanup 的兼容方向。","如果结果异常，先核对 `round*.config.json` 与 checkpoint `config.json` 中 `num_experts=128` 已真实生效，再决定是否把该轮当作结构证据。"]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d38a3-14a3-7cb1-bdbb-c8f08f9834c1
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 74。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 74 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.1026，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前主线 family：lowrank_expert_residual
+当前主线参考配方：ARCHITECTURE=lowrank_expert_residual K=192 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前主线完整配置（source=frontier_best）：
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=192
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. plain `EF=1` selector 结果现在主要作为 cost anchor；除 matched baseline 外，不应继续占用大部分搜索预算。
+4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。
+5. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。
+6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 9 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=73, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=2
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：结构扩展优先。
+  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。
+  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。
+
+当前高优先级未充分验证方向：
+  1. `expert_topk` / 轻量 MoE-like 子库路由。
+     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. `lowrank + expert`。
+     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。
+  3. `lowrank + expert + residual`。
+     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。
+  4. `two-stage residual expert`。
+     先 coarse library，再用局部 expert residual 做第二段修正。
+  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.21x (sel=0.07x + deploy=0.14x)  fvu=0.1402651071548462  arch=lowrank_expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.22x (sel=0.06x + deploy=0.16x)  fvu=0.12601399421691895  arch=expert_topk  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.25x (sel=0.06x + deploy=0.19x)  fvu=0.12482442706823349  arch=expert_topk  K=192 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.28x (sel=0.09x + deploy=0.19x)  fvu=0.11228560656309128  arch=lowrank_expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.49x (sel=0.33x + deploy=0.16x)  fvu=0.10535380244255066  arch=lowrank_expert_residual  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.49x (sel=0.32x + deploy=0.17x)  fvu=0.10261522233486176  arch=lowrank_expert_residual  K=160 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → lowrank_expert_topk (K=128, EF=1) [FEASIBLE]:
+    总成本: 0.48x | 预算比率: 0.32x | encoder: 0.29x | 部署: 0.19x | FVU: 0.11228560656309128
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，2）：
+  r70 lowrank_expert_topk param_only -> discard fvu=0.13399776816368103 1125s | Final reconstruction stays x_hat = sum_{r=1..R} beta_r(x) u_r + sum_{i in S_{...
+  r73 expert_topk param_only -> keep fvu=0.12601399421691895 930s | 最终重构公式保持为 x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 e(x) 由轻量 router 选出的单...
+
+最近可用 reference_round 的完整配置：
+  r73 expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_topk
+  EXPANSION_FACTOR=1
+  K=160
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  NUM_EXPERTS=64
+
+  r65 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=32
+
+  r60 lowrank_expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=64
+
+  r64 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=128
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  FACTORIZED_HIDDEN_DIM=256
+  NUM_EXPERTS=32
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=64
+
+操作提示：
+  1. 当前阶段已完成 plain EF=1 selector family 的初步 K 轴覆盖；除 matched baseline 或 sanity 外，不要再把 plain topk/jumprelu/factorized_topk 的局部 K/LR 微调作为默认主任务。
+  2. 接下来优先回答结构问题：expert_topk / MoE-like、lowrank + expert、lowrank + expert + residual、two-stage residual expert 是否能形成新的 Pareto 段。
+  3. EF=1 允许作为新架构起始锚点或 matched baseline，但它不再是当前默认最优 recipe；如果新结构需要更高 EF、trunk_rank、num_codes 才有意义，可以允许进入 0.3x-0.8x total_cost 带做清晰验证。
+  4. 如果新增 expert/lowrank/residual 组合参数，第一轮必须只验证参数接线与 config/checkpoint 生效，再根据结果判断架构价值。
+  5. 当前 `lowrank_expert_topk` 的 EF=1 原型只是把同一份 latent budget 切成 expert 子库，更像结构探针，不是真正的 sparse-capacity expansion；不要因为这个原型的成败就过早否定 `MoE-like` 方向。
+  6. 高优先级方向是真正的 MoE 稀疏扩容：总容量可以很大（例如 total_EF 16-32），但每个 token 只激活很少 expert（ACTIVE_EXPERTS=1-4）；关键是把 total capacity 与 active path 解耦，而不是继续围绕 plain EF=1 做小修小补。
+  7. 如果继续扩展 MoE-like family，优先考虑能表达“总宽度、expert 数、每 token 激活 expert 数、每 expert 宽度、shared 容量”的 tunable，例如 `NUM_EXPERTS` / `ACTIVE_EXPERTS` / `EXPERT_LATENTS` 或 `EXPERT_EF` / `SHARED_LATENTS` 或 `SHARED_TRUNK_RANK` / `K_PER_EXPERT` 或 `K_TOTAL`。可优先验证 `shared + routed experts` 或 `lowrank trunk + shared expert + routed expert residual`。
+  8. 高信息量新结构方向是 `expert 内 low-rank`，而不只是 `expert 外全局 trunk`。优先考虑 `shared low-rank basis + expert-specific head`：先做共享低维投影 `z = Bx`，再由 router 选 1-2 个 expert，在 expert 内用小型 low-rank head `A_e z` 做 local scoring / top-k，必要时再加 residual cleanup。这比每个 expert 完全独立的 low-rank 更参数高效、更稳定，也更适合 large NUM_EXPERTS、wide experts、short active path 的 low-cost sparse-activation regime。当现有 family 进入局部微调收益递减时，优先考虑新增 family 来实现 `expert-internal low-rank / shared-basis expert routing`，而不是继续细扫已有结构的小参数。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
+- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
+- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
+- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+
+一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展兼容 |
+| `lowrank_jumprelu_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 JumpReLU | 扩展兼容 |
+| `lowrank_grouped_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | grouped residual selector | 扩展兼容 |
+| `lowrank_multi_branch_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | score
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+r73 已经给出正信号，所以当前最有信息量的问题变成“routed-only 容量收益是否还能继续”。我先快速核对 `expert_topk NUM_EXPERTS=128` 的成本，确保它仍在低成本带里，而不是盲目沿同一方向外推。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+for ne in [64,128,256]:
+    c = compute_selection_cost('expert_topk', k=160, ef=1, extra_config={'num_experts':ne})
+    print('k160', ne, {k:c[k] for k in ['ratio','deployment_ratio','combined_ratio','combined_budget_ratio']})
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+front=json.loads(Path('research/history/frontier.json').read_text())
+for v in front.values():
+    if v.get('architecture')=='expert_topk':
+        cfg=v.get('config',{})
+        print('frontier', cfg.get('k'), cfg.get('num_experts'), v.get('fvu'), v.get('total_cost'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+frontier 64 None 0.36355817317962646 528384.0
+frontier 128 None 0.3148818016052246 790528.0
+frontier 192 32 0.12482442706823349 1052672.0
+frontier 160 64 0.12601399421691895 921600.0
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+for ne in [64,128,256]:
+    c = compute_selection_cost('expert_topk', k=192, ef=1, extra_config={'num_experts':ne})
+    print('k192', ne, {k:c[k] for k in ['ratio','deployment_ratio','combined_ratio','combined_budget_ratio']})
+PY" in /root/sparsify-ascend
+ succeeded in 14859ms:
+k192 64 {'ratio': 0.27, 'deployment_ratio': 0.19, 'combined_ratio': 0.45, 'combined_budget_ratio': 0.3}
+k192 128 {'ratio': 0.28, 'deployment_ratio': 0.19, 'combined_ratio': 0.47, 'combined_budget_ratio': 0.31}
+k192 256 {'ratio': 0.31, 'deployment_ratio': 0.19, 'combined_ratio': 0.5, 'combined_budget_ratio': 0.33}
+
+ succeeded in 15141ms:
+k160 64 {'ratio': 0.27, 'deployment_ratio': 0.16, 'combined_ratio': 0.42, 'combined_budget_ratio': 0.28}
+k160 128 {'ratio': 0.28, 'deployment_ratio': 0.16, 'combined_ratio': 0.44, 'combined_budget_ratio': 0.29}
+k160 256 {'ratio': 0.31, 'deployment_ratio': 0.16, 'combined_ratio': 0.47, 'combined_budget_ratio': 0.31}
+
+codex
+{"change_type":"param_only","command":"run","family_name":"expert_topk","family_stage":"mainline","reference_round":73,"env_overrides":[{"key":"NUM_EXPERTS","value":"128"}],"expected_win":"explore_unknown","needs_sanity":false,"hypothesis":"最终重构公式保持为 x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 e(x) 由轻量 router 选出的单个 expert，{B_e} 是静态 expert 子库。导出到 LUTurbo/Lottable 的在线链路仍是“router 选单个静态子库 + 子库内 local top-k + 查表加权求和”，静态库不随样本动态生成，因此 `expert_topk` 属于直接兼容。兼容性先筛清楚：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert`、`factorized_expert_topk` 属扩展兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能继续驱动 frontier。相对 r73 仅把 `NUM_EXPERTS` 从 64 提到 128，在保持 `ARCHITECTURE=expert_topk`、`K=160`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 和其余训练配方不变时，继续回答当前低成本带最关键的问题：如果 r73 的改善来自 true sparse-capacity MoE-like 扩容仍未吃满，而不是偶然训练波动，那么进一步放大总静态 expert 容量、同时保持 `ACTIVE_EXPERTS=1` 和相同查表路径长度，应能在近同一 total_cost 下继续压低 FVU，并把这条直接兼容的 routed-only 前沿继续向下推进。","summary":"Round 74 不回到旧 family 的 K 轴，也不立刻切去别的结构；沿 r73 的正信号继续做单变量 sparse-capacity continuation。只把 `NUM_EXPERTS` 提到 128，直接判断 routed-only MoE-like 前沿的容量收益是否还在持续，而成本仍预计留在 <0.5x 的低成本带。","self_review":"满足单轮单变量约束：相对 r73 只改 `NUM_EXPERTS`。这一步比回头细扫 `K` 更符合当前阶段的结构问题，因为 r73 已经证明在 `K=160` 固定时容量扩容是有效方向。主要风险是 `expert_topk` 在 `NUM_EXPERTS=64` 后已接近收益饱和，但这正是本轮要回答的内容；若改善停止，就可以更有把握地结束 routed-only 容量线，而不是继续模糊投入。","touched_files":[],"notes_to_memory":["`expert_topk` 的 LUTurbo 形式保持为静态 expert 子库上的有限加权和，兼容性仍为直接兼容。","r73 已表明把 `NUM_EXPERTS` 从 32 提到 64 在 `K=160`、`EF=1` 下能把 FVU 从 0.1334 压到 0.1260，说明 routed-only 容量扩容在当前 target 上仍有正信号。","按当前 1024x4096 cost proxy 估算，`expert_topk K=160 EF=1 NUM_EXPERTS=128` 的成本约为 selection 0.28x、deployment 0.16x、total 0.44x，仍处于本轮要求的低成本带内，且明显低于 1.5×h×n 硬约束。","如果 `NUM_EXPERTS=128` 继续改善，则 routed-only MoE-like 将形成一条更完整的低成本直接兼容前沿；如果不再改善，可把后续预算更明确转回带 trunk 或 residual cleanup 的结构。"],"next_hypotheses":["如果 `NUM_EXPERTS=128` 在近同成本下继续明显优于 r73，则下一轮保持 family 不变，只改 `NUM_EXPERTS=256`，确认 routed capacity 收益何时饱和。","如果 `NUM_EXPERTS=128` 改善很弱或停止，则可较清晰判定当前 `expert_topk` 的低成本瓶颈已不主要在总子库容量，后续应把结构预算转回 `lowrank_expert_residual` 或 `factorized_expert_topk` 这类带 shared basis / residual cleanup 的兼容方向。","如果结果异常，先核对 `round*.config.json` 与 checkpoint `config.json` 中 `num_experts=128` 已真实生效，再决定是否把该轮当作结构证据。"]}
+tokens used
+233,385
