@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x-t(x))}(x-t(x))} α_{e,i}(x) b_{e,i}，其中 t(x)=Σ_{r=1..R} β_r(x) u_r，U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，e(·) 是轻量 router 选出的单个 expert。导出到 LUTurbo/Lottable 的在线链路仍是“trunk 查表 + 单 expert 子库查表 + 有限加权和”，静态库不随样本动态生成，因此 `lowrank_expert_topk` 属于扩展兼容。兼容性先筛清楚：`expert_topk` 直接兼容；`lowrank_expert_topk`、`lowrank_expert_residual`、`two_stage_residual_expert` 属扩展兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 不兼容，不能驱动 frontier。当前 <0.5x 区域最强点仍是 r60 的 `lowrank_expert_topk`，而最近几轮已分别否定继续压 `TRUNK_RANK`、提高 `STAGE1_RATIO`、以及 trunk-free staged 路线。相对 r60 只把 `NUM_EXPERTS` 从 32 降到 16，在保持 `ARCHITECTURE=lowrank_expert_topk`、`K=128`、`TRUNK_RANK=64`、`STAGE1_RATIO=0.25`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 不变时，直接测试当前低成本瓶颈是否包含“expert 子库过度细分导致 router/局部字典划分收益递减”。如果当前 routed capacity 已经够用，那么更粗的 expert 划分应能在几乎不伤 FVU 的前提下小幅降低 selection cost，并把这条 `lowrank + expert` 前沿再向左推一小段。",
+  "summary": "Round 82 不继续扫已经给出负信号的 `TRUNK_RANK` / `STAGE1_RATIO`，也不回到 plain selector 的 K/LR 局部微调，而是回到当前最重要的 <0.5x 扩展兼容前沿 `lowrank_expert_topk`。以 r60 为 reference，只改 `NUM_EXPERTS=16`，验证更粗 expert 划分能否以更低总成本保住大部分质量，从而补当前最弱的低开销 Pareto 段。",
+  "change_type": "param_only",
+  "experiment_tier": "proxy",
+  "expected_win": "lower_cost",
+  "family_name": "lowrank_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "满足单轮单变量约束：相对 r60 只改 `NUM_EXPERTS`。这比继续改 `TRUNK_RANK`、回到 `expert_topk` 的 lookup-budget 外推、或继续扩展已被 matched 否定的 trunk-free staged 路线更符合当前证据，因为 r67 已表明在 `lowrank_expert_topk` 上把 `NUM_EXPERTS` 从 32 提到 64 不带来收益，而 r81 又表明当前三段式主线里继续压 trunk 会明显退化；因此当前最值得回答的是低成本 `lowrank + expert` 前沿是否存在“更粗子库、更短路由、更接近经济最优”的一段。主要风险是 `NUM_EXPERTS=16` 会损失局部专门化而让 FVU 回退，但无论正负，这都能直接回答当前低成本区的 expert 粒度是否已过细。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "16"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`lowrank_expert_topk` 的 LUTurbo 形式保持不变：静态 trunk 库加单 expert 静态子库上的有限加权和，兼容性为扩展兼容。",
+    "在当前代码成本模型下，`lowrank_expert_topk K=128 TRUNK_RANK=64 NUM_EXPERTS=16` 估计 selection ratio 约 0.29、deployment ratio 约 0.19、combined ratio 约 0.47，明显低于 1.5×h×n 硬约束，且比 r60 的 `NUM_EXPERTS=32` 略更靠左。",
+    "r67 说明 `lowrank_expert_topk` 上 `NUM_EXPERTS=64` 不优于 `32`；Round 82 用 `32 -> 16` 的反向 probe 来回答当前低成本前沿是否存在更经济的 expert 粒度，而不是继续重复 trunk/stage 轴。"
+  ],
+  "next_hypotheses": [
+    "如果 `NUM_EXPERTS=16` 与 r60 相近或更优，则下一轮保持 family 不变，只改 `K=160`，确认更粗 expert 划分下这条 <0.5x 主线是否还能沿 deployment 侧继续改善。",
+    "如果 `NUM_EXPERTS=16` 明显退化，则可以较清楚地判断当前 target 上 `lowrank_expert_topk` 的有效 expert 粒度已接近 `NUM_EXPERTS=32`，后续低成本预算应更多回到 `lowrank_expert_residual` 或转向新的兼容结构，而不是继续在这条 family 上压粗子库。",
+    "如果结果接近但不明确，则下一轮可保持 family 不变，只改 `NUM_EXPERTS=24` 或回到 `lowrank_expert_residual` 做 matched 对照，判断低成本改进更该来自 expert 粒度还是 residual cleanup。"
+  ],
+  "reference_round": 60
+}
