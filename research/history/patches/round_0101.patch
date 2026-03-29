@@ -1,0 +1,202 @@
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -222,6 +222,7 @@
+             "gated",
+             "routed",
+             "expert_topk",
++            "shared_routed_expert_topk",
+             "factorized_expert_topk",
+             "lowrank_expert_topk",
+             "lowrank_expert_residual",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -424,6 +424,8 @@
+         return RoutedSparseCoder
+     if architecture == "expert_topk":
+         return ExpertTopKSparseCoder
++    if architecture == "shared_routed_expert_topk":
++        return SharedRoutedExpertTopKSparseCoder
+     if architecture == "factorized_expert_topk":
+         return FactorizedExpertTopKSparseCoder
+     if architecture == "lowrank_expert_topk":
+@@ -1292,6 +1294,179 @@
+         )
+ 
+ 
++class SharedRoutedExpertTopKSparseCoder(SparseCoder):
++    """One always-on shared expert plus a small routed expert set."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        (
++            _base_num_latents,
++            self.num_routed_experts,
++            self.latents_per_expert,
++            self.active_experts,
++        ) = _resolve_expert_layout(cfg, d_in)
++        self.num_shared_experts = 1
++        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
++        self.routed_num_latents = (
++            self.num_routed_experts * self.latents_per_expert
++        )
++        self.num_latents = self.shared_num_latents + self.routed_num_latents
++        max_active_latents = (
++            self.num_shared_experts + self.active_experts
++        ) * self.latents_per_expert
++        if cfg.k > max_active_latents:
++            raise ValueError(
++                "shared_routed_expert_topk requires "
++                "k <= (shared_experts + active_experts) * latents_per_expert, "
++                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
++                f"active_experts={self.active_experts}, "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        self.router = nn.Linear(
++            d_in, self.num_routed_experts, device=device, dtype=dtype
++        )
++        self.shared_encoders = nn.Parameter(
++            torch.empty(
++                self.num_shared_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.shared_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_shared_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.routed_expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_routed_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.routed_expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_routed_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        self.router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.shared_encoders, a=5**0.5)
++        nn.init.kaiming_uniform_(self.routed_expert_encoders, a=5**0.5)
++
++        if decoder:
++            decoder_init = torch.cat(
++                (
++                    self.shared_encoders.data.reshape(self.shared_num_latents, d_in),
++                    self.routed_expert_encoders.data.reshape(
++                        self.routed_num_latents, d_in
++                    ),
++                ),
++                dim=0,
++            )
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [("router", self.router)]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "shared_expert_encoder",
++                self.num_shared_experts * self.d_in * self.latents_per_expert,
++                f"shared={self.num_shared_experts}×{self.d_in}x{self.latents_per_expert}",
++            ),
++            (
++                "active_routed_expert_encoder",
++                self.active_experts * self.d_in * self.latents_per_expert,
++                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
++            ),
++        ]
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++        batch = flat_x.shape[0]
++
++        shared_pre_acts = (
++            torch.einsum("bd,sld->bsl", flat_x, self.shared_encoders)
++            + self.shared_encoder_bias.unsqueeze(0)
++        )
++        shared_acts = F.relu(shared_pre_acts)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.routed_expert_encoders[selected_expert_idx]
++        selected_bias = self.routed_expert_encoder_bias[selected_expert_idx]
++        routed_pre_acts = (
++            torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        )
++        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
++
++        flat_shared_acts = shared_acts.reshape(batch, -1)
++        flat_routed_acts = routed_acts.reshape(batch, -1)
++        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
++
++        shared_offsets = torch.arange(
++            self.shared_num_latents, device=flat_x.device
++        ).view(1, -1)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).view(1, 1, self.latents_per_expert)
++        routed_offsets = (
++            self.shared_num_latents
++            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
++            + local_offsets
++        ).reshape(batch, -1)
++        flat_indices = torch.cat(
++            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
++        )
++
++        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
++        top_indices = flat_indices.gather(1, top_pos)
++
++        full_acts = flat_acts.new_zeros(batch, self.num_latents)
++        full_acts.scatter_(1, flat_indices, flat_acts)
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedExpertTopKSparseCoder(SparseCoder):
+     """Route into an expert-local top-k head after a shared low-rank projection."""
+ 
