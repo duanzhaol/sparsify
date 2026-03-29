@@ -1,7 +1,7 @@
 """CLI entry point: python -m research.AutoResearch.
 
 Default mode runs a lightweight parent scheduler that launches a fresh worker
-process for each round.  The worker imports the current AutoResearch modules
+process for each round. The worker imports the current AutoResearch modules
 from disk and executes exactly one round, avoiding stale in-memory Python
 state after code edits under ``research/AutoResearch/``.
 """
@@ -9,19 +9,14 @@ state after code edits under ``research/AutoResearch/``.
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HISTORY_DIR = REPO_ROOT / "research" / "history"
-STATE_PATH = HISTORY_DIR / "state.json"
-STATUS_PATH = HISTORY_DIR / "current_status.json"
-TIMELINE_PATH = HISTORY_DIR / "timeline.jsonl"
+STATE_PATH = REPO_ROOT / "research" / "history" / "state.json"
 
 # Keep parser defaults local so the parent scheduler stays stdlib-only.
 DEFAULT_TIMEOUT_SEC = 30 * 60
@@ -81,9 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_agent_state() -> dict[str, Any]:
+def _load_agent_state() -> dict[str, object]:
     try:
         with open(STATE_PATH) as f:
+            import json
+
             payload = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
@@ -91,25 +88,6 @@ def _load_agent_state() -> dict[str, Any]:
         return {}
     agent = payload.get("agent", {})
     return agent if isinstance(agent, dict) else {}
-
-
-def _append_timeline_event(event: str, **payload: Any) -> None:
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    record = {
-        "event_id": f"evt_{time.time_ns()}",
-        "ts": int(time.time()),
-        "event": event,
-        **payload,
-    }
-    with open(TIMELINE_PATH, "a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-def _write_status(stage: str, **payload: Any) -> None:
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    STATUS_PATH.write_text(
-        json.dumps({"timestamp": int(time.time()), "stage": stage, **payload}, indent=2) + "\n"
-    )
 
 
 def _parent_should_stop(args: argparse.Namespace, loop_start_time: float) -> bool:
@@ -152,8 +130,6 @@ def _strip_internal_args(raw_argv: list[str]) -> list[str]:
 
 def _run_parent(args: argparse.Namespace, raw_argv: list[str]) -> int:
     loop_start_time = time.time()
-    _append_timeline_event("loop_started", rounds=args.rounds, budget_hours=args.budget_hours)
-    _write_status("loop_started")
     print(f"Loop started: rounds={args.rounds}, budget_hours={args.budget_hours}")
 
     child_base_argv = _strip_internal_args(raw_argv)
@@ -177,12 +153,8 @@ def _run_parent(args: argparse.Namespace, raw_argv: list[str]) -> int:
         )
         if result.returncode != 0:
             print(f"Worker exited with code {result.returncode}, stopping loop")
-            _append_timeline_event("loop_worker_failed", exit_code=result.returncode)
-            _write_status("loop_worker_failed", exit_code=result.returncode)
             return result.returncode
 
-    _append_timeline_event("loop_finished")
-    _write_status("loop_finished")
     return 0
 
 
