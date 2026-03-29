@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .compatibility import (
+    COST_METRIC_VERSION,
     INCOMPATIBLE,
     is_compatible_label,
     parse_compatibility_registry,
@@ -222,7 +223,7 @@ def rebuild_runtime_state(
                 new_entry["total_cost"] = _estimate_total_cost_from_entry(new_entry)
             new_entry["target_profile"] = target_profile.to_dict()
             new_entry["cost_model_label"] = target_profile.cost_model_label
-            new_entry["metric_version"] = "total_cost_v1"
+            new_entry["metric_version"] = COST_METRIC_VERSION
             frontier[key] = new_entry
 
     # Replay frontier entries through the same near-duplicate + dominance

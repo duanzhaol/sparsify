@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .compatibility import parse_compatibility_registry
+from .compatibility import COST_METRIC_VERSION, cost_entry_is_current, parse_compatibility_registry
 from .config_resolution import resolve_action_configs, summary_invalid_reason
 from .target_profile import default_target_profile, profile_matches, resolve_target_profile
 from .types import (
@@ -282,6 +282,9 @@ class StateManager:
 
             # Determine total_cost for sorting
             tc = entry.get("total_cost")
+            if tc is None or not cost_entry_is_current(entry):
+                from .controller import _estimate_total_cost_from_entry
+                tc = _estimate_total_cost_from_entry(entry)
             if tc is None:
                 sel = entry.get("selection_cost")
                 deploy = entry.get("deployment_accesses", 0) or 0
@@ -476,6 +479,7 @@ class StateManager:
         frontier = self._state.get("frontier", {})
         self._migrate_frontier_keys(frontier)
         self._backfill_frontier_target_profiles(frontier)
+        self._refresh_frontier_cost_metrics(frontier)
         from .controller import compact_frontier
         compacted_frontier = compact_frontier(frontier)
         if compacted_frontier != frontier:
@@ -650,10 +654,47 @@ class StateManager:
                     entry.setdefault("cost_model_label", resolve_target_profile(cfg).cost_model_label)
                 else:
                     entry["total_cost"] = _estimate_total_cost_from_entry(entry)
-                entry["metric_version"] = "total_cost_v1"
+                entry["metric_version"] = COST_METRIC_VERSION
 
             new_key = f"legacy_{old_key}"
             frontier[new_key] = entry
+
+    def _refresh_frontier_cost_metrics(self, frontier: dict[str, Any]) -> None:
+        """Recompute stale or incomplete frontier cost fields using current logic."""
+        from .compatibility import compute_selection_cost
+        from .controller import _extract_extra_config, _estimate_total_cost_from_entry
+
+        for entry in frontier.values():
+            if not isinstance(entry, dict):
+                continue
+            if cost_entry_is_current(entry) and entry.get("total_cost") is not None:
+                continue
+
+            cfg = dict(entry.get("config", {}) or {})
+            if entry.get("target_profile") is not None and "target_profile" not in cfg:
+                cfg["target_profile"] = entry["target_profile"]
+            arch = str(entry.get("architecture") or cfg.get("architecture") or "topk").lower()
+            k_val = int(entry.get("k") or cfg.get("k") or 128)
+            ef_val = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
+            target_profile = resolve_target_profile(cfg)
+            cost = compute_selection_cost(
+                arch,
+                k=k_val,
+                ef=ef_val,
+                d_in=target_profile.d_in,
+                n_output=target_profile.n_output,
+                extra_config=_extract_extra_config(cfg),
+            )
+            if "error" not in cost:
+                entry["selection_cost"] = float(cost["total_accesses"])
+                entry["deployment_accesses"] = float(cost.get("deployment_accesses", 0))
+                entry["deployment_ratio"] = cost.get("deployment_ratio")
+                entry["total_cost"] = float(cost.get("combined_accesses", 0))
+                entry["target_profile"] = target_profile.to_dict()
+                entry["cost_model_label"] = target_profile.cost_model_label
+                entry["metric_version"] = COST_METRIC_VERSION
+            else:
+                entry["total_cost"] = _estimate_total_cost_from_entry(entry)
 
     def _backfill_frontier_target_profiles(self, frontier: dict[str, Any]) -> None:
         for entry in frontier.values():

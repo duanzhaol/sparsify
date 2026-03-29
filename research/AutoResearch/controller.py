@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .compatibility import compute_selection_cost
+from .compatibility import COST_METRIC_VERSION, compute_selection_cost, cost_entry_is_current
 from .target_profile import TargetProfile, resolve_target_profile
 
 
@@ -175,7 +175,7 @@ def update_frontier(
         "deployment_ratio": full_cost.get("deployment_ratio"),
         "target_profile": target_profile.to_dict(),
         "cost_model_label": target_profile.cost_model_label,
-        "metric_version": "total_cost_v1",
+        "metric_version": COST_METRIC_VERSION,
     }
 
     # Remove points dominated by the new entry
@@ -294,14 +294,14 @@ def _frontier_points(
 def _entry_to_point(entry: dict[str, Any]) -> dict[str, Any]:
     """Convert a frontier entry to a {total_cost, fvu} point."""
     fvu = float(entry["fvu"])
-    # Prefer stored total_cost
+    # Prefer stored total_cost only when it matches the current cost schema.
     tc = entry.get("total_cost")
-    if tc is not None:
+    if cost_entry_is_current(entry) and tc is not None:
         return {"total_cost": float(tc), "fvu": fvu}
-    # Backward compat: selection_cost + deployment_accesses
+    # Backward compat: selection_cost + deployment_accesses from current schema.
     sel_cost = entry.get("selection_cost")
     deploy = entry.get("deployment_accesses", 0) or 0
-    if sel_cost is not None:
+    if cost_entry_is_current(entry) and sel_cost is not None:
         return {"total_cost": float(sel_cost) + float(deploy), "fvu": fvu}
     # Last resort: recompute
     return {"total_cost": _estimate_total_cost_from_entry(entry), "fvu": fvu}

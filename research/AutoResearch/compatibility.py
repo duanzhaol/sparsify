@@ -14,6 +14,7 @@ DIRECT_COMPATIBLE = "direct_compatible"
 EXTENDED_COMPATIBLE = "extended_compatible"
 INCOMPATIBLE = "incompatible"
 UNKNOWN_COMPATIBILITY = "unknown"
+COST_METRIC_VERSION = "total_cost_v2"
 
 _LABEL_MAP = {
     "直接兼容": DIRECT_COMPATIBLE,
@@ -23,6 +24,40 @@ _LABEL_MAP = {
     EXTENDED_COMPATIBLE: EXTENDED_COMPATIBLE,
     INCOMPATIBLE: INCOMPATIBLE,
 }
+
+
+def cost_entry_is_current(entry: dict[str, Any]) -> bool:
+    """Return True when a stored frontier entry uses the current cost schema."""
+    return str(entry.get("metric_version") or "") == COST_METRIC_VERSION
+
+
+def extract_cost_extra_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract architecture-specific cost knobs from a config-like mapping."""
+    extra: dict[str, Any] = {}
+    for env_key, cfg_key in [
+        ("trunk_rank", "trunk_rank"),
+        ("num_codes", "num_codes"),
+        ("stage1_ratio", "stage1_ratio"),
+        ("factorized_hidden_dim", "factorized_hidden_dim"),
+        ("num_experts", "num_experts"),
+        ("active_experts", "active_experts"),
+        ("latents_per_expert", "latents_per_expert"),
+        ("TRUNK_RANK", "trunk_rank"),
+        ("NUM_CODES", "num_codes"),
+        ("STAGE1_RATIO", "stage1_ratio"),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+        ("NUM_EXPERTS", "num_experts"),
+        ("ACTIVE_EXPERTS", "active_experts"),
+        ("LATENTS_PER_EXPERT", "latents_per_expert"),
+    ]:
+        val = config.get(env_key)
+        if val is None or val == "":
+            continue
+        try:
+            extra[cfg_key] = float(val) if "." in str(val) else int(val)
+        except (ValueError, TypeError):
+            continue
+    return extra
 
 
 def normalize_compatibility_label(label: str | None) -> str:
@@ -263,15 +298,15 @@ def frontier_has_feasible_entry(
             cost_d_in = profile.d_in
             cost_n_output = profile.n_output
 
-        # Prefer stored total_cost; fallback to selection_cost + deployment
+        # Prefer stored total_cost only when the cost schema is current.
         tc = entry.get("total_cost")
-        if tc is not None:
+        if cost_entry_is_current(entry) and tc is not None:
             if float(tc) <= entry_budget:
                 return True
             continue
         sel_cost = entry.get("selection_cost")
         deploy = entry.get("deployment_accesses", 0) or 0
-        if sel_cost is not None:
+        if cost_entry_is_current(entry) and sel_cost is not None:
             if float(sel_cost) + float(deploy) <= entry_budget:
                 return True
             continue
@@ -282,6 +317,7 @@ def frontier_has_feasible_entry(
             ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
             d_in=cost_d_in,
             n_output=cost_n_output,
+            extra_config=extract_cost_extra_config(cfg) or None,
         )
         if "error" not in cost and cost.get("combined_feasible", False):
             return True

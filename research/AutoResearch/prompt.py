@@ -20,6 +20,7 @@ from .compatibility import (
     compatibility_hard_rules,
     compute_selection_cost,
     compute_selection_cost_table,
+    cost_entry_is_current,
     extract_compatibility_digest,
     extract_full_prior_document,
     format_cost_summary,
@@ -321,7 +322,7 @@ def section_frontier(
                 )
             return cost_cache[cost_key]
 
-        if total_cost_val is not None:
+        if total_cost_val is not None and cost_entry_is_current(entry):
             # Have stored total_cost
             original = target_profile.original_matmul_accesses
             sel_cost = entry.get("selection_cost")
