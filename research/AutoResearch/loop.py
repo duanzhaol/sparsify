@@ -214,7 +214,24 @@ def _run_round(
                 return
 
     # 8. Train with repair loop
-    result = _train_with_repair(round_id, action, ctx, state, agent, config, start_time, before)
+    try:
+        result = _train_with_repair(round_id, action, ctx, state, agent, config, start_time, before)
+    except Exception as exc:
+        print(f"Round {round_id}: training pipeline error: {exc}")
+        state.log_round_event(
+            ctx,
+            "training_pipeline_error",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        result = Result.crash(
+            "training_pipeline_error",
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            traceback_excerpt=None,
+            description=f"{action.summary} [PIPELINE ERROR]",
+            self_review=action.self_review,
+        )
 
     # 9. Record outcome
     state.record_round_outcome(round_id, action, result, ctx.touched_files, ctx.patch_path, ctx)
