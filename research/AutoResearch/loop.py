@@ -60,27 +60,7 @@ from .types import (
 
 def run(config: LoopConfig) -> int:
     """Main entry point. Returns exit code."""
-    state = StateManager()
-    state.ensure_directories()
-    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
-    agent = Agent(config)
-
-    # Register tracked paths for git ops
-    init_tracked_paths(
-        STATE_PATH, RESULTS_PATH, FRONTIER_PATH, MEMORY_PATH,
-        TIMELINE_PATH, SESSION_BRIEF_PATH, HINTS_PATH,
-    )
-
-    # Preflight
-    print("Preflight: checking backend...")
-    agent.check_backend_reachable()
-    print("Preflight: backend OK")
-    if config.auto_commit:
-        print("Preflight: checking clean worktree...")
-        ensure_clean_worktree_for_auto_commit()
-        print("Preflight: worktree clean")
-    if config.reset_failure_counters:
-        state.reset_crash_counters()
+    state, agent = _bootstrap_runtime(config, allow_reset_failure_counters=True)
 
     state.append_timeline_event("loop_started", rounds=config.rounds, budget_hours=config.budget_hours)
     print(f"Loop started: rounds={config.rounds}, budget_hours={config.budget_hours}")
@@ -105,6 +85,29 @@ def run(config: LoopConfig) -> int:
 
     state.append_timeline_event("loop_finished")
     state.write_status("loop_finished")
+    return 0
+
+
+def run_one_round(config: LoopConfig, *, loop_start_time: float) -> int:
+    """Run exactly one round in a fresh worker process."""
+    state, agent = _bootstrap_runtime(config, allow_reset_failure_counters=True)
+
+    if budget_remaining_sec(loop_start_time, config.budget_hours) <= 0:
+        print("Budget exhausted before starting worker round")
+        return 0
+
+    if _exit_conditions_met(state, config):
+        return 0
+
+    round_id = state.round_index + 1
+    ctx = RoundContext(round_id=round_id, started_at=int(time.time()))
+
+    try:
+        _run_round(round_id, ctx, state, agent, config, loop_start_time)
+    except Exception as exc:
+        print(f"Round {round_id}: unhandled error: {exc}")
+        state.append_timeline_event("round_error", round=round_id, error=str(exc))
+
     return 0
 
 
@@ -222,6 +225,35 @@ def _run_round(
 
     cleanup_round_snapshots(round_id)
     print(f"Round {round_id}: completed | decision={result.decision} fvu={result.val_fvu}")
+
+
+def _bootstrap_runtime(
+    config: LoopConfig,
+    *,
+    allow_reset_failure_counters: bool,
+) -> tuple[StateManager, Agent]:
+    """Initialize state, tracked paths, and preflight checks for a worker."""
+    state = StateManager()
+    state.ensure_directories()
+    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+    agent = Agent(config)
+
+    init_tracked_paths(
+        STATE_PATH, RESULTS_PATH, FRONTIER_PATH, MEMORY_PATH,
+        TIMELINE_PATH, SESSION_BRIEF_PATH, HINTS_PATH,
+    )
+
+    print("Preflight: checking backend...")
+    agent.check_backend_reachable()
+    print("Preflight: backend OK")
+    if config.auto_commit:
+        print("Preflight: checking clean worktree...")
+        ensure_clean_worktree_for_auto_commit()
+        print("Preflight: worktree clean")
+    if allow_reset_failure_counters and config.reset_failure_counters:
+        state.reset_crash_counters()
+
+    return state, agent
 
 
 # ---------------------------------------------------------------------------

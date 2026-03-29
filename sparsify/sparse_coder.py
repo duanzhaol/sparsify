@@ -36,6 +36,22 @@ class ForwardOutput(NamedTuple):
 
 
 class SparseCoder(nn.Module):
+    def __new__(
+        cls,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        if cls is SparseCoder:
+            architecture = getattr(cfg, "architecture", "topk")
+            target_cls = _get_sae_class(architecture)
+            if target_cls is not SparseCoder:
+                return super().__new__(target_cls)
+        return super().__new__(cls)
+
     def __init__(
         self,
         d_in: int,
@@ -1122,10 +1138,17 @@ class ExpertTopKSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        self.num_experts = 4
-        self.active_experts = 1
         base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            # Explicit NUM_EXPERTS switches expert families into sparse-capacity
+            # expansion mode: each routed expert keeps the base width while the
+            # total static library grows with the expert count.
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
         self.num_latents = self.num_experts * self.latents_per_expert
         if cfg.k > self.latents_per_expert:
             raise ValueError(
@@ -1232,10 +1255,14 @@ class LowRankExpertTopKSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        self.num_experts = 4
-        self.active_experts = 1
         base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
+        self.active_experts = 1
         self.num_latents = self.num_experts * self.latents_per_expert
         if cfg.k > self.latents_per_expert:
             raise ValueError(
@@ -1422,11 +1449,15 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        self.num_experts = 4
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
         self.active_experts = 1
 
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.residual_num_latents = base_num_latents
         self.num_latents = self.expert_num_latents + self.residual_num_latents
@@ -1680,12 +1711,16 @@ class TwoStageResidualExpertSparseCoder(SparseCoder):
         nn.Module.__init__(self)
         self.cfg = cfg
         self.d_in = d_in
-        self.num_experts = 4
+        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+        if cfg.num_experts is None:
+            self.num_experts = 4
+            self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
+        else:
+            self.num_experts = cfg.num_experts
+            self.latents_per_expert = base_num_latents
         self.active_experts = 1
 
         self.stage1_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
-        self.latents_per_expert = math.ceil(base_num_latents / self.num_experts)
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.num_latents = self.stage1_num_latents + self.expert_num_latents
 

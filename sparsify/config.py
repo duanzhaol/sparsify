@@ -52,6 +52,9 @@ class SparseCoderConfig(Serializable):
     factorized_hidden_dim: int | None = None
     """Hidden dimension for factorized encoders. None = auto."""
 
+    num_experts: int | None = None
+    """Expert count for MoE-like families. None keeps the legacy fixed-layout expert split."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -271,6 +274,11 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "group_topk_size must be positive, "
                 f"got {self.sae.group_topk_size}"
+            )
+        if self.sae.num_experts is not None and self.sae.num_experts <= 0:
+            raise ValueError(
+                "num_experts must be positive when set, "
+                f"got {self.sae.num_experts}"
             )
 
         # Optimizer validation

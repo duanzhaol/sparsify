@@ -285,6 +285,7 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
             "NUM_CODES": ("num_codes", int),
             "STAGE1_RATIO": ("stage1_ratio", float),
             "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", int),
+            "NUM_EXPERTS": ("num_experts", int),
         }
         for env_key, (cfg_key, caster) in optional_map.items():
             value = resolved_env.get(env_key)
@@ -343,6 +344,8 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
             config["dead_feature_threshold"] = int(value)
         elif key == "USE_HADAMARD":
             config["use_hadamard"] = str(value).lower() not in {"0", "false"}
+        elif key == "NUM_EXPERTS":
+            config["num_experts"] = int(value)
 
     family_name = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
     config["family_name"] = family_name

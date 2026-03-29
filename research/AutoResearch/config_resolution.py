@@ -153,6 +153,7 @@ def _config_from_checkpoint_summary(summary: dict[str, Any]) -> dict[str, str] |
         "num_codes": "NUM_CODES",
         "stage1_ratio": "STAGE1_RATIO",
         "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+        "num_experts": "NUM_EXPERTS",
         "jumprelu_init_threshold": "JUMPRELU_INIT_THRESHOLD",
         "jumprelu_bandwidth": "JUMPRELU_BANDWIDTH",
         "gated_temperature": "GATED_TEMPERATURE",
@@ -253,6 +254,7 @@ def frontier_entry_to_env_config(entry: dict[str, Any]) -> dict[str, str]:
         "num_codes": "NUM_CODES",
         "stage1_ratio": "STAGE1_RATIO",
         "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+        "num_experts": "NUM_EXPERTS",
         "family_name": "FAMILY_NAME",
         "family_stage": "FAMILY_STAGE",
     }

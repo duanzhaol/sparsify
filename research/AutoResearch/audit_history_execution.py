@@ -36,6 +36,7 @@ INT_KEYS = {
     "TRUNK_RANK",
     "NUM_CODES",
     "FACTORIZED_HIDDEN_DIM",
+    "NUM_EXPERTS",
 }
 FLOAT_KEYS = {"LR", "AUXK_ALPHA", "STAGE1_RATIO"}
 BOOL_KEYS = {"USE_HADAMARD", "COMPILE_MODEL"}
@@ -71,6 +72,7 @@ CHECKPOINT_CONFIG_MAP: dict[str, tuple[str, str]] = {
     "NUM_CODES": ("num_codes", "sae"),
     "STAGE1_RATIO": ("stage1_ratio", "sae"),
     "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", "sae"),
+    "NUM_EXPERTS": ("num_experts", "sae"),
 }
 
 RESULT_FIELD_MAP: dict[str, str] = {

@@ -47,6 +47,7 @@ TRUNK_RANK="${TRUNK_RANK:-}"
 NUM_CODES="${NUM_CODES:-}"
 STAGE1_RATIO="${STAGE1_RATIO:-}"
 FACTORIZED_HIDDEN_DIM="${FACTORIZED_HIDDEN_DIM:-}"
+NUM_EXPERTS="${NUM_EXPERTS:-}"
 NUM_GROUPS="${NUM_GROUPS:-}"
 ACTIVE_GROUPS="${ACTIVE_GROUPS:-}"
 JUMPRELU_INIT_THRESHOLD="${JUMPRELU_INIT_THRESHOLD:-}"
@@ -129,6 +130,10 @@ fi
 
 if [[ -n "${FACTORIZED_HIDDEN_DIM}" ]]; then
   cmd+=(--factorized_hidden_dim "${FACTORIZED_HIDDEN_DIM}")
+fi
+
+if [[ -n "${NUM_EXPERTS}" ]]; then
+  cmd+=(--num_experts "${NUM_EXPERTS}")
 fi
 
 if [[ -n "${JUMPRELU_INIT_THRESHOLD}" ]]; then

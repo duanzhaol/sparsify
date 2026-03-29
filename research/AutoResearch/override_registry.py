@@ -19,6 +19,9 @@ COMMON_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
 _LOWRANK_KEYS = {"TRUNK_RANK"}
 _TWOSTAGE_KEYS = {"TRUNK_RANK", "STAGE1_RATIO"}
 _SOFT_CODEBOOK_TWOSTAGE_KEYS = {"TRUNK_RANK", "NUM_CODES", "STAGE1_RATIO"}
+_EXPERT_KEYS = {"NUM_EXPERTS"}
+_LOWRANK_EXPERT_KEYS = {"TRUNK_RANK", "NUM_EXPERTS"}
+_LOWRANK_EXPERT_RESIDUAL_KEYS = {"TRUNK_RANK", "STAGE1_RATIO", "NUM_EXPERTS"}
 
 ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "topk": set(),
@@ -30,10 +33,12 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
         "GATED_TEMPERATURE",
         "GATED_INIT_LOGIT",
     },
+    "expert_topk": _EXPERT_KEYS,
     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
     "lowrank_residual": _LOWRANK_KEYS,
-    "lowrank_expert_residual": _TWOSTAGE_KEYS,
-    "two_stage_residual_expert": {"STAGE1_RATIO"},
+    "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+    "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+    "two_stage_residual_expert": {"STAGE1_RATIO", "NUM_EXPERTS"},
     "lowrank_gated_residual": _LOWRANK_KEYS,
     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
     "lowrank_grouped_residual": _LOWRANK_KEYS,
@@ -69,6 +74,7 @@ STRUCTURAL_OVERRIDE_KEYS = {
     "NUM_CODES",
     "STAGE1_RATIO",
     "FACTORIZED_HIDDEN_DIM",
+    "NUM_EXPERTS",
 }
 
 DYNAMIC_OVERRIDE_KEYS = {
@@ -109,6 +115,7 @@ CONFIG_JSON_TO_ENV = {
     "num_codes": "NUM_CODES",
     "stage1_ratio": "STAGE1_RATIO",
     "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+    "num_experts": "NUM_EXPERTS",
 }
 
 

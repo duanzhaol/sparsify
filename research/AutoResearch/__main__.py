@@ -1,34 +1,50 @@
-"""CLI entry point: python -m research.AutoResearch"""
+"""CLI entry point: python -m research.AutoResearch.
+
+Default mode runs a lightweight parent scheduler that launches a fresh worker
+process for each round.  The worker imports the current AutoResearch modules
+from disk and executes exactly one round, avoiding stale in-memory Python
+state after code edits under ``research/AutoResearch/``.
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 import sys
-
-from .types import (
-    DEFAULT_AGENT_PROXY,
-    DEFAULT_AGENT_RETRY_BASE_SEC,
-    DEFAULT_AGENT_TIMEOUT_SEC,
-    DEFAULT_CONTINUATION_MAX_TOKENS,
-    DEFAULT_CONTINUATION_MIN_FVU_DROP,
-    DEFAULT_CONTINUATION_STEP_TOKENS,
-    DEFAULT_FIRST_STEP_TIMEOUT_SEC,
-    DEFAULT_INITIAL_MAX_TOKENS,
-    DEFAULT_MAX_REPAIR_ATTEMPTS,
-    DEFAULT_MAX_SESSION_FAILURES,
-    DEFAULT_MAX_SESSION_HOURS,
-    DEFAULT_MAX_SESSION_ROUNDS,
-    DEFAULT_MIN_PROGRESS_STEPS,
-    DEFAULT_MIN_TOKENS_PER_SEC_RATIO,
-    DEFAULT_POLL_INTERVAL_SEC,
-    DEFAULT_SLOW_RUN_GRACE_SEC,
-    DEFAULT_STALL_TIMEOUT_SEC,
-    DEFAULT_TIMEOUT_SEC,
-    LoopConfig,
-)
+import time
+from pathlib import Path
+from typing import Any
 
 
-def main() -> int:
+REPO_ROOT = Path(__file__).resolve().parents[2]
+HISTORY_DIR = REPO_ROOT / "research" / "history"
+STATE_PATH = HISTORY_DIR / "state.json"
+STATUS_PATH = HISTORY_DIR / "current_status.json"
+TIMELINE_PATH = HISTORY_DIR / "timeline.jsonl"
+
+# Keep parser defaults local so the parent scheduler stays stdlib-only.
+DEFAULT_TIMEOUT_SEC = 30 * 60
+DEFAULT_STALL_TIMEOUT_SEC = 15 * 60
+DEFAULT_POLL_INTERVAL_SEC = 30
+DEFAULT_FIRST_STEP_TIMEOUT_SEC = 180
+DEFAULT_SLOW_RUN_GRACE_SEC = 120
+DEFAULT_MIN_TOKENS_PER_SEC_RATIO = 0.25
+DEFAULT_MIN_PROGRESS_STEPS = 4
+DEFAULT_INITIAL_MAX_TOKENS = 500000
+DEFAULT_CONTINUATION_STEP_TOKENS = 100000
+DEFAULT_CONTINUATION_MAX_TOKENS = 1000000
+DEFAULT_CONTINUATION_MIN_FVU_DROP = 0.002
+DEFAULT_AGENT_PROXY: str | None = None
+DEFAULT_MAX_SESSION_ROUNDS = 8
+DEFAULT_MAX_SESSION_HOURS = 4.0
+DEFAULT_AGENT_RETRY_BASE_SEC = 10
+DEFAULT_MAX_SESSION_FAILURES = 3
+DEFAULT_AGENT_TIMEOUT_SEC = 10 * 60
+DEFAULT_MAX_REPAIR_ATTEMPTS = 5
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SAE autoresearch loop")
     parser.add_argument("--rounds", type=int, default=20)
     parser.add_argument("--budget-hours", type=float, default=8.0)
@@ -60,11 +76,131 @@ def main() -> int:
     parser.add_argument("--no-commit-experiments", action="store_true")
     parser.add_argument("--reset-failure-counters", action="store_true")
 
-    args = parser.parse_args()
-    config = LoopConfig.from_args(args)
+    parser.add_argument("--_single-round-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--_loop-start-time", type=float, default=None, help=argparse.SUPPRESS)
+    return parser
 
-    from .loop import run
-    return run(config)
+
+def _load_agent_state() -> dict[str, Any]:
+    try:
+        with open(STATE_PATH) as f:
+            payload = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    agent = payload.get("agent", {})
+    return agent if isinstance(agent, dict) else {}
+
+
+def _append_timeline_event(event: str, **payload: Any) -> None:
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    record = {
+        "event_id": f"evt_{time.time_ns()}",
+        "ts": int(time.time()),
+        "event": event,
+        **payload,
+    }
+    with open(TIMELINE_PATH, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _write_status(stage: str, **payload: Any) -> None:
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    STATUS_PATH.write_text(
+        json.dumps({"timestamp": int(time.time()), "stage": stage, **payload}, indent=2) + "\n"
+    )
+
+
+def _parent_should_stop(args: argparse.Namespace, loop_start_time: float) -> bool:
+    elapsed_hours = (time.time() - loop_start_time) / 3600.0
+    if elapsed_hours >= args.budget_hours:
+        print("Budget exhausted, stopping loop")
+        return True
+
+    agent = _load_agent_state()
+    crashes = int(agent.get("consecutive_crashes", 0) or 0)
+    no_improve = int(agent.get("consecutive_no_improve", 0) or 0)
+    if args.max_consecutive_crashes > 0 and crashes >= args.max_consecutive_crashes:
+        print(f"Stopping: {crashes} consecutive crashes")
+        return True
+    if args.max_consecutive_no_improve > 0 and no_improve >= args.max_consecutive_no_improve:
+        print(f"Stopping: {no_improve} rounds without improvement")
+        return True
+    return False
+
+
+def _strip_flag(argv: list[str], flag: str) -> list[str]:
+    return [arg for arg in argv if arg != flag]
+
+
+def _strip_internal_args(raw_argv: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    skip_next = False
+    for arg in raw_argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--_single-round-worker":
+            continue
+        if arg == "--_loop-start-time":
+            skip_next = True
+            continue
+        cleaned.append(arg)
+    return cleaned
+
+
+def _run_parent(args: argparse.Namespace, raw_argv: list[str]) -> int:
+    loop_start_time = time.time()
+    _append_timeline_event("loop_started", rounds=args.rounds, budget_hours=args.budget_hours)
+    _write_status("loop_started")
+    print(f"Loop started: rounds={args.rounds}, budget_hours={args.budget_hours}")
+
+    child_base_argv = _strip_internal_args(raw_argv)
+
+    for worker_index in range(args.rounds):
+        if _parent_should_stop(args, loop_start_time):
+            break
+
+        child_argv = list(child_base_argv)
+        if worker_index > 0:
+            child_argv = _strip_flag(child_argv, "--reset-failure-counters")
+        child_argv.extend([
+            "--_single-round-worker",
+            "--_loop-start-time",
+            str(loop_start_time),
+        ])
+
+        result = subprocess.run(
+            [sys.executable, "-m", "research.AutoResearch", *child_argv],
+            cwd=REPO_ROOT,
+        )
+        if result.returncode != 0:
+            print(f"Worker exited with code {result.returncode}, stopping loop")
+            _append_timeline_event("loop_worker_failed", exit_code=result.returncode)
+            _write_status("loop_worker_failed", exit_code=result.returncode)
+            return result.returncode
+
+    _append_timeline_event("loop_finished")
+    _write_status("loop_finished")
+    return 0
+
+
+def _run_single_round_worker(args: argparse.Namespace) -> int:
+    from .types import LoopConfig
+    from .loop import run_one_round
+
+    config = LoopConfig.from_args(args)
+    loop_start_time = args._loop_start_time if args._loop_start_time is not None else time.time()
+    return run_one_round(config, loop_start_time=loop_start_time)
+
+
+def main() -> int:
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args._single_round_worker:
+        return _run_single_round_worker(args)
+    return _run_parent(args, sys.argv[1:])
 
 
 if __name__ == "__main__":
