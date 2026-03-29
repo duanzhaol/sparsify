@@ -35,6 +35,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
         "GATED_INIT_LOGIT",
     },
     "expert_topk": _EXPERT_KEYS,
+    "shared_routed_expert_topk": _EXPERT_KEYS,
     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
     "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
     "lowrank_residual": _LOWRANK_KEYS,
