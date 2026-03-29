@@ -82,6 +82,7 @@ EXECUTION_LAYER = """\
 - 记忆：research/history/
 - 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
 - 如果新增可调参数，不仅要在 sparsify/ 中实现，还必须同步接通 research/AutoResearch/ 下的 override/config-resolution/runner 持久化链路、scripts/autoresearch_test.sh 参数透传、以及必要的 resume/validation 路径；否则实验会静默回退到默认值
+- `edit_sae_code` / `edit_perf_code` 返回的 JSON 必须描述“已经实际落盘的代码修改”，不是只表达计划；在返回 JSON 前，应先真实编辑工作区文件
 - 新增 tunable 参数时，允许编辑的最小必要范围是：sparsify/、research/AutoResearch/、scripts/autoresearch_test.sh；不要改其他路径"""
 
 EDIT_RULES = """\
@@ -91,6 +92,9 @@ EDIT_RULES = """\
 - 每一轮只允许一个主假设
 - 不要声明 primary_variable；系统会根据 reference_round 的完整配置自动判断本轮到底改了哪个参数
 - 如果 change_type=param_only，默认必须显式给出 reference_round；只有当前 target profile 还没有任何可用 reference_round 时，才允许显式返回 `reference_round=null`，相对 `target_profile_baseline` 冷启动，并且仍然只能改 1 个 env 参数
+- 如果 change_type 是 `edit_sae_code` 或 `edit_perf_code`，返回前必须确认工作区中真的已有对应代码改动；若实际没有落盘改动，不要返回这两类 change_type
+- `touched_files` 必须只列出本轮真实改动过并已保存到工作区的文件；不要把“计划改但尚未修改”的文件写进去
+- 如果新增了 env key / tunable 参数，返回前至少完成本地接线自检：新 key 已进入 `override_registry` allowlist、`config_resolution` / `runner` / 必要的持久化路径已识别、`scripts/autoresearch_test.sh` 已透传；至少做一次本地校验，确认该 key 不会在训练启动前被判为 `Disallowed env override keys`
 - 新增 tunable 参数后的第一轮，必须先验证该参数真的进入了训练配置：至少检查 round*.config.json 和 checkpoint config.json 中该字段存在且取值正确
 - 不要返回 command="stop"
 - 最终必须返回一个符合 action schema 的 JSON 对象"""
@@ -105,6 +109,8 @@ HARD_CONSTRAINT_REMINDER = (
     "提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。"
     "只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。"
     "默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。"
+    "如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。"
+    "如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。"
     "Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。"
 )
 
@@ -1040,6 +1046,7 @@ def compose_repair(
         "不要重新设计实验，不要修改 family_name 或 env_overrides。\n"
         "你的任务是补丁修复实现，让原始实验能够跑通。\n"
         "默认只改最小必要文件；若阻塞原因是 tunable 参数未接通，可同步修复 research/AutoResearch/ 与 scripts/autoresearch_test.sh 中的必要 wiring。\n"
+        "repair 返回的 JSON 也必须对应已经实际落盘的代码修改；不要只描述打算怎么修。\n"
         f"当前是第 {repair_attempt} / {max_repair_attempts} 次 repair 尝试。\n"
         "最终返回一个符合 action schema 的 JSON 对象。"
     )
