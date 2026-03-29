@@ -9,6 +9,7 @@ state after code edits under ``research/AutoResearch/``.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -73,6 +74,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--_single-round-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_loop-start-time", type=float, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_replay-action-path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_replay-result-path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_replay-config-path", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_replay-round-id", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--_replay-started-at", type=int, default=None, help=argparse.SUPPRESS)
     return parser
 
 
@@ -167,9 +173,31 @@ def _run_single_round_worker(args: argparse.Namespace) -> int:
     return run_one_round(config, loop_start_time=loop_start_time)
 
 
+def _run_replay_worker(args: argparse.Namespace) -> int:
+    from .types import LoopConfig
+    from .loop import run_replayed_action
+
+    if not args._replay_config_path or not args._replay_action_path or not args._replay_result_path:
+        raise RuntimeError("Replay worker requires config, action, and result paths")
+
+    config_data = json.loads(Path(args._replay_config_path).read_text())
+    config = LoopConfig(**config_data)
+    loop_start_time = args._loop_start_time if args._loop_start_time is not None else time.time()
+    return run_replayed_action(
+        config,
+        round_id=int(args._replay_round_id),
+        action_path=Path(args._replay_action_path),
+        result_path=Path(args._replay_result_path),
+        started_at=args._replay_started_at or int(time.time()),
+        loop_start_time=loop_start_time,
+    )
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    if args._replay_action_path:
+        return _run_replay_worker(args)
     if args._single_round_worker:
         return _run_single_round_worker(args)
     return _run_parent(args, sys.argv[1:])

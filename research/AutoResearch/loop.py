@@ -11,7 +11,12 @@
 
 from __future__ import annotations
 
+import importlib
+import json
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from .agent import Agent, coerce_stop_action
@@ -42,6 +47,7 @@ from .types import (
     BASE_ENV_DEFAULTS,
     FRONTIER_PATH,
     HINTS_PATH,
+    LOG_DIR,
     MEMORY_PATH,
     REPAIRABLE_ERROR_TYPES,
     RESULTS_PATH,
@@ -55,6 +61,26 @@ from .types import (
     STATE_PATH,
     TIMELINE_PATH,
     failure_signature,
+)
+
+_RUNTIME_RELOAD_PLAN: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("research.AutoResearch.override_registry", ()),
+    ("research.AutoResearch.compatibility", ()),
+    ("research.AutoResearch.config_resolution", ("resolve_action_configs",)),
+    ("research.AutoResearch.policy", ("validate_action", "behavioral_diff_test")),
+    (
+        "research.AutoResearch.runner",
+        ("SanityCheckError", "budget_remaining_sec", "run_sanity", "run_training"),
+    ),
+)
+
+_EXECUTION_LAYER_ERROR_MARKERS = (
+    "Disallowed env override keys",
+    "Unknown architecture",
+    "unknown architecture",
+    "Invalid architecture",
+    "invalid_env_overrides",
+    "requested structural parameters did not reach runtime",
 )
 
 
@@ -166,13 +192,7 @@ def _run_round(
         action = coerce_stop_action(action, state, round_id)
 
     resolved = resolve_action_configs(action, state)
-    ctx.family_name = action.family_name or resolved.candidate_env_config.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
-    ctx.family_stage = action.family_stage
-    ctx.session_id = state.agent.get("active_session_id")
-    ctx.resolved_reference_env_config = resolved.reference_env_config
-    ctx.resolved_candidate_env_config = resolved.candidate_env_config
-    ctx.changed_keys = resolved.changed_keys
-    ctx.reference_source = resolved.reference_source
+    _apply_resolved_context(ctx, action, state, resolved)
 
     # 5. Detect code changes
     after = snapshot_paths()
@@ -187,6 +207,15 @@ def _run_round(
             return
     ctx.touched_files = changed
     ctx.patch_path = build_patch(before, changed, round_id) if changed else None
+    _refresh_runtime_after_controller_edits(
+        round_id,
+        action,
+        state,
+        ctx,
+        changed,
+        reason="agent edit",
+    )
+    resolved = resolve_action_configs(action, state)
 
     # 6. Policy validation
     action, rejection = validate_action(action, state)
@@ -198,7 +227,7 @@ def _run_round(
 
     # 7. Behavioral diff test (for code edits with architecture changes)
     if action.is_code_edit and action.change_type == "edit_sae_code":
-        cfg = resolved.candidate_env_config
+        cfg = ctx.resolved_candidate_env_config or resolved.candidate_env_config
         arch = cfg.get("ARCHITECTURE", "topk").lower()
         if arch != "topk":
             diff_result = behavioral_diff_test(
@@ -214,24 +243,54 @@ def _run_round(
                 return
 
     # 8. Train with repair loop
-    try:
-        result = _train_with_repair(round_id, action, ctx, state, agent, config, start_time, before)
-    except Exception as exc:
-        print(f"Round {round_id}: training pipeline error: {exc}")
-        state.log_round_event(
-            ctx,
-            "training_pipeline_error",
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
-        result = Result.crash(
-            "training_pipeline_error",
-            error_type=type(exc).__name__,
-            error_summary=str(exc),
-            traceback_excerpt=None,
-            description=f"{action.summary} [PIPELINE ERROR]",
-            self_review=action.self_review,
-        )
+    pipeline_retry_used = False
+    while True:
+        try:
+            result = _train_with_repair(round_id, action, ctx, state, agent, config, start_time, before)
+            break
+        except Exception as exc:
+            if _should_retry_in_fresh_worker(exc, ctx.touched_files, pipeline_retry_used):
+                pipeline_retry_used = True
+                print(
+                    f"Round {round_id}: controller edit hit execution-layer error; "
+                    "retrying same action in fresh worker"
+                )
+                state.log_round_event(
+                    ctx,
+                    "runtime_replay_retry",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                replay_result = _retry_action_in_fresh_worker(
+                    round_id,
+                    action,
+                    ctx,
+                    config,
+                    start_time,
+                )
+                if replay_result is not None:
+                    after_replay = snapshot_paths()
+                    ctx.touched_files = touched_files(before, after_replay) if before else []
+                    ctx.patch_path = build_patch(before, ctx.touched_files, round_id) if before else None
+                    result = replay_result
+                    break
+
+            print(f"Round {round_id}: training pipeline error: {exc}")
+            state.log_round_event(
+                ctx,
+                "training_pipeline_error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            result = Result.crash(
+                "training_pipeline_error",
+                error_type=type(exc).__name__,
+                error_summary=str(exc),
+                traceback_excerpt=None,
+                description=f"{action.summary} [PIPELINE ERROR]",
+                self_review=action.self_review,
+            )
+            break
 
     # 9. Record outcome
     state.record_round_outcome(round_id, action, result, ctx.touched_files, ctx.patch_path, ctx)
@@ -248,6 +307,7 @@ def _bootstrap_runtime(
     config: LoopConfig,
     *,
     allow_reset_failure_counters: bool,
+    skip_clean_worktree_check: bool = False,
 ) -> tuple[StateManager, Agent]:
     """Initialize state, tracked paths, and preflight checks for a worker."""
     agent = Agent(config)
@@ -260,7 +320,7 @@ def _bootstrap_runtime(
     print("Preflight: checking backend...")
     agent.check_backend_reachable()
     print("Preflight: backend OK")
-    if config.auto_commit:
+    if config.auto_commit and not skip_clean_worktree_check:
         print("Preflight: checking clean worktree...")
         ensure_clean_worktree_for_auto_commit()
         print("Preflight: worktree clean")
@@ -327,7 +387,15 @@ def _train_with_repair(
                     )
                     # Re-detect changes
                     after = snapshot_paths()
-                    ctx.touched_files = touched_files(before, after) if before else []
+                    ctx.touched_files = touched_files(before, after) if before is not None else []
+                    _refresh_runtime_after_controller_edits(
+                        round_id,
+                        action,
+                        state,
+                        ctx,
+                        ctx.touched_files,
+                        reason=f"repair {attempt + 1}",
+                    )
                     continue
                 return Result.crash("sanity_failed", error_type=payload.get("error_type"),
                                      error_summary=payload.get("stderr_excerpt", "")[:500],
@@ -350,12 +418,206 @@ def _train_with_repair(
                 attempt + 1, ctx.session_id,
             )
             after = snapshot_paths()
-            ctx.touched_files = touched_files(before, after) if before else []
+            ctx.touched_files = touched_files(before, after) if before is not None else []
+            _refresh_runtime_after_controller_edits(
+                round_id,
+                action,
+                state,
+                ctx,
+                ctx.touched_files,
+                reason=f"repair {attempt + 1}",
+            )
             continue
 
         return result
 
     return Result.crash("max_repair_attempts_exhausted")
+
+
+def run_replayed_action(
+    config: LoopConfig,
+    *,
+    round_id: int,
+    action_path: Path,
+    result_path: Path,
+    started_at: int,
+    loop_start_time: float,
+) -> int:
+    """Replay a single already-proposed action in a fresh worker process."""
+    state, agent = _bootstrap_runtime(
+        config,
+        allow_reset_failure_counters=False,
+        skip_clean_worktree_check=True,
+    )
+
+    raw = json.loads(action_path.read_text())
+    action = Action.from_dict(raw)
+    ctx = RoundContext(round_id=round_id, started_at=started_at)
+    resolved = resolve_action_configs(action, state)
+    _apply_resolved_context(ctx, action, state, resolved)
+    before = snapshot_paths()
+
+    try:
+        result = _train_with_repair(round_id, action, ctx, state, agent, config, loop_start_time, before=before)
+    except Exception as exc:
+        result = Result.crash(
+            "training_pipeline_error",
+            error_type=type(exc).__name__,
+            error_summary=str(exc),
+            traceback_excerpt=None,
+            description=f"{action.summary} [PIPELINE ERROR]",
+            self_review=action.self_review,
+        )
+
+    payload = {
+        "result": result.to_dict(),
+        "round_context": {
+            "family_name": ctx.family_name,
+            "family_stage": ctx.family_stage,
+            "resolved_reference_env_config": ctx.resolved_reference_env_config,
+            "resolved_candidate_env_config": ctx.resolved_candidate_env_config,
+            "changed_keys": ctx.changed_keys,
+            "reference_source": ctx.reference_source,
+            "runtime_config_json": ctx.runtime_config_json,
+            "runtime_env_config": ctx.runtime_env_config,
+        },
+    }
+    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return 0
+
+
+def _apply_resolved_context(
+    ctx: RoundContext,
+    action: Action,
+    state: StateManager,
+    resolved: Any,
+) -> None:
+    ctx.family_name = (
+        action.family_name
+        or resolved.candidate_env_config.get("ARCHITECTURE", BASE_ENV_DEFAULTS["ARCHITECTURE"]).lower()
+    )
+    ctx.family_stage = action.family_stage
+    ctx.session_id = state.agent.get("active_session_id")
+    ctx.resolved_reference_env_config = resolved.reference_env_config
+    ctx.resolved_candidate_env_config = resolved.candidate_env_config
+    ctx.changed_keys = resolved.changed_keys
+    ctx.reference_source = resolved.reference_source
+
+
+def _controller_python_changes(paths: list[str]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if path.startswith("research/AutoResearch/") and path.endswith(".py")
+    ]
+
+
+def _refresh_runtime_modules() -> list[str]:
+    importlib.invalidate_caches()
+    refreshed: list[str] = []
+    for module_name, rebinds in _RUNTIME_RELOAD_PLAN:
+        module = importlib.import_module(module_name)
+        module = importlib.reload(module)
+        refreshed.append(module_name.rsplit(".", 1)[-1])
+        for name in rebinds:
+            globals()[name] = getattr(module, name)
+    return refreshed
+
+
+def _refresh_runtime_after_controller_edits(
+    round_id: int,
+    action: Action,
+    state: StateManager,
+    ctx: RoundContext,
+    changed_paths: list[str],
+    *,
+    reason: str,
+) -> bool:
+    controller_changes = _controller_python_changes(changed_paths)
+    if not controller_changes:
+        return False
+    refreshed = _refresh_runtime_modules()
+    resolved = resolve_action_configs(action, state)
+    _apply_resolved_context(ctx, action, state, resolved)
+    print(
+        f"Round {round_id}: refreshed runtime after {reason} | "
+        f"changed={', '.join(controller_changes)}"
+    )
+    state.log_round_event(
+        ctx,
+        "runtime_refreshed",
+        reason=reason,
+        changed_files=controller_changes,
+        refreshed_modules=refreshed,
+    )
+    return True
+
+
+def _should_retry_in_fresh_worker(
+    exc: Exception,
+    changed_paths: list[str],
+    already_retried: bool,
+) -> bool:
+    if already_retried:
+        return False
+    if not _controller_python_changes(changed_paths):
+        return False
+    message = str(exc)
+    return any(marker in message for marker in _EXECUTION_LAYER_ERROR_MARKERS)
+
+
+def _retry_action_in_fresh_worker(
+    round_id: int,
+    action: Action,
+    ctx: RoundContext,
+    config: LoopConfig,
+    loop_start_time: float,
+) -> Result | None:
+    replay_action_path = LOG_DIR / f"round_{round_id:04d}_replay_action.json"
+    replay_result_path = LOG_DIR / f"round_{round_id:04d}_replay_result.json"
+    replay_config_path = LOG_DIR / f"round_{round_id:04d}_replay_config.json"
+    if replay_result_path.exists():
+        replay_result_path.unlink()
+    replay_action_path.write_text(json.dumps(action.to_dict(), ensure_ascii=False, indent=2) + "\n")
+    replay_config_path.write_text(json.dumps(config.__dict__, ensure_ascii=False, indent=2) + "\n")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "research.AutoResearch",
+        "--_replay-action-path",
+        str(replay_action_path),
+        "--_replay-result-path",
+        str(replay_result_path),
+        "--_replay-config-path",
+        str(replay_config_path),
+        "--_replay-round-id",
+        str(round_id),
+        "--_replay-started-at",
+        str(ctx.started_at),
+        "--_loop-start-time",
+        str(loop_start_time),
+    ]
+    completed = subprocess.run(cmd, cwd=REPO_ROOT, check=False)
+    if completed.returncode != 0 or not replay_result_path.exists():
+        return None
+
+    payload = json.loads(replay_result_path.read_text())
+    round_ctx = payload.get("round_context", {})
+    if isinstance(round_ctx, dict):
+        ctx.runtime_config_json = round_ctx.get("runtime_config_json")
+        ctx.runtime_env_config = round_ctx.get("runtime_env_config")
+        ctx.resolved_reference_env_config = round_ctx.get("resolved_reference_env_config")
+        ctx.resolved_candidate_env_config = round_ctx.get("resolved_candidate_env_config")
+        ctx.changed_keys = round_ctx.get("changed_keys", []) or []
+        ctx.reference_source = round_ctx.get("reference_source")
+        ctx.family_name = round_ctx.get("family_name") or ctx.family_name
+        ctx.family_stage = round_ctx.get("family_stage") or ctx.family_stage
+
+    result_payload = payload.get("result", {})
+    if not isinstance(result_payload, dict) or not result_payload:
+        return None
+    return Result(**result_payload)
 
 
 def _should_repair(
