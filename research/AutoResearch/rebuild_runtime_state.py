@@ -287,6 +287,7 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
             "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", int),
             "NUM_EXPERTS": ("num_experts", int),
             "ACTIVE_EXPERTS": ("active_experts", int),
+            "LATENTS_PER_EXPERT": ("latents_per_expert", int),
         }
         for env_key, (cfg_key, caster) in optional_map.items():
             value = resolved_env.get(env_key)
@@ -349,6 +350,8 @@ def _effective_config(summary: dict[str, Any]) -> dict[str, Any]:
             config["num_experts"] = int(value)
         elif key == "ACTIVE_EXPERTS":
             config["active_experts"] = int(value)
+        elif key == "LATENTS_PER_EXPERT":
+            config["latents_per_expert"] = int(value)
 
     family_name = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
     config["family_name"] = family_name

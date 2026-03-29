@@ -1134,13 +1134,15 @@ def _resolve_expert_layout(
     base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
     if cfg.num_experts is None:
         num_experts = 4
-        latents_per_expert = math.ceil(base_num_latents / num_experts)
+        default_latents_per_expert = math.ceil(base_num_latents / num_experts)
     else:
         # Explicit NUM_EXPERTS switches expert families into sparse-capacity
-        # expansion mode: each routed expert keeps the base width while the
-        # total static library grows with the expert count.
+        # expansion mode. LATENTS_PER_EXPERT can then shrink or expand the
+        # active-path width independently of the routed expert count.
         num_experts = cfg.num_experts
-        latents_per_expert = base_num_latents
+        default_latents_per_expert = base_num_latents
+
+    latents_per_expert = cfg.latents_per_expert or default_latents_per_expert
 
     active_experts = cfg.active_experts or 1
     if active_experts > num_experts:

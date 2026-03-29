@@ -58,6 +58,9 @@ class SparseCoderConfig(Serializable):
     active_experts: int | None = None
     """Number of routed experts to activate per token for expert families."""
 
+    latents_per_expert: int | None = None
+    """Explicit per-expert latent width for expert families. None = auto."""
+
 
 # Support different naming conventions for the same configuration
 SaeConfig = SparseCoderConfig
@@ -289,6 +292,11 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "active_experts must be positive when set, "
                 f"got {self.sae.active_experts}"
+            )
+        if self.sae.latents_per_expert is not None and self.sae.latents_per_expert <= 0:
+            raise ValueError(
+                "latents_per_expert must be positive when set, "
+                f"got {self.sae.latents_per_expert}"
             )
         if (
             self.sae.num_experts is not None

@@ -1,0 +1,273 @@
+--- a/research/AutoResearch/audit_history_execution.py
++++ b/research/AutoResearch/audit_history_execution.py
+@@ -38,6 +38,7 @@
+     "FACTORIZED_HIDDEN_DIM",
+     "NUM_EXPERTS",
+     "ACTIVE_EXPERTS",
++    "LATENTS_PER_EXPERT",
+ }
+ FLOAT_KEYS = {"LR", "AUXK_ALPHA", "STAGE1_RATIO"}
+ BOOL_KEYS = {"USE_HADAMARD", "COMPILE_MODEL"}
+@@ -75,6 +76,7 @@
+     "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", "sae"),
+     "NUM_EXPERTS": ("num_experts", "sae"),
+     "ACTIVE_EXPERTS": ("active_experts", "sae"),
++    "LATENTS_PER_EXPERT": ("latents_per_expert", "sae"),
+ }
+ 
+ RESULT_FIELD_MAP: dict[str, str] = {
+
+--- a/research/AutoResearch/config_resolution.py
++++ b/research/AutoResearch/config_resolution.py
+@@ -155,6 +155,7 @@
+         "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+         "num_experts": "NUM_EXPERTS",
+         "active_experts": "ACTIVE_EXPERTS",
++        "latents_per_expert": "LATENTS_PER_EXPERT",
+         "jumprelu_init_threshold": "JUMPRELU_INIT_THRESHOLD",
+         "jumprelu_bandwidth": "JUMPRELU_BANDWIDTH",
+         "gated_temperature": "GATED_TEMPERATURE",
+@@ -257,6 +258,7 @@
+         "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+         "num_experts": "NUM_EXPERTS",
+         "active_experts": "ACTIVE_EXPERTS",
++        "latents_per_expert": "LATENTS_PER_EXPERT",
+         "family_name": "FAMILY_NAME",
+         "family_stage": "FAMILY_STAGE",
+     }
+
+--- a/research/AutoResearch/controller.py
++++ b/research/AutoResearch/controller.py
+@@ -387,12 +387,16 @@
+         ("num_codes", "num_codes"),
+         ("stage1_ratio", "stage1_ratio"),
+         ("factorized_hidden_dim", "factorized_hidden_dim"),
++        ("num_experts", "num_experts"),
++        ("active_experts", "active_experts"),
++        ("latents_per_expert", "latents_per_expert"),
+         ("TRUNK_RANK", "trunk_rank"),
+         ("NUM_CODES", "num_codes"),
+         ("STAGE1_RATIO", "stage1_ratio"),
+         ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+         ("NUM_EXPERTS", "num_experts"),
+         ("ACTIVE_EXPERTS", "active_experts"),
++        ("LATENTS_PER_EXPERT", "latents_per_expert"),
+     ]:
+         val = config.get(env_key)
+         if val is not None and val != "":
+
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -19,10 +19,21 @@
+ _LOWRANK_KEYS = {"TRUNK_RANK"}
+ _TWOSTAGE_KEYS = {"TRUNK_RANK", "STAGE1_RATIO"}
+ _SOFT_CODEBOOK_TWOSTAGE_KEYS = {"TRUNK_RANK", "NUM_CODES", "STAGE1_RATIO"}
+-_EXPERT_KEYS = {"NUM_EXPERTS", "ACTIVE_EXPERTS"}
+-_FACTORIZED_EXPERT_KEYS = {"FACTORIZED_HIDDEN_DIM", "NUM_EXPERTS", "ACTIVE_EXPERTS"}
+-_LOWRANK_EXPERT_KEYS = {"TRUNK_RANK", "NUM_EXPERTS", "ACTIVE_EXPERTS"}
+-_LOWRANK_EXPERT_RESIDUAL_KEYS = {"TRUNK_RANK", "STAGE1_RATIO", "NUM_EXPERTS", "ACTIVE_EXPERTS"}
++_EXPERT_KEYS = {"NUM_EXPERTS", "ACTIVE_EXPERTS", "LATENTS_PER_EXPERT"}
++_FACTORIZED_EXPERT_KEYS = {
++    "FACTORIZED_HIDDEN_DIM",
++    "NUM_EXPERTS",
++    "ACTIVE_EXPERTS",
++    "LATENTS_PER_EXPERT",
++}
++_LOWRANK_EXPERT_KEYS = {"TRUNK_RANK", "NUM_EXPERTS", "ACTIVE_EXPERTS", "LATENTS_PER_EXPERT"}
++_LOWRANK_EXPERT_RESIDUAL_KEYS = {
++    "TRUNK_RANK",
++    "STAGE1_RATIO",
++    "NUM_EXPERTS",
++    "ACTIVE_EXPERTS",
++    "LATENTS_PER_EXPERT",
++}
+ 
+ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
+     "topk": set(),
+@@ -41,7 +52,12 @@
+     "lowrank_residual": _LOWRANK_KEYS,
+     "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+     "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+-    "two_stage_residual_expert": {"STAGE1_RATIO", "NUM_EXPERTS", "ACTIVE_EXPERTS"},
++    "two_stage_residual_expert": {
++        "STAGE1_RATIO",
++        "NUM_EXPERTS",
++        "ACTIVE_EXPERTS",
++        "LATENTS_PER_EXPERT",
++    },
+     "lowrank_gated_residual": _LOWRANK_KEYS,
+     "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+     "lowrank_grouped_residual": _LOWRANK_KEYS,
+@@ -79,6 +95,7 @@
+     "FACTORIZED_HIDDEN_DIM",
+     "NUM_EXPERTS",
+     "ACTIVE_EXPERTS",
++    "LATENTS_PER_EXPERT",
+ }
+ 
+ DYNAMIC_OVERRIDE_KEYS = {
+@@ -121,6 +138,7 @@
+     "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+     "num_experts": "NUM_EXPERTS",
+     "active_experts": "ACTIVE_EXPERTS",
++    "latents_per_expert": "LATENTS_PER_EXPERT",
+ }
+ 
+ 
+
+--- a/research/AutoResearch/policy.py
++++ b/research/AutoResearch/policy.py
+@@ -533,6 +533,7 @@
+         ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+         ("NUM_EXPERTS", "num_experts"),
+         ("ACTIVE_EXPERTS", "active_experts"),
++        ("LATENTS_PER_EXPERT", "latents_per_expert"),
+     ]:
+         val = cfg.get(env_key)
+         if val is not None and val != "":
+
+--- a/research/AutoResearch/prompt.py
++++ b/research/AutoResearch/prompt.py
+@@ -1167,12 +1167,14 @@
+         ("factorized_hidden_dim", "factorized_hidden_dim"),
+         ("num_experts", "num_experts"),
+         ("active_experts", "active_experts"),
++        ("latents_per_expert", "latents_per_expert"),
+         ("TRUNK_RANK", "trunk_rank"),
+         ("NUM_CODES", "num_codes"),
+         ("STAGE1_RATIO", "stage1_ratio"),
+         ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+         ("NUM_EXPERTS", "num_experts"),
+         ("ACTIVE_EXPERTS", "active_experts"),
++        ("LATENTS_PER_EXPERT", "latents_per_expert"),
+     ]:
+         val = config.get(key)
+         if val is not None and val != "":
+
+--- a/research/AutoResearch/rebuild_runtime_state.py
++++ b/research/AutoResearch/rebuild_runtime_state.py
+@@ -287,6 +287,7 @@
+             "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", int),
+             "NUM_EXPERTS": ("num_experts", int),
+             "ACTIVE_EXPERTS": ("active_experts", int),
++            "LATENTS_PER_EXPERT": ("latents_per_expert", int),
+         }
+         for env_key, (cfg_key, caster) in optional_map.items():
+             value = resolved_env.get(env_key)
+@@ -349,6 +350,8 @@
+             config["num_experts"] = int(value)
+         elif key == "ACTIVE_EXPERTS":
+             config["active_experts"] = int(value)
++        elif key == "LATENTS_PER_EXPERT":
++            config["latents_per_expert"] = int(value)
+ 
+     family_name = str(summary.get("family_name") or action.get("family_name") or config["architecture"]).lower()
+     config["family_name"] = family_name
+
+--- a/research/AutoResearch/runner.py
++++ b/research/AutoResearch/runner.py
+@@ -38,6 +38,7 @@
+     ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim", int),
+     ("NUM_EXPERTS", "num_experts", int),
+     ("ACTIVE_EXPERTS", "active_experts", int),
++    ("LATENTS_PER_EXPERT", "latents_per_expert", int),
+ )
+ 
+ 
+@@ -607,6 +608,7 @@
+         "MATRYOSHKA_WEIGHTS": ("matryoshka_weights", lambda x: [float(v) for v in x.split(",") if v]),
+         "NUM_EXPERTS": ("num_experts", int),
+         "ACTIVE_EXPERTS": ("active_experts", int),
++        "LATENTS_PER_EXPERT": ("latents_per_expert", int),
+     }
+     for env_key, (cfg_key, caster) in _OPTIONAL.items():
+         value = merged.get(env_key)
+
+--- a/scripts/autoresearch_test.sh
++++ b/scripts/autoresearch_test.sh
+@@ -49,6 +49,7 @@
+ FACTORIZED_HIDDEN_DIM="${FACTORIZED_HIDDEN_DIM:-}"
+ NUM_EXPERTS="${NUM_EXPERTS:-}"
+ ACTIVE_EXPERTS="${ACTIVE_EXPERTS:-}"
++LATENTS_PER_EXPERT="${LATENTS_PER_EXPERT:-}"
+ NUM_GROUPS="${NUM_GROUPS:-}"
+ ACTIVE_GROUPS="${ACTIVE_GROUPS:-}"
+ JUMPRELU_INIT_THRESHOLD="${JUMPRELU_INIT_THRESHOLD:-}"
+@@ -141,6 +142,10 @@
+   cmd+=(--active_experts "${ACTIVE_EXPERTS}")
+ fi
+ 
++if [[ -n "${LATENTS_PER_EXPERT}" ]]; then
++  cmd+=(--latents_per_expert "${LATENTS_PER_EXPERT}")
++fi
++
+ if [[ -n "${JUMPRELU_INIT_THRESHOLD}" ]]; then
+   cmd+=(--jumprelu_init_threshold "${JUMPRELU_INIT_THRESHOLD}")
+ fi
+
+--- a/sparsify/__main__.py
++++ b/sparsify/__main__.py
+@@ -42,6 +42,7 @@
+             "factorized_hidden_dim": args.sae.factorized_hidden_dim,
+             "num_experts": args.sae.num_experts,
+             "active_experts": args.sae.active_experts,
++            "latents_per_expert": args.sae.latents_per_expert,
+             "jumprelu_init_threshold": args.sae.jumprelu_init_threshold,
+             "jumprelu_bandwidth": args.sae.jumprelu_bandwidth,
+             "gated_temperature": args.sae.gated_temperature,
+@@ -89,6 +90,7 @@
+             "factorized_hidden_dim": cfg.get("sae", {}).get("factorized_hidden_dim"),
+             "num_experts": cfg.get("sae", {}).get("num_experts"),
+             "active_experts": cfg.get("sae", {}).get("active_experts"),
++            "latents_per_expert": cfg.get("sae", {}).get("latents_per_expert"),
+             "jumprelu_init_threshold": cfg.get("sae", {}).get("jumprelu_init_threshold"),
+             "jumprelu_bandwidth": cfg.get("sae", {}).get("jumprelu_bandwidth"),
+             "gated_temperature": cfg.get("sae", {}).get("gated_temperature"),
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -57,6 +57,9 @@
+ 
+     active_experts: int | None = None
+     """Number of routed experts to activate per token for expert families."""
++
++    latents_per_expert: int | None = None
++    """Explicit per-expert latent width for expert families. None = auto."""
+ 
+ 
+ # Support different naming conventions for the same configuration
+@@ -290,6 +293,11 @@
+                 "active_experts must be positive when set, "
+                 f"got {self.sae.active_experts}"
+             )
++        if self.sae.latents_per_expert is not None and self.sae.latents_per_expert <= 0:
++            raise ValueError(
++                "latents_per_expert must be positive when set, "
++                f"got {self.sae.latents_per_expert}"
++            )
+         if (
+             self.sae.num_experts is not None
+             and self.sae.active_experts is not None
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1134,13 +1134,15 @@
+     base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+     if cfg.num_experts is None:
+         num_experts = 4
+-        latents_per_expert = math.ceil(base_num_latents / num_experts)
++        default_latents_per_expert = math.ceil(base_num_latents / num_experts)
+     else:
+         # Explicit NUM_EXPERTS switches expert families into sparse-capacity
+-        # expansion mode: each routed expert keeps the base width while the
+-        # total static library grows with the expert count.
++        # expansion mode. LATENTS_PER_EXPERT can then shrink or expand the
++        # active-path width independently of the routed expert count.
+         num_experts = cfg.num_experts
+-        latents_per_expert = base_num_latents
++        default_latents_per_expert = base_num_latents
++
++    latents_per_expert = cfg.latents_per_expert or default_latents_per_expert
+ 
+     active_experts = cfg.active_experts or 1
+     if active_experts > num_experts:

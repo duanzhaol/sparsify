@@ -38,6 +38,7 @@ INT_KEYS = {
     "FACTORIZED_HIDDEN_DIM",
     "NUM_EXPERTS",
     "ACTIVE_EXPERTS",
+    "LATENTS_PER_EXPERT",
 }
 FLOAT_KEYS = {"LR", "AUXK_ALPHA", "STAGE1_RATIO"}
 BOOL_KEYS = {"USE_HADAMARD", "COMPILE_MODEL"}
@@ -75,6 +76,7 @@ CHECKPOINT_CONFIG_MAP: dict[str, tuple[str, str]] = {
     "FACTORIZED_HIDDEN_DIM": ("factorized_hidden_dim", "sae"),
     "NUM_EXPERTS": ("num_experts", "sae"),
     "ACTIVE_EXPERTS": ("active_experts", "sae"),
+    "LATENTS_PER_EXPERT": ("latents_per_expert", "sae"),
 }
 
 RESULT_FIELD_MAP: dict[str, str] = {

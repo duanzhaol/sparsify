@@ -1167,12 +1167,14 @@ def _extract_cost_params(config: dict[str, Any]) -> dict[str, Any]:
         ("factorized_hidden_dim", "factorized_hidden_dim"),
         ("num_experts", "num_experts"),
         ("active_experts", "active_experts"),
+        ("latents_per_expert", "latents_per_expert"),
         ("TRUNK_RANK", "trunk_rank"),
         ("NUM_CODES", "num_codes"),
         ("STAGE1_RATIO", "stage1_ratio"),
         ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
         ("NUM_EXPERTS", "num_experts"),
         ("ACTIVE_EXPERTS", "active_experts"),
+        ("LATENTS_PER_EXPERT", "latents_per_expert"),
     ]:
         val = config.get(key)
         if val is not None and val != "":
