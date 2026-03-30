@@ -84,7 +84,7 @@ class Agent:
                     last_resume_ok_at=int(time.time()),
                 )
 
-        action = Action.from_dict(raw)
+        action = Action.from_dict(_coerce_missing_action_fields(raw))
         action = self._normalize_proposed_action(action, state)
         return action, stdout_path
 
@@ -350,6 +350,20 @@ def _extract_json(text: str) -> dict[str, Any]:
         if isinstance(obj, dict):
             return obj
     raise RuntimeError("Could not extract JSON object from agent response")
+
+
+def _coerce_missing_action_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Backfill a few safe defaults when the model omits schema fields.
+
+    Codex occasionally returns an otherwise-valid action JSON but drops a small
+    field like `needs_sanity`. Keep the fix minimal and only fill fields whose
+    absence is operationally safe.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    coerced = dict(raw)
+    coerced.setdefault("needs_sanity", False)
+    return coerced
 
 
 def _extract_session_id(output: str) -> str | None:

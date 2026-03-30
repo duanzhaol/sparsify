@@ -182,7 +182,7 @@ def _run_round(
     print(f"Round {round_id}: invoking agent...")
     try:
         action, _stdout_path = agent.propose(state, round_id, policy_guidance)
-    except RuntimeError as exc:
+    except Exception as exc:
         print(f"Round {round_id}: agent invocation failed: {exc}")
         state.log_round_event(ctx, "agent_failed", error=str(exc))
         return
