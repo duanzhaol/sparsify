@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧可直接导出为 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”推理链路，因此 `shared_routed_expert_topk` 属于直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属于不兼容，只能作为历史参考，不能驱动当前 frontier。当前 `<0.25x` 主线已经把 `LATENTS_PER_EXPERT=160` 的 deployment knee 收窄到 `K=108/110/112`：r165 `K=108` 得到 FVU=0.13799256086349487，r166 `K=110` 进一步到 0.13737481832504272，而 r162 `K=112` 仍是该带最优 0.13694503903388977。本轮唯一主假设是：相对 r166 只把 `K` 从 110 提到 111，在保持 `ARCHITECTURE=shared_routed_expert_topk`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 不变时，能够在仍低于 `K=112` 的总成本下继续逼近或匹配 r162 的质量，从而确认当前 low-cost 可部署主线的真实 lookup knee 是否在 111 而不是 112。",
+  "summary": "建议以 r166 为 reference，只改 `K=111`。这是对当前最强 `<0.25x` 兼容主线做最后一个最小增量的 deployment knee probe：`K=110` 已明显逼近 `K=112`，现在最有信息量的问题是 111 能否用略低于 112 的成本拿回几乎全部质量。",
+  "change_type": "param_only",
+  "experiment_tier": "full",
+  "expected_win": "lower_fvu",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "stabilize",
+  "self_review": "相对 r166 只改一个 env 参数 `K`，满足 param_only 单变量规则。`r166=archive` 但并未被标记为 invalid / crash / policy_reject，按当前 policy 仍是可用 reference_round。当前 `<0.25x` 主战场仍由 `shared_routed_expert_topk` 主导，且 r165→r166 已继续给出正向但递减的 K 轴信号；因此再补一个 `K=111` 比直接切去历史低成本负信号较强的新 family 更符合当前策略。选择 111 而不是回到 112，是因为 112 已有结果、111 是最后一个能直接回答“是否存在更便宜且几乎同质”的低风险 probe。主要风险是信息增量有限，可能只得到一个插值点；但若 111 仍明显弱于 112，就可以更有把握地宣布这条 width=160 子线的 lookup knee 基本落在 112，并停止继续细扫 K 轴。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "K",
+      "value": "111"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r163 已确认：把 `LATENTS_PER_EXPERT` 从 160 压到 144 会明显退化，因此当前 low-cost 主线更像受 width floor 约束，而不是仍可继续缩 per-expert width。",
+    "r165 与 r166 已给出连续的 deployment-side 正信号：`K=108` 达到 FVU=0.13799256086349487，`K=110` 进一步降到 0.13737481832504272，但仍未超过 r162 `K=112` 的 0.13694503903388977。",
+    "本地成本自检：相对 r166 仅改 `K=111` 后，combined_accesses=1011712，对当前 1024x4096 proxy 的实际 total_cost 约 0.2412x，仍低于 `K=112` 的约 0.2422x，且远低于 1.5×h×n 硬约束。",
+    "`shared_routed_factorized_expert_topk` 与 `shared_lowrank_routed_expert_topk` 在当前 target 上虽兼容，但已有低成本/近低成本负信号，当前不应继续主导 `<0.25x` 预算。"
+  ],
+  "next_hypotheses": [
+    "如果 `K=111` 在约 0.241x 下把 FVU 压到接近 0.1371 或更好，则后续应把 111 视为比 112 更优的 matched low-cost baseline，并停止继续在线性 K 轴上细扫。",
+    "如果 `K=111` 仍明显弱于 r162 `K=112`，则说明 width=160 子线的 deployment knee 基本就在 112，后续应停止继续补 109-112 的插值点。",
+    "一旦 111/112 的 knee 定位完成，下一步应优先转向新的 matched-cost 轻量结构对照或更轻 scorer/router 方向，而不是再次压 `LATENTS_PER_EXPERT`。"
+  ],
+  "reference_round": 166
+}
