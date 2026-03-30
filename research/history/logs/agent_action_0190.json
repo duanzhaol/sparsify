@@ -1,0 +1,29 @@
+{
+  "command": "run",
+  "hypothesis": "候选 family 保持为 `lowrank_expert_topk`。最终重构公式仍为 `x_hat = Σ_r β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i}`，其中 `{u_r}` 是静态 low-rank trunk library，`{b_{e,i}}` 是静态 expert 子库，`e(x)` 由轻量 router 选择；在线侧仍可直接导出到 LUTurbo/Lottable 的 “trunk 查表/加权和 + 少量静态 expert 子库查表/加权和” 推理链路，最终仍是静态向量库上的有限加权和，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍属 `不兼容`，不能驱动当前 frontier。当前 round 190 更高信息量的问题不是继续补 `K/LATENTS` 插值，而是直接测试更短 active path：相对 r187 仅把 `ACTIVE_EXPERTS` 从 `2` 降到 `1`，保持 `ARCHITECTURE=lowrank_expert_topk, K=96, TRUNK_RANK=16, LATENTS_PER_EXPERT=192, NUM_EXPERTS=64, EF=1, adam, LR=8e-4` 与其余配方不变，可最干净地回答“low-rank trunk 是否已经足以让 routed path 从双 expert 收缩到单 expert，同时把 total_cost 压到更左的 `0.18x` 带”。这正对应当前高优先级方向里的“active path 更短的 sparse MoE-like 结构”。本地成本自检显示该点 selection_accesses=294912 (`0.07x`)，deployment_accesses=458752 (`0.11x`)，combined_accesses=753664（combined_ratio 约 `0.18x`），明确落在 `<0.25x` 主战场内且远低于 1.5×h×n 硬约束。",
+  "summary": "以 r187 为 reference，只改 `ACTIVE_EXPERTS=1`，对 `lowrank_expert_topk` 做一次 active-path compression probe。目标是在保持 current low-rank trunk recipe 不变的前提下，直接判断更短 routed path 是否能把这条最接近 anchor 的非主线 family 推到更左的低成本带。",
+  "change_type": "param_only",
+  "expected_win": "lower_cost",
+  "family_name": "lowrank_expert_topk",
+  "family_stage": "stabilize",
+  "self_review": "这轮严格遵守 param_only 单变量约束：相对 r187 只改 `ACTIVE_EXPERTS`。选择这条轴而不是继续改 `K/LATENTS_PER_EXPERT`，是因为当前策略明确要求避免在同一 family 上继续做线性插值点，而 `ACTIVE_EXPERTS` 直接改变 active path 长度，属于更高信息量的结构性压缩。选择 `lowrank_expert_topk` 而不是回到 `shared_routed_expert_topk` 主线，是因为后者已被明确降为 cost anchor；选择它而不是再开一个新的 factorized/shared-lowrank architecture family，是因为 r186-r189 已连续给出这些方向的 fresh 负信号。主要风险是同 target 的旧 recipe 上，`lowrank_expert_topk` 的单 expert 版本已经出现过明显负信号；但那条证据对应的是更重的 `K=112, LATENTS_PER_EXPERT=224, TRUNK_RANK=40` 配方。当前这一轮要回答的是更轻 `K=96, LATENTS_PER_EXPERT=192, TRUNK_RANK=16` recipe 下，trunk 是否已经足以支撑更短 active path，而这在当前成本带上仍未被直接验证。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ACTIVE_EXPERTS",
+      "value": "1"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`lowrank_expert_topk` 的 LUTurbo 导出形式仍是静态 trunk library 与单个 routed expert 子库上的有限加权和，应继续按 `扩展兼容` 处理。",
+    "这轮不是继续补 `K` 或 `LATENTS_PER_EXPERT` 的局部插值，而是直接测试更短 active path 是否可行，符合当前对 short-active-path sparse MoE-like 方向的优先级。",
+    "本地成本自检：`lowrank_expert_topk K=96 TRUNK_RANK=16 NUM_EXPERTS=64 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=192` 的 selection_accesses=294912、deployment_accesses=458752、combined_accesses=753664，对当前 1024x4096 proxy 的 total_cost 约 `0.18x`。",
+    "同 target 的旧 recipe 上，`lowrank_expert_topk` 单 expert 版本已有负信号，但当前更轻 recipe 还未做 direct validation；本轮就是补这条结构归因。"
+  ],
+  "next_hypotheses": [
+    "如果 `ACTIVE_EXPERTS=1` 仍能把 FVU 控制在接近当前 `0.19x-0.20x` anchors 的范围内，则下一轮保持 family 不变，只改 `K` 或 `LATENTS_PER_EXPERT`，继续定位这条更短 active-path 分支的最左可用点。",
+    "如果 `ACTIVE_EXPERTS=1` 明显崩掉，则可更明确写入当前 target 结论：对 `lowrank_expert_topk` 而言，双 expert active path 仍是低成本可用区的必要条件，后续不应再优先压这条轴。"
+  ],
+  "reference_round": 187
+}
