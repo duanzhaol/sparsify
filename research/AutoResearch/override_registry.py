@@ -26,6 +26,7 @@ _FACTORIZED_EXPERT_KEYS = {
     "ACTIVE_EXPERTS",
     "LATENTS_PER_EXPERT",
 }
+_FACTORIZED_EXPERT_RESIDUAL_KEYS = _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
 _SHARED_LOWRANK_ROUTED_EXPERT_KEYS = _FACTORIZED_EXPERT_KEYS
 _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS = (
     _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
@@ -53,6 +54,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "shared_routed_expert_topk": _EXPERT_KEYS,
     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
     "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+    "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
     "shared_lowrank_routed_expert_topk": _SHARED_LOWRANK_ROUTED_EXPERT_KEYS,
     "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
     "lowrank_residual": _LOWRANK_KEYS,

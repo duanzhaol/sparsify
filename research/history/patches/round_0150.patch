@@ -1,0 +1,359 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -26,6 +26,7 @@
+     "ACTIVE_EXPERTS",
+     "LATENTS_PER_EXPERT",
+ }
++_FACTORIZED_EXPERT_RESIDUAL_KEYS = _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
+ _SHARED_LOWRANK_ROUTED_EXPERT_KEYS = _FACTORIZED_EXPERT_KEYS
+ _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS = (
+     _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
+@@ -53,6 +54,7 @@
+     "shared_routed_expert_topk": _EXPERT_KEYS,
+     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+     "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
++    "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
+     "shared_lowrank_routed_expert_topk": _SHARED_LOWRANK_ROUTED_EXPERT_KEYS,
+     "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
+     "lowrank_residual": _LOWRANK_KEYS,
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -228,6 +228,7 @@
+             "shared_routed_expert_topk",
+             "factorized_expert_topk",
+             "shared_routed_factorized_expert_topk",
++            "shared_routed_factorized_expert_residual",
+             "shared_lowrank_routed_expert_topk",
+             "shared_lowrank_two_stage_residual_expert",
+             "shared_lowrank_routed_expert_residual",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -430,6 +430,8 @@
+         return FactorizedExpertTopKSparseCoder
+     if architecture == "shared_routed_factorized_expert_topk":
+         return SharedRoutedFactorizedExpertTopKSparseCoder
++    if architecture == "shared_routed_factorized_expert_residual":
++        return SharedRoutedFactorizedExpertResidualSparseCoder
+     if architecture == "shared_lowrank_routed_expert_topk":
+         return SharedLowRankRoutedExpertTopKSparseCoder
+     if architecture == "shared_lowrank_two_stage_residual_expert":
+@@ -1969,6 +1971,317 @@
+         )
+ 
+ 
++class SharedRoutedFactorizedExpertResidualSparseCoder(SparseCoder):
++    """Shared+routed factorized expert stage followed by global sparse residual cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        (
++            base_num_latents,
++            self.num_routed_experts,
++            self.latents_per_expert,
++            self.active_experts,
++        ) = _resolve_expert_layout(cfg, d_in)
++        self.num_shared_experts = 1
++        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
++        self.routed_num_latents = (
++            self.num_routed_experts * self.latents_per_expert
++        )
++        self.stage1_num_latents = self.shared_num_latents + self.routed_num_latents
++        self.residual_num_latents = base_num_latents
++        self.num_latents = self.stage1_num_latents + self.residual_num_latents
++
++        if cfg.stage1_ratio is not None:
++            self.stage1_k = max(1, round(cfg.k * cfg.stage1_ratio))
++        else:
++            self.stage1_k = max(1, cfg.k // 2)
++        self.stage2_k = max(1, cfg.k - self.stage1_k)
++
++        max_stage1_latents = (
++            self.num_shared_experts + self.active_experts
++        ) * self.latents_per_expert
++        if self.stage1_k > max_stage1_latents:
++            raise ValueError(
++                "shared_routed_factorized_expert_residual requires "
++                "stage1_k <= (shared_experts + active_experts) * latents_per_expert, "
++                f"got stage1_k={self.stage1_k}, "
++                f"shared_experts={self.num_shared_experts}, "
++                f"active_experts={self.active_experts}, "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        hidden_dim = (
++            cfg.factorized_hidden_dim
++            if cfg.factorized_hidden_dim is not None
++            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
++        )
++        self.factor_encoder = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.router = nn.Linear(
++            hidden_dim, self.num_routed_experts, device=device, dtype=dtype
++        )
++        self.shared_heads = nn.Parameter(
++            torch.empty(
++                self.num_shared_experts,
++                self.latents_per_expert,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.shared_head_bias = nn.Parameter(
++            torch.zeros(
++                self.num_shared_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.routed_heads = nn.Parameter(
++            torch.empty(
++                self.num_routed_experts,
++                self.latents_per_expert,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.routed_head_bias = nn.Parameter(
++            torch.zeros(
++                self.num_routed_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_encoder = nn.Linear(
++            d_in, self.residual_num_latents, device=device, dtype=dtype
++        )
++
++        self.factor_encoder.bias.data.zero_()
++        self.router.bias.data.zero_()
++        self.residual_encoder.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.shared_heads, a=5**0.5)
++        nn.init.kaiming_uniform_(self.routed_heads, a=5**0.5)
++
++        if decoder:
++            shared_decoder = torch.einsum(
++                "slh,hd->sld",
++                self.shared_heads.data,
++                self.factor_encoder.weight.data,
++            ).reshape(self.shared_num_latents, d_in)
++            routed_decoder = torch.einsum(
++                "elh,hd->eld",
++                self.routed_heads.data,
++                self.factor_encoder.weight.data,
++            ).reshape(self.routed_num_latents, d_in)
++            decoder_init = torch.cat(
++                (
++                    shared_decoder,
++                    routed_decoder,
++                    self.residual_encoder.weight.data.clone(),
++                ),
++                dim=0,
++            )
++            self.W_dec = nn.Parameter(decoder_init)
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    def _encoder_linear_layers(self):
++        return [
++            ("factor_encoder", self.factor_encoder),
++            ("router", self.router),
++            ("residual_encoder", self.residual_encoder),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        hidden_dim = self.factor_encoder.out_features
++        return [
++            (
++                "shared_factorized_head",
++                self.num_shared_experts * hidden_dim * self.latents_per_expert,
++                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
++            ),
++            (
++                "active_routed_factorized_head",
++                self.active_experts * hidden_dim * self.latents_per_expert,
++                f"active={self.active_experts}×{hidden_dim}x{self.latents_per_expert}",
++            ),
++        ]
++
++    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
++        ]
++
++    def _encode_stage1(
++        self, x_centered: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = x_centered.shape[:-1]
++        flat_x = x_centered.reshape(-1, self.d_in)
++        batch = flat_x.shape[0]
++
++        hidden = F.relu(self.factor_encoder(flat_x))
++        shared_pre_acts = (
++            torch.einsum("bh,slh->bsl", hidden, self.shared_heads)
++            + self.shared_head_bias.unsqueeze(0)
++        )
++        shared_acts = F.relu(shared_pre_acts)
++
++        router_logits = self.router(hidden)
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.routed_heads[selected_expert_idx]
++        selected_bias = self.routed_head_bias[selected_expert_idx]
++        routed_pre_acts = (
++            torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
++        )
++        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
++
++        flat_shared_acts = shared_acts.reshape(batch, -1)
++        flat_routed_acts = routed_acts.reshape(batch, -1)
++        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
++
++        shared_offsets = torch.arange(
++            self.shared_num_latents, device=flat_x.device
++        ).view(1, -1)
++        local_offsets = torch.arange(
++            self.latents_per_expert, device=flat_x.device
++        ).view(1, 1, self.latents_per_expert)
++        routed_offsets = (
++            self.shared_num_latents
++            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
++            + local_offsets
++        ).reshape(batch, -1)
++        flat_indices = torch.cat(
++            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
++        )
++
++        top_acts, top_pos = torch.topk(
++            flat_acts, self.stage1_k, dim=-1, sorted=False
++        )
++        top_indices = flat_indices.gather(1, top_pos)
++
++        full_acts = flat_acts.new_zeros(batch, self.stage1_num_latents)
++        full_acts.scatter_(1, flat_indices, flat_acts)
++
++        target_shape = (*original_shape, self.stage1_k)
++        acts_shape = (*original_shape, self.stage1_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        pre_acts = F.linear(
++            flat_x, self.residual_encoder.weight, self.residual_encoder.bias
++        )
++        acts = F.relu(pre_acts)
++        top_acts, local_indices = torch.topk(
++            acts, self.stage2_k, dim=-1, sorted=False
++        )
++        top_indices = local_indices + self.stage1_num_latents
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++        stage1_acts, stage1_indices, stage1_full = self._encode_stage1(x_centered)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = x_centered - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        stage1_acts, stage1_indices, stage1_full = self._encode_stage1(x_centered)
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        stage2_input = x_centered - stage1_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_residual_stage(
++            stage2_input
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
++        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
++        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedLowRankTwoStageResidualExpertSparseCoder(SparseCoder):
+     """Shared low-rank coarse stage followed by expert-routed residual cleanup."""
+ 

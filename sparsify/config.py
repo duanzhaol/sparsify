@@ -228,6 +228,7 @@ class TrainConfig(Serializable):
             "shared_routed_expert_topk",
             "factorized_expert_topk",
             "shared_routed_factorized_expert_topk",
+            "shared_routed_factorized_expert_residual",
             "shared_lowrank_routed_expert_topk",
             "shared_lowrank_two_stage_residual_expert",
             "shared_lowrank_routed_expert_residual",
