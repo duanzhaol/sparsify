@@ -1,0 +1,29 @@
+{
+  "command": "run",
+  "hypothesis": "候选 family 设为 `jumprelu`。最终重构公式为 `x_hat = Σ_{i∈S(x)} α_i(x) b_i`，其中 `{b_i}` 是单个静态向量库中的固定原子，`S(x)` 由 JumpReLU 阈值化支持形成决定；在线导出时仍只是“打分/阈值化选 support -> 静态库查表 -> 有限加权和”，不引入动态字典、batch 级耦合或样本依赖生成库，因此可直接落到 LUTurbo/Lottable 的查表加权流水线，兼容性判断为 `直接兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍属 `不兼容`，不能驱动当前 frontier。r186-r187 已连续给出 `lowrank_factorized_residual` 与 `lowrank_expert_topk` 的低成本负信号，而 recent 2 轮又都落在同一 `lowrank_expert_topk` family 的局部 width 轴上且没有形成新 frontier 扩展；按当前策略，下一轮应优先切回 architecture-level probe，而不是继续补该 family 的线性插值。相对 r181 仅把 `ARCHITECTURE` 从 `topk` 切到 `jumprelu`，保持 `K=96, EF=1, adam, LR=8e-4` 及其余训练配方不变，可最干净地回答：在 small-`K` 辅助带里，改变 support formation 机制本身，是否能比 plain `topk@K96` 更有效地把有限 sparse budget 用在高价值支撑上。本地成本自检显示该点 selection_accesses=1048576 (`0.25x`)，deployment_accesses=393216 (`0.09x`)，combined_accesses=1441792（combined_ratio 约 `0.34x`），落在当前允许的 `0.25x-0.35x` 辅助对照带内，且明显低于 1.5×h×n 硬约束。",
+  "summary": "以 r181 为 reference，只改 `ARCHITECTURE=jumprelu`，做一轮位于 `0.25x-0.35x` 辅助带的 matched architecture probe。目标是直接判断：在 `K=96` 小支撑预算下，JumpReLU 的阈值化支持形成能否比 plain top-k 提供更好的质量斜率。",
+  "change_type": "param_only",
+  "expected_win": "explore_unknown",
+  "family_name": "jumprelu",
+  "family_stage": "probe",
+  "self_review": "这轮严格遵守 param_only 单变量约束：相对 r181 只改 `ARCHITECTURE`。选择 r181 而不是继续沿 r187 的 `lowrank_expert_topk` 做 `K/LATENTS/TRUNK_RANK` 微调，是因为当前策略已明确指出：当最近几轮都只是同一 family 的局部调参且没有形成新的 frontier 扩展时，应优先切回 architecture-level probe。选择 `jumprelu` 而不是 `group_topk`，是因为后者在当前 target 的既有 direct-compatible 证据更偏负，而 `jumprelu` 至少在旧的更高成本 recipe 上表现出过可竞争性，作为当前 `K=96` recipe 的 fresh validation 更有信息量。选择它而不是 `lowrank_residual`，是因为后者在相同 small-`K` recipe 下本地成本约 `0.37x`，已略超出当前辅助带上沿；`jumprelu` 则能把问题控制在 `0.34x`，更符合本轮预算纪律。主要风险是该 family 仍可能重复早期直接兼容单库路线的弱信号；但在 recent 低成本 MoE-like 槽位连续转弱之后，用一个更轻、归因更干净的 support-formation probe 作为辅助对照，信息密度高于继续在已显著转弱的 family 上补插值点。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "jumprelu"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`jumprelu` 的最终导出形式仍是单一静态字典上的有限加权和，应按 `直接兼容` 处理。",
+    "本轮是 architecture-level fresh validation：相对 r181 的 `topk@K96` 只改 `ARCHITECTURE`，直接隔离“支持形成机制”本身的价值，不混入 `K`、`TRUNK_RANK` 或 `LATENTS_PER_EXPERT` 变化。",
+    "本地成本自检：`jumprelu K=96 EF=1` 的 selection_accesses=1048576、deployment_accesses=393216、combined_accesses=1441792，对当前 1024x4096 proxy 的 total_cost 约 `0.34x`，仍在辅助对照带内。",
+    "r186-r187 已连续给出 `lowrank_factorized_residual` 与 `lowrank_expert_topk` 的低成本负信号；当前不应继续让同一 `lowrank_expert_topk` family 的局部微调主导搜索预算。"
+  ],
+  "next_hypotheses": [
+    "如果 `jumprelu@K96` 明显优于 `topk@K96`，则下一轮保持 family 不变，只改一个 JumpReLU 动态参数，确认该增益是否来自支持形成而非偶然噪声。",
+    "如果 `jumprelu@K96` 仍明显弱于同带 baseline，则可更明确下调当前 direct-compatible 单库 family 在 low-cost 区的优先级，把预算转回新的 MoE-like architecture 槽位。"
+  ],
+  "reference_round": 181
+}
