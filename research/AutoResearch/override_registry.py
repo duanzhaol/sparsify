@@ -52,6 +52,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     },
     "expert_topk": _EXPERT_KEYS,
     "shared_routed_expert_topk": _EXPERT_KEYS,
+    "shared_two_stage_residual_expert": _EXPERT_KEYS | {"STAGE1_RATIO"},
     "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
     "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
     "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
