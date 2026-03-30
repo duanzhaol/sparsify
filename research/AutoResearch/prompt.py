@@ -61,19 +61,19 @@ PROXY_OBJECTIVE = """\
 - 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
 - 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
 - 用尽可能低的 total_cost 达到尽可能低的 FVU
-- 当前 target 上，plain `EF=1` selector family 已经提供了一批成本锚点；它们现在主要用于对照和校准，而不是默认继续作为唯一主线
-- 当前阶段的主要任务不是继续细扫旧 family 的 K/LR 邻域，而是验证新的结构族是否能形成新的 Pareto 段
-- 允许在 `0.3x-0.8x total_cost` 带内建立结构性 anchor；不要求所有轮次都继续压最低成本，只要求问题清晰、结构信息增量高
+- 当前 target 上，plain `EF=1` selector family 已经提供了一批成本锚点；它们现在主要用于对照和校准
+- 当前阶段主目标：在 `total_cost < 0.25x` 区域尽可能降低 FVU
+- `0.25x-0.35x` 只作为辅助对照带，用于判断结构趋势；`>0.4x` 只保留少量质量锚点，不应继续主导大部分预算
+- 当前 `<0.25x` 最强兼容前沿主要由 `shared_routed_expert_topk` 构成；后续实验应优先回答“谁能在相近或更低成本下打败它”
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
 - encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
 - 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
-- 接下来大部分探索预算应投向结构新意更高的方向，而不是继续在 `topk / jumprelu / factorized_topk` 上做重复的局部扫点
-- 当前优先探索的方向是：轻量 expert 子库 / MoE-like 路由、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
-- 如果已实现 family 不覆盖这些方向，应优先做最小可运行原型，而不是退回旧 family 的局部微调
-- 上述方向只是候选搜索空间，不是默认结论；不要因为旧经验预先排斥任何兼容 family
+- 当前主要预算应投向 `<0.25x` 带内的轻量结构，而不是继续把注意力放在 `0.4x-0.8x` 的中成本结构锚点
+- 在这个成本区间，优先考虑更轻的 routed / shared+routed 结构、极小 K、更小的 per-expert width、更轻的 scorer / router
+- 只有在能保持 `<0.25x` 或至少不明显超过 `0.35x` 的前提下，very-light residual / factorized 变体才值得尝试
 - 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
 EXECUTION_LAYER = """\
@@ -178,20 +178,28 @@ def section_target_profile() -> str:
 
 def section_high_priority_directions() -> str:
     return "\n".join([
-        "当前研究阶段：结构扩展优先。",
-        "  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。",
-        "  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。",
+        "当前研究阶段：`<0.25x` 低成本区优先。",
+        "  当前要回答的是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”，而不是“哪个 0.5x 左右结构最好”。",
+        "  `0.25x-0.35x` 只作辅助对照带；`>0.4x` 只保留少量质量锚点，不应继续主导预算。",
         "",
-        "当前高优先级未充分验证方向：",
-        "  1. `expert_topk` / 轻量 MoE-like 子库路由。",
-        "     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。",
-        "  2. `lowrank + expert`。",
-        "     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。",
-        "  3. `lowrank + expert + residual`。",
-        "     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。",
-        "  4. `two-stage residual expert`。",
-        "     先 coarse library，再用局部 expert residual 做第二段修正。",
-        "  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。",
+        "当前 low-cost 参考线：",
+        "  1. `shared_routed_expert_topk` 是当前 `<0.25x` 区域最强兼容 baseline；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。",
+        "  2. `expert_topk` 只作为更极左侧成本 anchor；若质量明显落后，不应继续主导预算。",
+        "",
+        "当前高优先级方向：",
+        "  1. `shared_routed_expert_topk` 的 matched-cost 轻量变体。",
+        "     优先尝试更小 K、更小 `LATENTS_PER_EXPERT`、更轻 scorer / router，前提是总成本仍落在 `<0.25x` 或尽量接近它。",
+        "  2. 更轻的 shared+routed / hetero-MoE 变体。",
+        "     只有在 shared 分支不会把成本自然抬到 `>0.35x` 时才值得继续。",
+        "  3. 极小 K 与更轻 expert 子库。",
+        "     目标是在不显著牺牲 FVU 的前提下继续压 deployment 与 active-path 成本。",
+        "  4. very-light residual / factorized 变体。",
+        "     仅当它们能保持在 low-cost 带内时才值得尝试；不要默认引入会自然抬高到中成本区的 trunk / residual 负担。",
+        "",
+        "当前应下调优先级的方向：",
+        "  1. 天然落在 `0.45x-0.55x` 左右的 `lowrank_expert_residual` 式结构，除非只作少量质量对照。",
+        "  2. 已经多轮失败的 shared-lowrank two-stage / hetero residual 变体。",
+        "  3. 任何只是把成本抬到 `>0.4x` 却不能直接回答 `<0.25x` 问题的结构探针。",
     ])
 
 
@@ -275,8 +283,9 @@ def section_frontier(
     current_target = default_target_profile()
     entries: list[tuple[float, str]] = []
     saw_any_entry = False
-    low_cost_count = 0
-    low_cost_best_fvu = float("inf")
+    primary_low_cost_count = 0
+    primary_low_cost_best_fvu = float("inf")
+    support_band_count = 0
 
     for _key, entry in frontier.items():
         if not isinstance(entry, dict):
@@ -346,12 +355,14 @@ def section_frontier(
                 total_cost_val = 0
 
         combined_feasible = isinstance(combined_ratio, (int, float)) and combined_ratio <= 1.5
-        if isinstance(combined_ratio, (int, float)) and combined_ratio < 0.5:
-            low_cost_count += 1
+        if isinstance(combined_ratio, (int, float)) and combined_ratio < 0.25:
+            primary_low_cost_count += 1
             try:
-                low_cost_best_fvu = min(low_cost_best_fvu, float(fvu))
+                primary_low_cost_best_fvu = min(primary_low_cost_best_fvu, float(fvu))
             except (TypeError, ValueError):
                 pass
+        elif isinstance(combined_ratio, (int, float)) and combined_ratio < 0.35:
+            support_band_count += 1
         tag = " [FEASIBLE]" if combined_feasible else " [OVER BUDGET]"
         entries.append((
             float(total_cost_val),
@@ -368,13 +379,15 @@ def section_frontier(
             parts.append(line)
         if feasible_count == 0:
             parts.append("  !! 当前 frontier 所有点均超出总成本预算（>1.5x）。首要任务：找到成本可行的配置。")
-        if low_cost_count == 0:
-            parts.append("  !! <0.5x 低开销区域暂无 frontier 点，建议补充不同 family / K / EF / 结构参数的低成本样本。")
-        elif low_cost_count <= 2:
-            if low_cost_best_fvu < float('inf'):
-                parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，当前最佳 FVU={low_cost_best_fvu:.4f}，仍明显欠覆盖。")
+        if primary_low_cost_count == 0:
+            parts.append("  !! `<0.25x` 主战场暂无 frontier 点，当前搜索重心应回到超低成本区。")
+        elif primary_low_cost_count <= 2:
+            if primary_low_cost_best_fvu < float('inf'):
+                parts.append(f"  !! `<0.25x` 区域仅有 {primary_low_cost_count} 个点，当前最佳 FVU={primary_low_cost_best_fvu:.4f}，仍明显欠覆盖。")
             else:
-                parts.append(f"  !! <0.5x 区域仅有 {low_cost_count} 个点，仍可进一步探索。")
+                parts.append(f"  !! `<0.25x` 区域仅有 {primary_low_cost_count} 个点，仍明显欠覆盖。")
+        if support_band_count:
+            parts.append(f"  参考：`0.25x-0.35x` 辅助带当前有 {support_band_count} 个 frontier 点。")
     else:
         if saw_any_entry:
             parts.append("  （当前 target profile 下暂无 frontier 点；旧 target 历史已隔离）")
@@ -388,17 +401,20 @@ def section_selection_cost_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
 ) -> str:
-    """Show cost status for best <0.5x point, then feasible/global references."""
+    """Show cost status for best <0.25x point, then wider references."""
     best_global: dict[str, Any] | None = None
     best_global_fvu = float("inf")
     best_feasible: dict[str, Any] | None = None
     best_feasible_fvu = float("inf")
-    best_low_cost: dict[str, Any] | None = None
-    best_low_cost_fvu = float("inf")
+    best_primary_low_cost: dict[str, Any] | None = None
+    best_primary_low_cost_fvu = float("inf")
+    best_secondary_low_cost: dict[str, Any] | None = None
+    best_secondary_low_cost_fvu = float("inf")
 
     current_target = default_target_profile()
     budget = 1.5 * current_target.original_matmul_accesses
-    low_cost_budget = 0.5 * current_target.original_matmul_accesses
+    primary_low_cost_budget = 0.25 * current_target.original_matmul_accesses
+    secondary_low_cost_budget = 0.5 * current_target.original_matmul_accesses
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
@@ -424,9 +440,16 @@ def section_selection_cost_status(
         if tc is not None and float(tc) <= budget and fvu < best_feasible_fvu:
             best_feasible_fvu = fvu
             best_feasible = entry
-        if tc is not None and float(tc) < low_cost_budget and fvu < best_low_cost_fvu:
-            best_low_cost_fvu = fvu
-            best_low_cost = entry
+        if tc is not None and float(tc) < primary_low_cost_budget and fvu < best_primary_low_cost_fvu:
+            best_primary_low_cost_fvu = fvu
+            best_primary_low_cost = entry
+        if (
+            tc is not None
+            and primary_low_cost_budget <= float(tc) < secondary_low_cost_budget
+            and fvu < best_secondary_low_cost_fvu
+        ):
+            best_secondary_low_cost_fvu = fvu
+            best_secondary_low_cost = entry
 
     if best_global is None:
         return ""
@@ -499,10 +522,13 @@ def section_selection_cost_status(
             true_feasible_fvu = fvu
             true_feasible_cost = cost
 
-    # Prefer the best true <0.5x point if one exists
-    true_low_cost: dict[str, Any] | None = None
-    true_low_cost_cost: dict | None = None
-    true_low_cost_fvu = float("inf")
+    # Prefer the best true <0.25x point if one exists
+    true_primary_low_cost: dict[str, Any] | None = None
+    true_primary_low_cost_cost: dict | None = None
+    true_primary_low_cost_fvu = float("inf")
+    true_secondary_low_cost: dict[str, Any] | None = None
+    true_secondary_low_cost_cost: dict | None = None
+    true_secondary_low_cost_fvu = float("inf")
     for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
@@ -516,27 +542,50 @@ def section_selection_cost_status(
             fvu = float(entry.get("fvu", float("inf")))
         except (TypeError, ValueError):
             continue
-        if fvu >= true_low_cost_fvu:
-            continue
         cost = global_cost if entry is best_global and global_cost is not None else _cost_for_entry(entry)
-        if cost is not None and float(cost.get("combined_accesses", float("inf"))) < low_cost_budget:
-            true_low_cost = entry
-            true_low_cost_fvu = fvu
-            true_low_cost_cost = cost
+        if cost is None:
+            continue
+        combined_accesses = float(cost.get("combined_accesses", float("inf")))
+        if combined_accesses < primary_low_cost_budget and fvu < true_primary_low_cost_fvu:
+            true_primary_low_cost = entry
+            true_primary_low_cost_fvu = fvu
+            true_primary_low_cost_cost = cost
+        elif (
+            primary_low_cost_budget <= combined_accesses < secondary_low_cost_budget
+            and fvu < true_secondary_low_cost_fvu
+        ):
+            true_secondary_low_cost = entry
+            true_secondary_low_cost_fvu = fvu
+            true_secondary_low_cost_cost = cost
 
-    shown_feasible = False
-    if true_low_cost is not None and true_low_cost_cost is not None:
-        _format_entry(true_low_cost, true_low_cost_cost, "当前最佳 <0.5x 点 →")
-        # Show feasible separately only if it's a different entry
-        if true_feasible is not None and true_feasible_cost is not None and true_feasible is not true_low_cost:
-            _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
-            shown_feasible = True
-    elif true_feasible is not None and true_feasible_cost is not None:
+    if true_primary_low_cost is not None and true_primary_low_cost_cost is not None:
+        _format_entry(true_primary_low_cost, true_primary_low_cost_cost, "当前最佳 <0.25x 点 →")
+    else:
+        parts.append("  !! 当前 `<0.25x` 主战场暂无已验证前沿点。")
+
+    if (
+        true_secondary_low_cost is not None
+        and true_secondary_low_cost_cost is not None
+        and true_secondary_low_cost is not true_primary_low_cost
+    ):
+        _format_entry(true_secondary_low_cost, true_secondary_low_cost_cost, "当前最佳 0.25x-0.5x 点 →")
+
+    if (
+        true_feasible is not None
+        and true_feasible_cost is not None
+        and true_feasible is not true_primary_low_cost
+        and true_feasible is not true_secondary_low_cost
+    ):
         _format_entry(true_feasible, true_feasible_cost, "最优可行点 →")
-        shown_feasible = True
 
     # Show global best only if different from already shown points
-    if best_global is not None and global_cost is not None and best_global is not true_low_cost and best_global is not true_feasible:
+    if (
+        best_global is not None
+        and global_cost is not None
+        and best_global is not true_primary_low_cost
+        and best_global is not true_secondary_low_cost
+        and best_global is not true_feasible
+    ):
         _format_entry(best_global, global_cost, "全局最低 FVU →")
 
     if true_feasible is None:
@@ -641,6 +690,7 @@ def section_recent_rounds(
 def section_reference_configs(
     round_summaries: list[dict[str, Any]],
     registry: dict[str, str],
+    frontier: dict[str, Any],
     limit: int = 2,
 ) -> str:
     """Show recent runnable full env configs that can serve as reference_round anchors."""
@@ -663,11 +713,48 @@ def section_reference_configs(
             continue
         usable.append(summary)
 
+    current_target = default_target_profile()
+    primary_frontier_rounds: list[int] = []
+    support_frontier_rounds: list[int] = []
+    for rid, entry in frontier.items():
+        if not isinstance(entry, dict):
+            continue
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
+        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+        if family_name and not is_compatible_label(registry.get(family_name)):
+            continue
+        round_id = _safe_round_id(str(rid).lstrip("r"))
+        if round_id is None:
+            continue
+        total_cost = entry.get("total_cost")
+        if total_cost is None:
+            sel = entry.get("selection_cost")
+            deploy = entry.get("deployment_accesses", 0) or 0
+            total_cost = float(sel) + float(deploy) if sel is not None else None
+        if total_cost is None:
+            continue
+        ratio = float(total_cost) / current_target.original_matmul_accesses
+        if ratio < 0.25:
+            primary_frontier_rounds.append(round_id)
+        elif ratio < 0.35:
+            support_frontier_rounds.append(round_id)
+
+    primary_frontier_rounds = sorted(set(primary_frontier_rounds))
+    support_frontier_rounds = sorted(set(support_frontier_rounds))
+
     def _priority(summary: dict[str, Any]) -> tuple[int, int]:
         decision = str(summary.get("result", {}).get("decision") or "")
         round_id = int(summary.get("round") or 0)
+        if round_id in primary_frontier_rounds:
+            band_rank = 0
+        elif round_id in support_frontier_rounds:
+            band_rank = 1
+        else:
+            band_rank = 2
         decision_rank = 0 if decision in {"keep", "archive"} else 1
-        return (decision_rank, -round_id)
+        return (band_rank, decision_rank, -round_id)
 
     def _family_name(summary: dict[str, Any]) -> str:
         result = summary.get("result", {})
@@ -961,6 +1048,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
     sections.append(section_reference_configs(
         recent_summaries,
         registry,
+        state.frontier,
         limit=4,
     ))
     sections.append(section_tactical_hints(state.get_pending_hints()))
@@ -1015,6 +1103,7 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     sections.append(section_reference_configs(
         recent_summaries,
         registry,
+        state.frontier,
         limit=4,
     ))
     sections.append(section_tactical_hints(state.get_pending_hints()))

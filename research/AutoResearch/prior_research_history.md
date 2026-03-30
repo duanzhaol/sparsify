@@ -21,12 +21,12 @@
 
 下面这些只算当前 target 的弱先验，不是结论：
 
-- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
-- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
-- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
-- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+- 当前主战场应放在 `<0.25x total_cost` 区域；`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点
+- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline，而不是被直接视为“旧 family”
+- `expert_topk` 仍有极低成本 anchor 价值，但在 `<0.25x` 的质量明显弱于当前 shared+routed 主线
+- `lowrank_expert_residual` 在 `0.49x-0.54x` 一带给出了当前更强的质量锚点，但这不意味着后续应让中成本结构继续主导搜索预算
 
-一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，而是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”。
 
 ## 2. LUTurbo/Lottable 兼容性约束
 
@@ -133,32 +133,31 @@
 
 Agent 应把这些当成未决问题，而不是已有答案。
 
-## 6. 高优先级未接线方向
+## 6. 当前高优先级方向
 
-下面这些方向目前不应被当成“已经可直接跑的 family”，但在探索优先级上应被抬高：
+当前优先级最高的方向不是泛泛的“结构扩展”，而是明确围绕 `<0.25x` 主战场补点：
 
-- 轻量 expert 子库 / MoE-like 路由
-- `lowrank + expert`
-- `lowrank + expert + residual`
-- `two-stage residual expert`
-- 多子库 + 局部 sparse residual
-- 先轻量 router，再在局部字典内 top-k 的结构
+- `shared_routed_expert_topk` 的 matched-cost 轻量变体
+- 更小 `K`
+- 更小 `LATENTS_PER_EXPERT`
+- 更轻的 shared scorer / router
+- 只有在仍能保持 low-cost 带的前提下，才考虑 very-light residual / factorized 变体
 
-原因不是它们已经被证明更好，而是：
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
 
-- 它们可能允许“总容量变大，但单 token 激活路径仍然较短”
-- 它们有机会把 selection 从“全字典打分”变成“局部子库打分”
-- 它们是目前现有已实现 family 之外，少数仍明显欠探索、但又符合部署直觉的方向
+- 当前 `<0.25x` 前沿已经有可用点，但质量仍明显不够好
+- 这一区间目前的最强点仍主要来自轻量 shared+routed 路线
+- 很多会自然把成本抬到 `>0.35x` 的结构，即使质量更高，也不直接回答当前主问题
 
-如果要实现第一版，应优先满足：
+如果要实现新的 low-cost 原型，应优先满足：
 
 - `ACTIVE_EXPERTS` 很小，例如 1 或 2
 - router 足够轻，不要把省下来的选择成本重新吃掉
 - 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
-- 如果引入 low-rank trunk，优先让 trunk 吃掉平滑主干，再让 expert / residual 处理剩余结构
+- shared 分支若存在，不能自然把 total_cost 抬出 low-cost 带
 - 最终形式仍能写成若干静态子库上的有限加权和
 
-一句话：MoE-like 目前不是已验证主线，但应被视为高优先级未验证方向，而不是长期压后。
+一句话：当前优先级最高的是“更轻的 low-cost MoE-like 结构”，不是一般性的中成本结构扩展。
 
 ## 7. 当前默认做法
 
@@ -167,6 +166,6 @@ Agent 应把这些当成未决问题，而不是已有答案。
 - 先建立当前 target 自己的可解释 baseline 和 cost anchors
 - 再根据当前 target 的 frontier 形状决定下一步往哪里扩
 - 优先选择归因清晰、接线风险低、能补充新信息的实验
-- 当 plain selector family 已经给出足够 anchor 后，默认应转向结构扩展，而不是继续在 `topk / jumprelu / factorized_topk` 上做局部邻域扫描
-- 如果已实现 family 持续不能给出满意结果，应优先抽出一部分预算转向高优先级未验证方向，尤其是 `expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`
+- 当 `<0.25x` 区域已经有 anchor 后，默认应优先继续改善这一区域，而不是把主要预算转回 `0.5x` 左右的结构打磨
+- 如果 low-cost family 持续不能给出满意结果，应优先尝试新的轻量 routed / shared+routed 变体，而不是直接跳回更重的 trunk/residual 结构
 - 不要让旧位置的主线故事替代当前 target 的新证据

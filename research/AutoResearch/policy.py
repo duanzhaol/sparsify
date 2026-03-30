@@ -7,7 +7,7 @@
 
 当前 policy 只有四种模式：
 - engineering_repair: 最近连续 crash，优先修最近失败实现
-- low_cost_exploration: 在低到中成本带补结构性前沿，而不是重复细扫旧 family
+- low_cost_exploration: 在 `<0.25x` 主战场补低成本前沿，而不是回到 `0.5x` 左右做局部打磨
 - mainline: 默认模式；当前 mainline 更偏向结构扩展，而不是默认继续旧 family 局部推进
 - architecture_probe: 主线稳定但连续多轮无改进时，允许做 1 个 matched architecture probe
 
@@ -38,6 +38,7 @@ MAX_INCUBATING_FAMILIES = 10
 MAX_INCUBATING_PROXY_ROUNDS = 3
 CRASH_STREAK_FOR_ENGINEERING_REPAIR = 2
 NO_IMPROVE_STREAK_FOR_ARCH_PROBE = 5
+PRIMARY_LOW_COST_THRESHOLD = 0.25
 
 # ---------------------------------------------------------------------------
 # Top-level validation
@@ -264,10 +265,11 @@ def build_policy_guidance(
             f"{recipe_label}：{recipe_line}",
             f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
             "本轮要求：",
-            "1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。",
-            "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
-            "3. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
-            "4. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。",
+            "1. 当前阶段重点是 `<0.25x total_cost` 主战场；`0.25x-0.35x` 只作辅助对照，`>0.4x` 不应继续主导预算。",
+            "2. 当前低成本 baseline 主要是 `shared_routed_expert_topk` 一线；本轮应优先回答“谁能在相近或更低成本下打败它”。",
+            "3. 允许新开 family，但只有在其成本路径明确落在 `<0.25x` 或至少不明显超过 `0.35x` 时才值得优先尝试。",
+            "4. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
+            "5. 不要让 `0.5x` 左右的成功点重新把注意力拉回中成本区；它们只保留作少量质量锚点。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -282,7 +284,7 @@ def build_policy_guidance(
             "本轮要求：",
             "1. 只允许做 1 个 matched architecture probe。",
             "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
-            "3. probe 应优先用于结构信息增量高的 family，例如 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`；不要优先再做 plain selector family 之间的重复对照。",
+            "3. probe 应优先用于 `<0.25x` 区域可能成立的轻量 family，例如更轻的 routed / shared+routed / expert 子库结构；不要优先回到 `0.5x` 左右的中成本 family 做重复对照。",
             "4. 这个 probe 只回答一个问题：该结构槽位本身值不值得继续。",
         ])
 
@@ -294,11 +296,11 @@ def build_policy_guidance(
         f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
         "本轮要求：",
         "1. 当前 mainline 配方首先是 reference anchor，不等于后续必须继续围绕它做局部推进。",
-        "2. 如果 plain selector family 与 K 轴已经提供足够局部信息，主线应转为结构扩展，而不是继续 recipe 打磨。",
+        "2. 当前默认主战场仍是 `<0.25x`；若本轮不直接服务这个区域，应明确说明它只是辅助对照。",
         "3. 优先保持归因清晰：先确认 total_cost 所在区间与结构槽位，再做少量 recipe 或结构参数调整。",
         "   注意：降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。K 过大推高 total_cost。",
         "4. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
-        "5. 当前优先的结构方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`；plain `EF=1` selector 只保留作 matched baseline 或 sanity。",
+        "5. 当前优先的结构方向是低成本 routed / shared+routed 轻量变体、极小 K、更小 expert 子库；`0.5x` 左右的 lowrank+expert+residual 结构只保留作少量质量对照。",
         "",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         "降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。",
@@ -308,7 +310,7 @@ def build_policy_guidance(
 def _low_cost_frontier_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    threshold_ratio: float = 0.5,
+    threshold_ratio: float = PRIMARY_LOW_COST_THRESHOLD,
 ) -> dict[str, Any]:
     """Summarize whether the <threshold_ratio total_cost region is underexplored."""
     low_cost_points: list[dict[str, Any]] = []
@@ -377,7 +379,7 @@ def _resolve_policy_anchor(state: Any, mode: str) -> dict[str, Any]:
         low_cost = _best_low_cost_frontier_entry(
             state.frontier,
             state.load_compatibility_registry(),
-            threshold_ratio=0.5,
+            threshold_ratio=PRIMARY_LOW_COST_THRESHOLD,
         )
         if low_cost is not None:
             config = frontier_entry_to_env_config(low_cost)
@@ -397,7 +399,7 @@ def _resolve_policy_anchor(state: Any, mode: str) -> dict[str, Any]:
 def _best_low_cost_frontier_entry(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    threshold_ratio: float = 0.5,
+    threshold_ratio: float = PRIMARY_LOW_COST_THRESHOLD,
 ) -> dict[str, Any] | None:
     """Return the best-FVU compatible frontier point inside the low-cost band."""
     current_profile = default_target_profile()
