@@ -1,0 +1,2028 @@
+{"command":"run","hypothesis":"最终重构公式为 x_hat = Σ_r β_r(x) u_r + Σ_i α_i(x) b_i，其中 U={u_r} 是静态 low-rank trunk 向量库，B={b_i} 是静态 residual 稀疏库；factorized residual scorer 只改变在线选择/系数计算链路，不改变 decoder 形式。导出到 LUTurbo/Lottable 推理链路时仍是“low-rank trunk 查表/加权和 + residual library lookup + 有限加权和”，静态库不随样本动态生成，因此 `lowrank_factorized_residual` 判定为扩展兼容；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍不得进入 frontier。唯一主假设：相对 r152 仅把 `ARCHITECTURE` 从 `lowrank_expert_residual` 切到 `lowrank_factorized_residual`，保持 `K=96`、`EXPANSION_FACTOR=1`、`TRUNK_RANK=16`、`FACTORIZED_HIDDEN_DIM=256`、优化器与其余训练配方不变，直接回答“去掉 expert 路由，改用低秩 factorized residual scorer”是否能在约 0.24x total_cost 形成一段比现有 0.24x-0.30x low-cost frontier 更有价值的新结构段。","summary":"建议以 r152 为 reference，只改 `ARCHITECTURE=lowrank_factorized_residual`。这轮不是继续细扫 `lowrank_expert_residual` 的局部参数，而是切到一个当前 target 上尚未验证的新兼容 family，用更低的约 0.24x total_cost 直接测试“factorized residual 是否比现有低成本 MoE-like 点更有效”。","change_type":"param_only","expected_win":"explore_unknown","family_name":"lowrank_factorized_residual","family_stage":"prototype","self_review":"这轮满足单变量原则：相对 r152 只改 `ARCHITECTURE`。之所以不继续沿 `lowrank_expert_residual` 下压，是因为 r151-r153 已经回答了这条 family 在当前 target 上的关键问题：`TRUNK_RANK=16` 与 `K=96` 可以形成新的 <0.5x 前沿点，但把 `ACTIVE_EXPERTS` 压到 1 会明显失败；继续在同一 family 上做小步局部扫参的信息增量开始下降。切到 `lowrank_factorized_residual` 更符合当前“结构扩展优先”的要求，也能把成本带直接拉到约 0.24x，补充一个当前 target 上完全缺失的低秩 factorized residual 结构对照。主要风险是该 family 没有 expert 子库，可能在质量上明显落后于当前 low-cost best；但如果它在 0.24x 左右仍能接近或优于现有 `shared_routed_expert_topk` 点，就会给出非常有价值的新 Pareto 段。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_factorized_residual"}],"touched_files":[],"notes_to_memory":["当前 target 上 `lowrank_factorized_residual` 尚无有效验证点；与已经多次试过的 hetero-MoE 分支不同，这轮是在 0.24x 左右补一个完全新的兼容结构槽位。","本地成本自检：在 `K=96, TRUNK_RANK=16, FACTORIZED_HIDDEN_DIM=256` 下，`lowrank_factorized_residual` 的 deployment_accesses=458752、combined_accesses=1015808、combined_ratio≈0.24，低于 1.5×h×n 硬约束，也正好落在当前低成本前沿的关键信息带。","r153 已给出明确负信号：`lowrank_expert_residual` 在 `ACTIVE_EXPERTS=1` 时 FVU=0.1398，说明当前 target 上双 expert 路由仍然重要；因此本轮更适合切换结构假设，而不是继续在同一 family 上做局部压缩。"],"next_hypotheses":["如果 `lowrank_factorized_residual` 在约 0.24x 下明显优于当前 0.24x-0.30x 前沿点，则下一轮保持该 family 不变，只改 `K` 或 `TRUNK_RANK`，继续描它的低成本 Pareto 段。","如果该点质量接近但未超过 `shared_routed_expert_topk`，则说明 factorized residual 有一定价值但不足以替代低成本 MoE-like 路线，后续可再决定是否只改 `FACTORIZED_HIDDEN_DIM` 追查瓶颈。","如果该点明显劣于现有低成本前沿，则可把当前 target 上“factorized residual without experts”这条方向的优先级下调，并把结构预算重新转回新的 expert/MoE-like 原型。"],"reference_round":152}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3d95-4df9-76a0-8938-4b4127e8bdff
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 154。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 154 策略模式：低开销探索
+原因：当前 <0.5x 区域最佳 FVU=0.0984，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前低成本参考 family：lowrank_expert_residual
+当前低成本参考配方：ARCHITECTURE=lowrank_expert_residual K=96 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前低成本完整配置（source=low_cost_frontier_best）：
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+本轮要求：
+1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。
+2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。
+3. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+4. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 11 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=153, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=3
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：结构扩展优先。
+  plain `EF=1` selector family 现在主要作为 cost anchor / matched baseline；除 sanity 或严格对照外，不应继续占用大部分搜索预算。
+  当前要回答的是“新结构是否值得继续”，而不是“旧结构再调一个点会怎样”。
+
+当前高优先级未充分验证方向：
+  1. `expert_topk` / 轻量 MoE-like 子库路由。
+     目标是在保持很小 ACTIVE_EXPERTS 的同时扩大总容量；只有在 router 足够轻、总激活路径不膨胀、且最终仍能导出为静态子库有限加权和时才值得优先尝试。
+  2. `lowrank + expert`。
+     先让低秩 trunk 吃掉平滑主干，再让 expert 子库处理剩余稀疏结构。
+  3. `lowrank + expert + residual`。
+     把 trunk、子库路由、残差稀疏修正拆开，验证三段式结构是否能形成新的 Pareto 段。
+  4. `two-stage residual expert`。
+     先 coarse library，再用局部 expert residual 做第二段修正。
+  5. 如果当前已实现 family 不覆盖这些结构，应优先做最小可运行原型，而不是回到 `topk / jumprelu / factorized_topk` 的局部扫点。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.2x (sel=0.14x + deploy=0.06x)  fvu=0.20378820598125458  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.22x (sel=0.16x + deploy=0.06x)  fvu=0.14638903737068176  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.24x (sel=0.18x + deploy=0.06x)  fvu=0.13971704244613647  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.25x (sel=0.16x + deploy=0.09x)  fvu=0.13472524285316467  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.28x (sel=0.2x + deploy=0.08x)  fvu=0.12815344333648682  arch=shared_routed_expert_topk  K=80 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.3x (sel=0.2x + deploy=0.09x)  fvu=0.12280605733394623  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+
+成本状态：
+  当前最佳 <0.5x 点 → lowrank_expert_residual (K=96, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.38x | 部署: 0.11x | FVU: 0.09837484359741211
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，3）：
+  r151 lowrank_expert_residual param_only -> keep fvu=0.09260296821594238 1191s | 最终重构公式为 x_hat = Σ_r β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i} + Σ_j γ...
+  r152 lowrank_expert_residual param_only -> keep fvu=0.09837484359741211 760s | 最终重构公式仍为 x_hat = Σ_r β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i} + Σ_j ...
+  r153 lowrank_expert_residual param_only -> discard fvu=0.13982398808002472 643s | 最终重构公式仍为 x_hat = Σ_r β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i} + Σ_j ...
+
+最近可用 reference_round 的完整配置：
+  r152 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r143 lowrank_expert_topk (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r148 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r142 shared_routed_factorized_expert_topk (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_routed_factorized_expert_topk
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+操作提示：
+  1. 当前额外提示只有一条：不要再把主要预算投入到现有 `lowrank_expert_*` 或 `shared_routed_expert_topk` 的局部扫参。若同一 family 连续多轮未形成新非支配点，下一轮优先切换到新的结构假设或新增最小可运行原型。
+  2. 当前最值得补的新结构信息是异构 MoE：`shared experts + routed experts`，并优先考虑“shared low-rank basis + expert-specific head / local top-k”这类 expert 内部 low-rank 方案。不要把同质 `expert_topk ACTIVE_EXPERTS>1` 的负信号外推为对这条线的否定；应尽量做 matched-cost 对照，直接回答它是否优于当前 frontier 的已有点。
+  3. 在已有有效结构上，也可以主动探索“进一步稀疏化 + 进一步低秩化 + 更小 K”的组合压缩，目标是在相近或更低 total_cost 下尽量保持精度。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- plain `EF=1` selector family 已经提供了当前 target 的一批低到中成本 anchor；它们现在更适合作为 cost baseline / matched baseline，而不是唯一主线
+- `topk + adam` 目前仍是当前 target 上最强的已验证主线，但这不意味着后续应继续把大部分预算投在 `topk / jumprelu / factorized_topk` 的局部扫点上
+- `expert_topk` 已显示出“更低 total_cost、但更高 FVU”的独立前沿价值，说明多子库 / MoE-like 方向值得继续扩展
+- 接下来优先验证的结构槽位应是：`expert/MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、以及 `two-stage residual expert`
+
+一句话：当前 target 已经有足够多的 plain-selector anchor，后续默认应转向结构扩展，而不是继续把 EF=1 old-family 邻域扫描当成主要工作。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+| `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先看当前代码里还有哪些已实现、未充分验证、且符合 LUTurbo 兼容约束的结构族，优先找能回答“hetero MoE / shared+routed / expert 内低秩”这个缺口的最小可运行候选。
+exec
+/bin/bash -lc 'rg -n "valid_archs|architecture ==|class .*SparseCoder|shared_.*expert|expert_residual|factorized_expert|two_stage|lowrank_" sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+sparsify/config.py:8:class SparseCoderConfig(Serializable):
+sparsify/config.py:215:        valid_archs = (
+sparsify/config.py:223:            "lowrank_residual_vq",
+sparsify/config.py:228:            "shared_routed_expert_topk",
+sparsify/config.py:229:            "factorized_expert_topk",
+sparsify/config.py:230:            "shared_routed_factorized_expert_topk",
+sparsify/config.py:231:            "shared_routed_factorized_expert_residual",
+sparsify/config.py:232:            "shared_lowrank_routed_expert_topk",
+sparsify/config.py:233:            "shared_lowrank_two_stage_residual_expert",
+sparsify/config.py:234:            "shared_lowrank_routed_expert_residual",
+sparsify/config.py:235:            "lowrank_expert_topk",
+sparsify/config.py:236:            "lowrank_expert_residual",
+sparsify/config.py:237:            "two_stage_residual_expert",
+sparsify/config.py:240:            "lowrank_residual",
+sparsify/config.py:241:            "lowrank_two_stage_residual",
+sparsify/config.py:242:            "routed_lowrank_two_stage_residual",
+sparsify/config.py:243:            "bucketed_lowrank_residual",
+sparsify/config.py:244:            "whitened_lowrank_residual",
+sparsify/config.py:245:            "lowrank_adaptive_budget_residual",
+sparsify/config.py:246:            "lowrank_gated_residual",
+sparsify/config.py:247:            "lowrank_jumprelu_residual",
+sparsify/config.py:248:            "lowrank_multi_branch_residual",
+sparsify/config.py:249:            "lowrank_factorized_residual",
+sparsify/config.py:250:            "lowrank_soft_codebook_residual",
+sparsify/config.py:251:            "lowrank_gated_soft_codebook_residual",
+sparsify/config.py:252:            "lowrank_grouped_soft_codebook_residual",
+sparsify/config.py:253:            "lowrank_two_stage_soft_codebook_residual",
+sparsify/config.py:254:            "bucketed_lowrank_two_stage_soft_codebook_residual",
+sparsify/config.py:255:            "whitened_lowrank_two_stage_soft_codebook_residual",
+sparsify/config.py:256:            "lowrank_asymmetric_two_stage_soft_codebook_residual",
+sparsify/config.py:257:            "routed_lowrank_asymmetric_two_stage_soft_codebook_residual",
+sparsify/config.py:258:            "routed_lowrank_two_stage_soft_codebook_residual",
+sparsify/config.py:259:            "whitened_lowrank_gated_residual",
+sparsify/config.py:260:            "lowrank_grouped_residual",
+sparsify/config.py:262:            "two_stage_residual",
+sparsify/config.py:265:        if self.sae.architecture not in valid_archs:
+sparsify/config.py:268:                f"Must be one of {valid_archs}"
+sparsify/sparse_coder.py:38:class SparseCoder(nn.Module):
+sparsify/sparse_coder.py:401:    if architecture == "topk":
+sparsify/sparse_coder.py:403:    if architecture == "batch_topk":
+sparsify/sparse_coder.py:405:    if architecture == "adaptive_budget_topk":
+sparsify/sparse_coder.py:407:    if architecture == "bucketed_topk":
+sparsify/sparse_coder.py:409:    if architecture == "codebook_topk":
+sparsify/sparse_coder.py:411:    if architecture == "residual_vq":
+sparsify/sparse_coder.py:413:    if architecture == "two_code_residual_vq":
+sparsify/sparse_coder.py:415:    if architecture == "lowrank_residual_vq":
+sparsify/sparse_coder.py:417:    if architecture == "whitened_topk":
+sparsify/sparse_coder.py:419:    if architecture == "jumprelu":
+sparsify/sparse_coder.py:421:    if architecture == "gated":
+sparsify/sparse_coder.py:423:    if architecture == "routed":
+sparsify/sparse_coder.py:425:    if architecture == "expert_topk":
+sparsify/sparse_coder.py:427:    if architecture == "shared_routed_expert_topk":
+sparsify/sparse_coder.py:429:    if architecture == "factorized_expert_topk":
+sparsify/sparse_coder.py:431:    if architecture == "shared_routed_factorized_expert_topk":
+sparsify/sparse_coder.py:433:    if architecture == "shared_routed_factorized_expert_residual":
+sparsify/sparse_coder.py:435:    if architecture == "shared_lowrank_routed_expert_topk":
+sparsify/sparse_coder.py:437:    if architecture == "shared_lowrank_two_stage_residual_expert":
+sparsify/sparse_coder.py:439:    if architecture == "shared_lowrank_routed_expert_residual":
+sparsify/sparse_coder.py:441:    if architecture == "lowrank_expert_topk":
+sparsify/sparse_coder.py:443:    if architecture == "lowrank_expert_residual":
+sparsify/sparse_coder.py:445:    if architecture == "two_stage_residual_expert":
+sparsify/sparse_coder.py:447:    if architecture == "group_topk":
+sparsify/sparse_coder.py:449:    if architecture == "factorized_topk":
+sparsify/sparse_coder.py:451:    if architecture == "lowrank_residual":
+sparsify/sparse_coder.py:453:    if architecture == "lowrank_two_stage_residual":
+sparsify/sparse_coder.py:455:    if architecture == "routed_lowrank_two_stage_residual":
+sparsify/sparse_coder.py:457:    if architecture == "bucketed_lowrank_residual":
+sparsify/sparse_coder.py:459:    if architecture == "whitened_lowrank_residual":
+sparsify/sparse_coder.py:461:    if architecture == "lowrank_adaptive_budget_residual":
+sparsify/sparse_coder.py:463:    if architecture == "lowrank_gated_residual":
+sparsify/sparse_coder.py:465:    if architecture == "lowrank_jumprelu_residual":
+sparsify/sparse_coder.py:467:    if architecture == "lowrank_multi_branch_residual":
+sparsify/sparse_coder.py:469:    if architecture == "lowrank_factorized_residual":
+sparsify/sparse_coder.py:471:    if architecture == "lowrank_soft_codebook_residual":
+sparsify/sparse_coder.py:473:    if architecture == "lowrank_gated_soft_codebook_residual":
+sparsify/sparse_coder.py:475:    if architecture == "lowrank_grouped_soft_codebook_residual":
+sparsify/sparse_coder.py:477:    if architecture == "lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:479:    if architecture == "bucketed_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:481:    if architecture == "whitened_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:483:    if architecture == "lowrank_asymmetric_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:485:    if architecture == "routed_lowrank_asymmetric_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:487:    if architecture == "routed_lowrank_two_stage_soft_codebook_residual":
+sparsify/sparse_coder.py:489:    if architecture == "whitened_lowrank_gated_residual":
+sparsify/sparse_coder.py:491:    if architecture == "lowrank_grouped_residual":
+sparsify/sparse_coder.py:493:    if architecture == "two_stage_residual":
+sparsify/sparse_coder.py:495:    if architecture == "multi_branch_gated":
+sparsify/sparse_coder.py:504:class WhitenedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:553:class AdaptiveBudgetTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:600:class BatchTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:626:class BucketedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:691:class CodebookTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:804:class ResidualVQSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:915:class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
+sparsify/sparse_coder.py:1027:class JumpReLUSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1065:class GatedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1098:class RoutedSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1206:class ExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1309:class SharedRoutedExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1330:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:1331:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1337:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:1341:                "shared_routed_expert_topk requires "
+sparsify/sparse_coder.py:1342:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:1343:                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:1353:                self.num_shared_experts,
+sparsify/sparse_coder.py:1362:                self.num_shared_experts,
+sparsify/sparse_coder.py:1414:                "shared_expert_encoder",
+sparsify/sparse_coder.py:1415:                self.num_shared_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:1416:                f"shared={self.num_shared_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1482:class FactorizedExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1506:                "factorized_expert_topk requires k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:1602:class SharedRoutedFactorizedExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1623:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:1624:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1630:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:1634:                "shared_routed_factorized_expert_topk requires "
+sparsify/sparse_coder.py:1635:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:1636:                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:1654:                self.num_shared_experts,
+sparsify/sparse_coder.py:1663:                self.num_shared_experts,
+sparsify/sparse_coder.py:1721:                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:1722:                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1789:class SharedLowRankRoutedExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1810:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:1811:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:1817:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:1821:                "shared_lowrank_routed_expert_topk requires "
+sparsify/sparse_coder.py:1822:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:1823:                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:1841:                self.num_shared_experts,
+sparsify/sparse_coder.py:1850:                self.num_shared_experts,
+sparsify/sparse_coder.py:1905:                "shared_lowrank_head",
+sparsify/sparse_coder.py:1906:                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:1907:                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1974:class SharedRoutedFactorizedExpertResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:1995:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:1996:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:2011:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:2015:                "shared_routed_factorized_expert_residual requires "
+sparsify/sparse_coder.py:2016:                "stage1_k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:2018:                f"shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:2036:                self.num_shared_experts,
+sparsify/sparse_coder.py:2045:                self.num_shared_experts,
+sparsify/sparse_coder.py:2119:                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:2120:                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2285:class SharedLowRankTwoStageResidualExpertSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:2306:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:2307:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:2309:        self.num_latents = self.shared_num_latents + self.expert_num_latents
+sparsify/sparse_coder.py:2319:                "shared_lowrank_two_stage_residual_expert requires "
+sparsify/sparse_coder.py:2320:                "stage1_k <= shared_experts * latents_per_expert, "
+sparsify/sparse_coder.py:2322:                f"shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:2327:                "shared_lowrank_two_stage_residual_expert requires "
+sparsify/sparse_coder.py:2344:                self.num_shared_experts,
+sparsify/sparse_coder.py:2353:                self.num_shared_experts,
+sparsify/sparse_coder.py:2396:            decoder_init = torch.cat((shared_decoder, expert_decoder), dim=0)
+sparsify/sparse_coder.py:2412:                "shared_lowrank_head",
+sparsify/sparse_coder.py:2413:                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:2414:                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2559:class SharedLowRankRoutedExpertResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:2580:        self.num_shared_experts = 1
+sparsify/sparse_coder.py:2581:        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+sparsify/sparse_coder.py:2596:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:2600:                "shared_lowrank_routed_expert_residual requires "
+sparsify/sparse_coder.py:2601:                "stage1_k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:2603:                f"shared_experts={self.num_shared_experts}, "
+sparsify/sparse_coder.py:2621:                self.num_shared_experts,
+sparsify/sparse_coder.py:2630:                self.num_shared_experts,
+sparsify/sparse_coder.py:2700:                "shared_lowrank_head",
+sparsify/sparse_coder.py:2701:                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:2702:                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2867:class LowRankExpertTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:2891:                "lowrank_expert_topk requires k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3048:class LowRankExpertResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3082:                "lowrank_expert_residual requires stage1_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3295:class TwoStageResidualExpertSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3329:                "two_stage_residual_expert requires stage2_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3492:class GroupTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3525:class FactorizedTopKSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3575:class LowRankResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:3678:class LowRankAdaptiveBudgetResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3774:class LowRankTwoStageResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:3901:class RoutedLowRankTwoStageResidualSparseCoder(LowRankTwoStageResidualSparseCoder):
+sparsify/sparse_coder.py:4067:class BucketedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:4187:class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:4289:class LowRankMultiBranchResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:4401:class LowRankFactorizedResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:4515:class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:4612:class LowRankGroupedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:4621:                "lowrank_grouped_soft_codebook_residual requires num_latents "
+sparsify/sparse_coder.py:4629:                "lowrank_grouped_soft_codebook_residual requires k <= number of "
+sparsify/sparse_coder.py:4702:class LowRankGatedSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:4799:class LowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:4999:class BucketedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:5203:class WhitenedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:5343:class LowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:5365:class RoutedLowRankTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:5548:class RoutedLowRankAsymmetricTwoStageSoftCodebookResidualSparseCoder(
+sparsify/sparse_coder.py:5567:class LowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:5652:class LowRankJumpReLUResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:5739:class WhitenedLowRankResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:5837:class WhitenedLowRankGatedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:5948:class LowRankGroupedResidualSparseCoder(LowRankResidualSparseCoder):
+sparsify/sparse_coder.py:5957:                "lowrank_grouped_residual requires num_latents divisible by "
+sparsify/sparse_coder.py:5965:                "lowrank_grouped_residual requires k <= number of groups, "
+sparsify/sparse_coder.py:6029:class TwoStageResidualSparseCoder(SparseCoder):
+sparsify/sparse_coder.py:6141:class MultiBranchGatedSparseCoder(SparseCoder):
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/timeline.jsonl
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+for r in [147,148,149,150,151,152,153]:
+    p=Path(f'research/history/round_summaries/round_{r:04d}.json')
+    if not p.exists():
+        continue
+    obj=json.loads(p.read_text())
+    print(r, obj.get('family_name'), obj.get('action',{}).get('env_overrides'), obj.get('result',{}).get('decision'), obj.get('result',{}).get('val_fvu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+147 shared_lowrank_routed_expert_residual [{'key': 'ARCHITECTURE', 'value': 'shared_lowrank_routed_expert_residual'}] discard 0.10375456511974335
+148 two_stage_residual_expert [{'key': 'ARCHITECTURE', 'value': 'two_stage_residual_expert'}] discard 0.11400698870420456
+149 factorized_expert_topk [{'key': 'ARCHITECTURE', 'value': 'factorized_expert_topk'}] discard 0.24498677253723145
+150 shared_routed_factorized_expert_residual [{'key': 'ARCHITECTURE', 'value': 'shared_routed_factorized_expert_residual'}] discard 0.18521109223365784
+151 lowrank_expert_residual [{'key': 'TRUNK_RANK', 'value': '16'}] keep 0.09260296821594238
+152 lowrank_expert_residual [{'key': 'K', 'value': '96'}] keep 0.09837484359741211
+153 lowrank_expert_residual [{'key': 'ACTIVE_EXPERTS', 'value': '1'}] discard 0.13982398808002472
+
+codex
+我补查 `shared_lowrank_routed_expert_topk` 的历史和成本。这个 family 正好对应当前提示里最想补的信息槽位：`shared low-rank basis + expert-specific head / local top-k`，而且还没被最近这轮低成本前沿直接回答。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+hits=[]
+for p in Path('research/history/round_summaries').glob('round_*.json'):
+    obj=json.loads(p.read_text())
+    if obj.get('family_name')=='shared_lowrank_routed_expert_topk':
+        cfg=obj.get('resolved_candidate_env_config') or {}
+        hits.append((obj['round'], cfg.get('K'), cfg.get('TRUNK_RANK'), cfg.get('FACTORIZED_HIDDEN_DIM'), cfg.get('NUM_EXPERTS'), cfg.get('LATENTS_PER_EXPERT'), cfg.get('ACTIVE_EXPERTS'), obj.get('result',{}).get('decision'), obj.get('result',{}).get('val_fvu')))
+for row in sorted(hits):
+    print(row)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+(129, '128', '40', '256', '64', '320', '2', 'discard', '0.1219072937965393')
+(130, '128', '40', '256', '64', '320', '1', 'discard', '0.2266390025615692')
+(134, '128', '40', '192', '64', '320', '2', 'discard', '0.12481768429279327')
+(135, '128', '40', '128', '64', '320', '2', 'discard', '0.13039079308509827')
+(141, '112', '40', '256', '64', '224', '2', 'discard', '0.14034616947174072')
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+res = compute_selection_cost(
+    'shared_lowrank_routed_expert_topk',
+    k=96,
+    ef=1,
+    extra_config={
+        'trunk_rank': 16,
+        'stage1_ratio': 0.25,
+        'num_experts': 64,
+        'active_experts': 2,
+        'latents_per_expert': 224,
+        'factorized_hidden_dim': 256,
+    }
+)
+print(res)
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.override_registry import validate_env_overrides
+errs = validate_env_overrides({
+    'ARCHITECTURE':'shared_lowrank_routed_expert_topk',
+    'EXPANSION_FACTOR':'1',
+    'K':'96',
+    'TRUNK_RANK':'16',
+    'FACTORIZED_HIDDEN_DIM':'256',
+    'NUM_EXPERTS':'64',
+    'ACTIVE_EXPERTS':'2',
+    'LATENTS_PER_EXPERT':'224',
+    'STAGE1_RATIO':'0.25',
+})
+print(errs)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+['TRUNK_RANK', 'STAGE1_RATIO']
+
+ succeeded in 4483ms:
+{'total_accesses': 794624, 'original_matmul_accesses': 4194304, 'ratio': 0.19, 'budget_ratio': 0.13, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 16384, 'shape': '256x64'}, {'name': 'shared_lowrank_head', 'accesses': 57344, 'shape': 'shared=1×256x224'}, {'name': 'active_routed_expert_encoder', 'accesses': 458752, 'shape': 'active=2×1024x224'}], 'deployment_accesses': 393216, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 393216, 'shape': 'K=96×n=4096'}], 'combined_accesses': 1187840, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+
+codex
+`shared_lowrank_routed_expert_topk` 的实现是有的，但当前 allowlist 会把 `TRUNK_RANK` 和 `STAGE1_RATIO` 判成不合法，这意味着直接从 r152 做单参数架构切换会静默卡在参数链路上。我先查一下 override registry 里现成允许的结构族，避免提一个实际上过不了 launcher 的候选。
+exec
+/bin/bash -lc 'rg -n "shared_lowrank_routed_expert_topk|shared_lowrank_two_stage_residual_expert|shared_routed_factorized_expert_topk|shared_routed_factorized_expert_residual|shared_lowrank_routed_expert_residual|factorized_expert_topk|two_stage_residual_expert|lowrank_expert_residual" research/AutoResearch/override_registry.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+56:    "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+57:    "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
+58:    "shared_lowrank_routed_expert_topk": _SHARED_LOWRANK_ROUTED_EXPERT_KEYS,
+59:    "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
+62:    "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+63:    "two_stage_residual_expert": {
+
+exec
+/bin/bash -lc "sed -n '1,260p' research/AutoResearch/override_registry.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+"""Override validation and baseline resolution for the autoresearch loop."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .types import BASE_ENV_DEFAULTS
+
+
+COMMON_OVERRIDE_KEYS = set(BASE_ENV_DEFAULTS.keys()) | {
+    "NUM_GROUPS",
+    "ACTIVE_GROUPS",
+    "ORTHO_LAMBDA",
+    "RESIDUAL_FROM",
+    "MATRYOSHKA_KS",
+    "MATRYOSHKA_WEIGHTS",
+}
+
+_LOWRANK_KEYS = {"TRUNK_RANK"}
+_TWOSTAGE_KEYS = {"TRUNK_RANK", "STAGE1_RATIO"}
+_SOFT_CODEBOOK_TWOSTAGE_KEYS = {"TRUNK_RANK", "NUM_CODES", "STAGE1_RATIO"}
+_EXPERT_KEYS = {"NUM_EXPERTS", "ACTIVE_EXPERTS", "LATENTS_PER_EXPERT"}
+_FACTORIZED_EXPERT_KEYS = {
+    "FACTORIZED_HIDDEN_DIM",
+    "NUM_EXPERTS",
+    "ACTIVE_EXPERTS",
+    "LATENTS_PER_EXPERT",
+}
+_FACTORIZED_EXPERT_RESIDUAL_KEYS = _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
+_SHARED_LOWRANK_ROUTED_EXPERT_KEYS = _FACTORIZED_EXPERT_KEYS
+_SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS = (
+    _FACTORIZED_EXPERT_KEYS | {"STAGE1_RATIO"}
+)
+_LOWRANK_EXPERT_KEYS = {"TRUNK_RANK", "NUM_EXPERTS", "ACTIVE_EXPERTS", "LATENTS_PER_EXPERT"}
+_LOWRANK_EXPERT_RESIDUAL_KEYS = {
+    "TRUNK_RANK",
+    "STAGE1_RATIO",
+    "NUM_EXPERTS",
+    "ACTIVE_EXPERTS",
+    "LATENTS_PER_EXPERT",
+}
+
+ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
+    "topk": set(),
+    "jumprelu": {
+        "JUMPRELU_INIT_THRESHOLD",
+        "JUMPRELU_BANDWIDTH",
+    },
+    "gated": {
+        "GATED_TEMPERATURE",
+        "GATED_INIT_LOGIT",
+    },
+    "expert_topk": _EXPERT_KEYS,
+    "shared_routed_expert_topk": _EXPERT_KEYS,
+    "factorized_topk": {"FACTORIZED_HIDDEN_DIM"},
+    "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+    "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
+    "shared_lowrank_routed_expert_topk": _SHARED_LOWRANK_ROUTED_EXPERT_KEYS,
+    "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
+    "lowrank_residual": _LOWRANK_KEYS,
+    "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+    "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+    "two_stage_residual_expert": {
+        "STAGE1_RATIO",
+        "NUM_EXPERTS",
+        "ACTIVE_EXPERTS",
+        "LATENTS_PER_EXPERT",
+    },
+    "lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_jumprelu_residual": _LOWRANK_KEYS,
+    "lowrank_grouped_residual": _LOWRANK_KEYS,
+    "lowrank_adaptive_budget_residual": _LOWRANK_KEYS,
+    "bucketed_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_residual": _LOWRANK_KEYS,
+    "whitened_lowrank_gated_residual": _LOWRANK_KEYS,
+    "lowrank_multi_branch_residual": _LOWRANK_KEYS,
+    "lowrank_factorized_residual": {"TRUNK_RANK", "FACTORIZED_HIDDEN_DIM"},
+    "lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_residual": _TWOSTAGE_KEYS,
+    "lowrank_residual_vq": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_grouped_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_gated_soft_codebook_residual": {"TRUNK_RANK", "NUM_CODES"},
+    "lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "bucketed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "whitened_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+    "routed_lowrank_asymmetric_two_stage_soft_codebook_residual": _SOFT_CODEBOOK_TWOSTAGE_KEYS,
+}
+
+STRUCTURAL_OVERRIDE_KEYS = {
+    "ARCHITECTURE",
+    "K",
+    "EXPANSION_FACTOR",
+    "NUM_GROUPS",
+    "ACTIVE_GROUPS",
+    "MATRYOSHKA_KS",
+    "RESIDUAL_FROM",
+    "TRUNK_RANK",
+    "NUM_CODES",
+    "STAGE1_RATIO",
+    "FACTORIZED_HIDDEN_DIM",
+    "NUM_EXPERTS",
+    "ACTIVE_EXPERTS",
+    "LATENTS_PER_EXPERT",
+}
+
+DYNAMIC_OVERRIDE_KEYS = {
+    "LR",
+    "AUXK_ALPHA",
+    "JUMPRELU_INIT_THRESHOLD",
+    "JUMPRELU_BANDWIDTH",
+    "GATED_TEMPERATURE",
+    "GATED_INIT_LOGIT",
+    "ORTHO_LAMBDA",
+    "MATRYOSHKA_WEIGHTS",
+}
+
+CONFIG_JSON_TO_ENV = {
+    "architecture": "ARCHITECTURE",
+    "expansion_factor": "EXPANSION_FACTOR",
+    "k": "K",
+    "optimizer": "OPTIMIZER",
+    "lr": "LR",
+    "hookpoints": "HOOKPOINTS",
+    "batch_size": "BATCH_SIZE",
+    "grad_acc_steps": "GRAD_ACC_STEPS",
+    "micro_acc_steps": "MICRO_ACC_STEPS",
+    "auxk_alpha": "AUXK_ALPHA",
+    "dead_feature_threshold": "DEAD_FEATURE_THRESHOLD",
+    "use_hadamard": "USE_HADAMARD",
+    "jumprelu_init_threshold": "JUMPRELU_INIT_THRESHOLD",
+    "jumprelu_bandwidth": "JUMPRELU_BANDWIDTH",
+    "gated_temperature": "GATED_TEMPERATURE",
+    "gated_init_logit": "GATED_INIT_LOGIT",
+    "num_groups": "NUM_GROUPS",
+    "active_groups": "ACTIVE_GROUPS",
+    "ortho_lambda": "ORTHO_LAMBDA",
+    "residual_from": "RESIDUAL_FROM",
+    "matryoshka_ks": "MATRYOSHKA_KS",
+    "matryoshka_weights": "MATRYOSHKA_WEIGHTS",
+    "trunk_rank": "TRUNK_RANK",
+    "num_codes": "NUM_CODES",
+    "stage1_ratio": "STAGE1_RATIO",
+    "factorized_hidden_dim": "FACTORIZED_HIDDEN_DIM",
+    "num_experts": "NUM_EXPERTS",
+    "active_experts": "ACTIVE_EXPERTS",
+    "latents_per_expert": "LATENTS_PER_EXPERT",
+}
+
+
+def _iter_overrides(overrides: list | dict) -> list[tuple[str, str]]:
+    if isinstance(overrides, dict):
+        return [(str(key), str(value)) for key, value in overrides.items()]
+    pairs: list[tuple[str, str]] = []
+    for item in overrides:
+        key = item.get("key")
+        if not key:
+            continue
+        pairs.append((str(key), str(item.get("value", ""))))
+    return pairs
+
+
+def resolve_architecture_from_overrides(overrides: list | dict, fallback: str = "topk") -> str:
+    for key, value in _iter_overrides(overrides):
+        if key == "ARCHITECTURE" and value:
+            return value.lower()
+    return fallback.lower()
+
+
+def allowed_override_keys_for_architecture(architecture: str) -> set[str]:
+    return COMMON_OVERRIDE_KEYS | ARCHITECTURE_OVERRIDE_KEYS.get(architecture.lower(), set())
+
+
+def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+    architecture = resolve_architecture_from_overrides(overrides, fallback=fallback_architecture)
+    allowed = allowed_override_keys_for_architecture(architecture)
+    rejected: list[str] = []
+    for key, _ in _iter_overrides(overrides):
+        if key not in allowed:
+            rejected.append(key)
+    return rejected
+
+
+def config_from_overrides(overrides: list | dict, base_config: dict[str, str] | None = None) -> dict[str, str]:
+    config = dict(base_config or BASE_ENV_DEFAULTS)
+    for key, value in _iter_overrides(overrides):
+        config[key] = value
+    return config
+
+
+def env_config_from_runtime_config(config_json: dict[str, Any]) -> dict[str, str]:
+    config = dict(BASE_ENV_DEFAULTS)
+    for key, env_key in CONFIG_JSON_TO_ENV.items():
+        if key not in config_json:
+            continue
+        value = config_json[key]
+        if value is None:
+            continue
+        if env_key == "USE_HADAMARD":
+            config[env_key] = "1" if bool(value) else "0"
+        elif isinstance(value, list):
+            config[env_key] = ",".join(str(v) for v in value)
+        else:
+            config[env_key] = str(value)
+    return config
+
+
+def changed_override_keys(overrides: list | dict, baseline_config: dict[str, str]) -> set[str]:
+    changed: set[str] = set()
+    for key, value in _iter_overrides(overrides):
+        if value != str(baseline_config.get(key, "")):
+            changed.add(key)
+    return changed
+
+
+def determine_parameter_behavior(change_type: str, changed_keys: set[str]) -> str:
+    if change_type == "edit_perf_code":
+        return "implementation"
+    if changed_keys & STRUCTURAL_OVERRIDE_KEYS:
+        return "structural"
+    if changed_keys & DYNAMIC_OVERRIDE_KEYS:
+        return "dynamic"
+    return "default"
+
+codex
+我确认一下策略层到底是校验“仅本轮 override 键”，还是会校验 patch 后的完整候选配置。这个边界会直接决定能不能用已有 reference 做一次纯 `ARCHITECTURE` 切换。
+exec
+/bin/bash -lc "rg -n \"Disallowed env override keys|validate_env_overrides\\(|allowed_override_keys_for_architecture|rejected\" research/AutoResearch -g '"'!research/history/**'"'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/AutoResearch/config_resolution.py:18:    allowed_override_keys_for_architecture,
+research/AutoResearch/config_resolution.py:147:    allowed_keys = allowed_override_keys_for_architecture(config["ARCHITECTURE"])
+research/AutoResearch/override_registry.py:172:def allowed_override_keys_for_architecture(architecture: str) -> set[str]:
+research/AutoResearch/override_registry.py:176:def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+research/AutoResearch/override_registry.py:178:    allowed = allowed_override_keys_for_architecture(architecture)
+research/AutoResearch/override_registry.py:179:    rejected: list[str] = []
+research/AutoResearch/override_registry.py:182:            rejected.append(key)
+research/AutoResearch/override_registry.py:183:    return rejected
+research/AutoResearch/prompt.py:98:- 如果新增了 env key / tunable 参数，返回前至少完成本地接线自检：新 key 已进入 `override_registry` allowlist、`config_resolution` / `runner` / 必要的持久化路径已识别、`scripts/autoresearch_test.sh` 已透传；至少做一次本地校验，确认该 key 不会在训练启动前被判为 `Disallowed env override keys`
+research/AutoResearch/loop.py:78:    "Disallowed env override keys",
+research/AutoResearch/loop.py:223:        print(f"Round {round_id}: policy rejected: {rejection}")
+research/AutoResearch/runner.py:552:    rejected = validate_env_overrides(
+research/AutoResearch/runner.py:559:    if rejected:
+research/AutoResearch/runner.py:560:        raise RuntimeError(f"Disallowed env override keys: {', '.join(rejected)}")
+
+exec
+/bin/bash -lc "sed -n '400,470p' research/AutoResearch/config_resolution.py" in /root/sparsify-ascend
+exec
+/bin/bash -lc "sed -n '520,620p' research/AutoResearch/policy.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        if not isinstance(summary, dict):
+            continue
+        summary_family = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or ""
+        ).lower()
+        if summary_family != target:
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is not None and profile_matches(cfg, current_profile):
+            return cfg
+    return None
+
+
+def resolve_reference_env_config(
+    action: Action,
+    state: Any,
+) -> tuple[dict[str, str], str]:
+    current_profile = default_target_profile()
+    if action.reference_round is not None:
+        explicit = structured_config_from_round_summary(state.load_round_summary(action.reference_round))
+        if explicit is not None and profile_matches(explicit, current_profile):
+            return explicit, f"reference_round:r{action.reference_round}"
+
+    mainline = resolve_mainline_snapshot(state)
+    action_family = (action.family_name or "").lower()
+    mainline_family = mainline["family_name"]
+
+    if action_family == mainline_family or not action_family:
+        return dict(mainline["config"]), f"mainline:{mainline['source']}"
+
+    recent_family_cfg = latest_successful_family_config(state, action_family)
+    if recent_family_cfg is not None:
+        return recent_family_cfg, f"family_recent:{action_family}"
+
+    registry = state.load_compatibility_registry()
+    family_best = best_frontier_entry(
+        state.frontier,
+        family_name=action_family,
+        registry=registry,
+        prefer_feasible=True,
+    )
+    if family_best is not None:
+        return frontier_entry_to_env_config(family_best), f"family_frontier:{action_family}"
+
+    return dict(mainline["config"]), f"mainline:{mainline['source']}"
+
+
+def resolve_action_configs(
+    action: Action,
+    state: Any,
+) -> ResolvedActionConfig:
+    reference_env_config, source = resolve_reference_env_config(action, state)
+    candidate_env_config = config_from_overrides(
+        action.env_overrides,
+        base_config=reference_env_config,
+    )
+    changed_keys = changed_keys_from_candidate(reference_env_config, candidate_env_config)
+    return ResolvedActionConfig(
+        reference_env_config=reference_env_config,
+        candidate_env_config=candidate_env_config,
+        changed_keys=changed_keys,
+        reference_source=source,
+    )
+
+ succeeded in 0ms:
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_param_only_single_variable(
+    action: Action,
+    state: Any,  # StateManager
+) -> tuple[bool, str]:
+    """只对 param_only 做单 env key 校验。"""
+    if action.change_type != "param_only":
+        return True, ""
+    if action.reference_round is None:
+        if _has_current_target_reference(state):
+            return False, "param_only 必须显式提供 reference_round，明确说明相对哪一轮的完整配置只改一个 env 参数"
+        resolved = resolve_action_configs(action, state)
+        changed_keys = resolved.changed_keys
+        if len(changed_keys) > 1:
+            return False, (
+                "当前 target 尚无 reference_round，冷启动 param_only 只能相对 target_profile_baseline 改 1 个 env 参数；"
+                f"当前同时改了 {', '.join(changed_keys)}"
+            )
+        if not changed_keys:
+            return False, (
+                "当前 target 尚无 reference_round；冷启动 param_only 仍必须相对 target_profile_baseline 真正改动 1 个 env 参数"
+            )
+        return True, ""
+    explicit_summary = state.load_round_summary(action.reference_round)
+    invalid_reason = summary_invalid_reason(explicit_summary)
+    if invalid_reason is not None:
+        return False, (
+            f"reference_round=r{action.reference_round} 已被标记为无效，"
+            f"不能作为单变量锚点。原因：{invalid_reason}"
+        )
+
+    resolved = resolve_action_configs(action, state)
+    changed_keys = resolved.changed_keys
+
+    if len(changed_keys) > 1:
+        return False, (
+            "param_only 一次只能改一个 env 参数；"
+            f"当前同时改了 {', '.join(changed_keys)}"
+        )
+    if not changed_keys:
+        return False, (
+            "param_only 必须相对 reference_round 真的改动 1 个 env 参数；"
+            f"当前 reference_source={resolved.reference_source}，未检测到任何变化"
+        )
+
+    return True, ""
+
+
+def _has_current_target_reference(state: Any) -> bool:
+    current_profile = default_target_profile()
+    for summary in reversed(state.recent_round_summaries(limit=50)):
+        if not isinstance(summary, dict):
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is not None and profile_matches(cfg, current_profile):
+            return True
+    return False
+
+
+def _check_total_cost_feasibility(
+    action: Action,
+    state: Any,  # StateManager
+) -> tuple[bool, str]:
+    """拦截总成本 (encoder + deployment) 超过 1.5×h×n 的配置。
+
+    对 edit_sae_code 类型的 action 跳过 pre-check：代码修改可能正是为了降低成本，
+    用修改前的实现去估算成本会错误地拦截合理的降成本提案。
+    成本会在代码修改 + sanity check 之后重新评估。
+    """
+    if action.change_type == "edit_sae_code":
+        return True, ""
+
+    cfg = resolve_action_configs(action, state).candidate_env_config
+    arch = cfg.get("ARCHITECTURE", "topk").lower()
+    k = int(cfg.get("K", 128))
+    ef = int(cfg.get("EXPANSION_FACTOR", 12))
+    target_profile = resolve_target_profile(cfg)
+
+    extra_config: dict[str, Any] = {}
+    for env_key, cfg_key in [
+        ("TRUNK_RANK", "trunk_rank"),
+        ("NUM_CODES", "num_codes"),
+        ("STAGE1_RATIO", "stage1_ratio"),
+        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
+        ("NUM_EXPERTS", "num_experts"),
+        ("ACTIVE_EXPERTS", "active_experts"),
+        ("LATENTS_PER_EXPERT", "latents_per_expert"),
+    ]:
+        val = cfg.get(env_key)
+        if val is not None and val != "":
+            try:
+                extra_config[cfg_key] = float(val) if "." in str(val) else int(val)
+            except (ValueError, TypeError):
+                pass
+
+
+exec
+/bin/bash -lc "sed -n '540,568p' research/AutoResearch/runner.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    *,
+    target_max_tokens: int,
+    resume: bool,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Build subprocess env vars and config JSON from action.
+
+    Uses the shared resolved candidate config so runtime sees the same
+    effective env config as policy validation and prompt rendering.
+    """
+    env = os.environ.copy()
+    overrides = action.env_overrides
+    resolved = resolve_action_configs(action, state)
+    rejected = validate_env_overrides(
+        overrides,
+        fallback_architecture=resolved.candidate_env_config.get(
+            "ARCHITECTURE",
+            action.family_name or BASE_ENV_DEFAULTS["ARCHITECTURE"],
+        ),
+    )
+    if rejected:
+        raise RuntimeError(f"Disallowed env override keys: {', '.join(rejected)}")
+
+    merged = resolved.candidate_env_config
+
+    env.update(merged)
+    env["RUN_NAME"] = run_name
+    env["SAVE_DIR"] = str(save_dir)
+    env["WANDB_PROJECT"] = env.get("WANDB_PROJECT", "qwen3-0.6B-auto-qproj")
+    env["MAX_TOKENS"] = str(target_max_tokens)
+
+codex
+我也看一下 `shared_lowrank_two_stage_residual_expert`。它是另一个还没在最近前沿里直接回答过的“shared low-rank + staged expert residual” 方向，信息增量可能比继续压 `shared_lowrank_routed_expert_topk` 更高。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+hits=[]
+for p in Path('research/history/round_summaries').glob('round_*.json'):
+    obj=json.loads(p.read_text())
+    if obj.get('family_name')=='shared_lowrank_two_stage_residual_expert':
+        cfg=obj.get('resolved_candidate_env_config') or {}
+        hits.append((obj['round'], cfg.get('K'), cfg.get('FACTORIZED_HIDDEN_DIM'), cfg.get('NUM_EXPERTS'), cfg.get('LATENTS_PER_EXPERT'), cfg.get('ACTIVE_EXPERTS'), cfg.get('STAGE1_RATIO'), obj.get('result',{}).get('decision'), obj.get('result',{}).get('val_fvu')))
+for row in sorted(hits):
+    print(row)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+(144, '112', '256', '64', '224', '2', '0.25', 'discard', '0.13998684287071228')
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+res = compute_selection_cost(
+    'shared_lowrank_two_stage_residual_expert',
+    k=96,
+    ef=1,
+    extra_config={
+        'trunk_rank': 16,
+        'stage1_ratio': 0.25,
+        'num_experts': 64,
+        'active_experts': 2,
+        'latents_per_expert': 224,
+        'factorized_hidden_dim': 256,
+    }
+)
+print(res)
+PY" in /root/sparsify-ascend
+ succeeded in 4266ms:
+{'total_accesses': 794624, 'original_matmul_accesses': 4194304, 'ratio': 0.19, 'budget_ratio': 0.13, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 16384, 'shape': '256x64'}, {'name': 'shared_lowrank_head', 'accesses': 57344, 'shape': 'shared=1×256x224'}, {'name': 'active_expert_encoder', 'accesses': 458752, 'shape': 'active=2×1024x224'}], 'deployment_accesses': 393216, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 393216, 'shape': 'K=96×n=4096'}], 'combined_accesses': 1187840, 'combined_ratio': 0.28, 'combined_budget_ratio': 0.19, 'combined_feasible': True}
+
+codex
+我要判断是不是该直接补一个最小新 family 原型。如果现有 `shared_lowrank_routed_expert_topk` 只是 shared 侧低秩、而 expert 侧还不是 factorized head，那就值得加一个更贴近当前缺口的新结构。先按架构集成清单核对现有实现。
+exec
+/bin/bash -lc "sed -n '1770,1985p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        flat_indices = torch.cat(
+            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
+        )
+
+        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
+        top_indices = flat_indices.gather(1, top_pos)
+
+        full_acts = flat_acts.new_zeros(batch, self.num_latents)
+        full_acts.scatter_(1, flat_indices, flat_acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class SharedLowRankRoutedExpertTopKSparseCoder(SparseCoder):
+    """Low-rank shared library plus full routed expert-local sparse heads."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_routed_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_shared_experts = 1
+        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+        self.routed_num_latents = (
+            self.num_routed_experts * self.latents_per_expert
+        )
+        self.num_latents = self.shared_num_latents + self.routed_num_latents
+        max_active_latents = (
+            self.num_shared_experts + self.active_experts
+        ) * self.latents_per_expert
+        if cfg.k > max_active_latents:
+            raise ValueError(
+                "shared_lowrank_routed_expert_topk requires "
+                "k <= (shared_experts + active_experts) * latents_per_expert, "
+                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+                f"active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(
+            hidden_dim, self.num_routed_experts, device=device, dtype=dtype
+        )
+        self.shared_heads = nn.Parameter(
+            torch.empty(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.shared_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.shared_heads, a=5**0.5)
+        nn.init.kaiming_uniform_(self.routed_expert_encoders, a=5**0.5)
+
+        if decoder:
+            shared_decoder = torch.einsum(
+                "slh,hd->sld",
+                self.shared_heads.data,
+                self.factor_encoder.weight.data,
+            ).reshape(self.shared_num_latents, d_in)
+            routed_decoder = self.routed_expert_encoders.data.reshape(
+                self.routed_num_latents, d_in
+            )
+            decoder_init = torch.cat((shared_decoder, routed_decoder), dim=0)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        hidden_dim = self.factor_encoder.out_features
+        return [
+            (
+                "shared_lowrank_head",
+                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+            ),
+            (
+                "active_routed_expert_encoder",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+            ),
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+        batch = flat_x.shape[0]
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        shared_pre_acts = (
+            torch.einsum("bh,slh->bsl", hidden, self.shared_heads)
+            + self.shared_head_bias.unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+
+        router_logits = self.router(hidden)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.routed_expert_encoders[selected_expert_idx]
+        selected_bias = self.routed_expert_encoder_bias[selected_expert_idx]
+        routed_pre_acts = (
+            torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        )
+        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
+
+        flat_shared_acts = shared_acts.reshape(batch, -1)
+        flat_routed_acts = routed_acts.reshape(batch, -1)
+        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
+
+        shared_offsets = torch.arange(
+            self.shared_num_latents, device=flat_x.device
+        ).view(1, -1)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).view(1, 1, self.latents_per_expert)
+        routed_offsets = (
+            self.shared_num_latents
+            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
+            + local_offsets
+        ).reshape(batch, -1)
+        flat_indices = torch.cat(
+            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
+        )
+
+        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
+        top_indices = flat_indices.gather(1, top_pos)
+
+        full_acts = flat_acts.new_zeros(batch, self.num_latents)
+        full_acts.scatter_(1, flat_indices, flat_acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class SharedRoutedFactorizedExpertResidualSparseCoder(SparseCoder):
+    """Shared+routed factorized expert stage followed by global sparse residual cleanup."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+
+exec
+/bin/bash -lc "sed -n '1390,1775p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+exec
+/bin/bash -lc "sed -n '1,220p' /root/.codex/skills/sae-architecture-integration/SKILL.md" in /root/sparsify-ascend
+ succeeded in 0ms:
+---
+name: sae-architecture-integration
+description: Use when adding a new SAE architecture family in sparsify-ascend, or when a run fails with Unknown architecture, missing factory dispatch, or other architecture-registration issues. This skill gives a repo-specific checklist for wiring new sparse coder families into sparsify/config.py and sparsify/sparse_coder.py, plus the exact smoke-validation sequence to run before declaring the family runnable.
+---
+
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+ succeeded in 0ms:
+        if decoder:
+            decoder_init = torch.cat(
+                (
+                    self.shared_encoders.data.reshape(self.shared_num_latents, d_in),
+                    self.routed_expert_encoders.data.reshape(
+                        self.routed_num_latents, d_in
+                    ),
+                ),
+                dim=0,
+            )
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "shared_expert_encoder",
+                self.num_shared_experts * self.d_in * self.latents_per_expert,
+                f"shared={self.num_shared_experts}×{self.d_in}x{self.latents_per_expert}",
+            ),
+            (
+                "active_routed_expert_encoder",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+            ),
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+        batch = flat_x.shape[0]
+
+        shared_pre_acts = (
+            torch.einsum("bd,sld->bsl", flat_x, self.shared_encoders)
+            + self.shared_encoder_bias.unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+
+        router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.routed_expert_encoders[selected_expert_idx]
+        selected_bias = self.routed_expert_encoder_bias[selected_expert_idx]
+        routed_pre_acts = (
+            torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        )
+        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
+
+        flat_shared_acts = shared_acts.reshape(batch, -1)
+        flat_routed_acts = routed_acts.reshape(batch, -1)
+        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
+
+        shared_offsets = torch.arange(
+            self.shared_num_latents, device=flat_x.device
+        ).view(1, -1)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).view(1, 1, self.latents_per_expert)
+        routed_offsets = (
+            self.shared_num_latents
+            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
+            + local_offsets
+        ).reshape(batch, -1)
+        flat_indices = torch.cat(
+            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
+        )
+
+        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
+        top_indices = flat_indices.gather(1, top_pos)
+
+        full_acts = flat_acts.new_zeros(batch, self.num_latents)
+        full_acts.scatter_(1, flat_indices, flat_acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class FactorizedExpertTopKSparseCoder(SparseCoder):
+    """Route into an expert-local top-k head after a shared low-rank projection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "factorized_expert_topk requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(
+            hidden_dim, self.num_experts, device=device, dtype=dtype
+        )
+        self.expert_heads = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.expert_heads, a=5**0.5)
+
+        if decoder:
+            effective_encoder = torch.einsum(
+                "elh,hd->eld", self.expert_heads.data, self.factor_encoder.weight.data
+            ).reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(effective_encoder.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_head",
+                self.active_experts
+                * self.factor_encoder.out_features
+                * self.latents_per_expert,
+                f"active={self.active_experts}×{self.factor_encoder.out_features}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        router_logits = self.router(hidden)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_heads[selected_expert_idx]
+        selected_bias = self.expert_head_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class SharedRoutedFactorizedExpertTopKSparseCoder(SparseCoder):
+    """Always-on shared factorized expert plus routed factorized experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_routed_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_shared_experts = 1
+        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+        self.routed_num_latents = (
+            self.num_routed_experts * self.latents_per_expert
+        )
+        self.num_latents = self.shared_num_latents + self.routed_num_latents
+        max_active_latents = (
+            self.num_shared_experts + self.active_experts
+        ) * self.latents_per_expert
+        if cfg.k > max_active_latents:
+            raise ValueError(
+                "shared_routed_factorized_expert_topk requires "
+                "k <= (shared_experts + active_experts) * latents_per_expert, "
+                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+                f"active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(
+            hidden_dim, self.num_routed_experts, device=device, dtype=dtype
+        )
+        self.shared_heads = nn.Parameter(
+            torch.empty(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.shared_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_heads = nn.Parameter(
+            torch.empty(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.shared_heads, a=5**0.5)
+        nn.init.kaiming_uniform_(self.routed_heads, a=5**0.5)
+
+        if decoder:
+            shared_decoder = torch.einsum(
+                "slh,hd->sld",
+                self.shared_heads.data,
+                self.factor_encoder.weight.data,
+            ).reshape(self.shared_num_latents, d_in)
+            routed_decoder = torch.einsum(
+                "elh,hd->eld",
+                self.routed_heads.data,
+                self.factor_encoder.weight.data,
+            ).reshape(self.routed_num_latents, d_in)
+            decoder_init = torch.cat((shared_decoder, routed_decoder), dim=0)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("factor_encoder", self.factor_encoder), ("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        hidden_dim = self.factor_encoder.out_features
+        return [
+            (
+                "shared_factorized_head",
+                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+            ),
+            (
+                "active_routed_factorized_head",
+                self.active_experts * hidden_dim * self.latents_per_expert,
+                f"active={self.active_experts}×{hidden_dim}x{self.latents_per_expert}",
+            ),
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+        batch = flat_x.shape[0]
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        shared_pre_acts = (
+            torch.einsum("bh,slh->bsl", hidden, self.shared_heads)
+            + self.shared_head_bias.unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+
+        router_logits = self.router(hidden)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.routed_heads[selected_expert_idx]
+        selected_bias = self.routed_head_bias[selected_expert_idx]
+        routed_pre_acts = (
+            torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
+        )
+        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
+
+        flat_shared_acts = shared_acts.reshape(batch, -1)
+        flat_routed_acts = routed_acts.reshape(batch, -1)
+        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
+
+        shared_offsets = torch.arange(
+            self.shared_num_latents, device=flat_x.device
+        ).view(1, -1)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).view(1, 1, self.latents_per_expert)
+        routed_offsets = (
+            self.shared_num_latents
+            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
+            + local_offsets
+        ).reshape(batch, -1)
+        flat_indices = torch.cat(
+            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
+        )
+
+        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
+        top_indices = flat_indices.gather(1, top_pos)
+
+codex
+我再把 `shared_routed_factorized_expert_topk` 的 matched-cost 算一下。这个 family 已有实现，也正好对应“shared low-rank basis + expert-specific head / local top-k”，而且从当前 r152 只改 `ARCHITECTURE` 就能形成一轮干净的结构对照。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+p=Path('research/history/round_summaries/round_0142.json')
+obj=json.loads(p.read_text())
+for key in ['result','resolved_candidate_env_config','runtime_config_json']:
+    print('\\n###', key)
+    print(json.dumps(obj[key], ensure_ascii=False, indent=2))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+### result
+{
+  "decision": "discard",
+  "status": "ok",
+  "timestamp": "1774851648",
+  "val_fvu": "0.25618457794189453",
+  "observed_fvu": "0.256185",
+  "k": "112",
+  "architecture": "shared_routed_factorized_expert_topk",
+  "expansion_factor": "1",
+  "run_health": "normal",
+  "termination_reason": "completed",
+  "tokens_per_sec": "111050.117874",
+  "baseline_ratio": "0.999992",
+  "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0142/round0142_standard_1774851284_dp2_bs1_ga8_ef1_k112_20260330_141451",
+  "experiment_id": "r142_1774851648",
+  "head_commit": "22c62c1f3dc7430d6808298ccaaa37bbbea1b967",
+  "description": "建议以 r123 为 reference，只改 `ARCHITECTURE=shared_routed_factorized_expert_topk`。这是一轮低成本异构 MoE 结构重验：直接测试“shared+routed + expert 内部低秩 scorer”能否在约 0.22x total_cost 下提供比当前 low-cost frontier 更有价值的新段。",
+  "self_review": "这轮满足单轮单变量约束：相对 r123 只改 `ARCHITECTURE`。在 `shared_lowrank_routed_expert_residual` 连续两轮非支配失败、`shared_lowrank_routed_expert_topk` 也已给出新的负信号后，继续沿同一 family 做局部压缩信息增量偏低；切到 `shared_routed_factorized_expert_topk` 更符合当前对异构 MoE 与 expert-internal low-rank 的优先级，也能在更低的 0.22x 成本带补一段此前仍欠清晰的结构证据。主要风险是该 family 在旧轮次已有弱负信号，但当前这次是与 r123 严格 matched-cost 的 fresh validation，结论更有解释力。",
+  "log_path": "/root/sparsify-ascend/research/history/logs/round0142_standard_1774851284.log",
+  "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0142/round0142_standard_1774851284_dp2_bs1_ga8_ef1_k112_20260330_141451/metrics.jsonl",
+  "curve_start_fvu": "0.328896",
+  "curve_mid_fvu": "0.278833",
+  "curve_end_fvu": "0.256185",
+  "curve_late_slope": "0.000000",
+  "curve_still_improving": "false",
+  "initial_target_tokens": "30000000",
+  "final_target_tokens": "50000000",
+  "final_total_tokens": "49979392",
+  "resume_stage_count": "3",
+  "continuation_stop_reason": "plateau",
+  "continued_from_checkpoint": "true"
+}
+
+### resolved_candidate_env_config
+{
+  "ARCHITECTURE": "shared_routed_factorized_expert_topk",
+  "EXPANSION_FACTOR": "1",
+  "K": "112",
+  "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+  "OPTIMIZER": "adam",
+  "LR": "8e-4",
+  "BATCH_SIZE": "1",
+  "GRAD_ACC_STEPS": "8",
+  "MICRO_ACC_STEPS": "1",
+  "AUXK_ALPHA": "0.03125",
+  "DEAD_FEATURE_THRESHOLD": "10000000",
+  "USE_HADAMARD": "0",
+  "COMPILE_MODEL": "1",
+  "FACTORIZED_HIDDEN_DIM": "256",
+  "TRUNK_RANK": "40",
+  "STAGE1_RATIO": "0.25",
+  "NUM_EXPERTS": "64",
+  "LATENTS_PER_EXPERT": "224",
+  "ACTIVE_EXPERTS": "2"
+}
+
+### runtime_config_json
+{
+  "architecture": "shared_routed_factorized_expert_topk",
+  "expansion_factor": 1,
+  "k": 112,
+  "optimizer": "adam",
+  "lr": "8e-4",
+  "hookpoints": "layers.[3].self_attn.q_proj",
+  "batch_size": 1,
+  "grad_acc_steps": 8,
+  "micro_acc_steps": 1,
+  "auxk_alpha": 0.03125,
+  "dead_feature_threshold": 10000000,
+  "use_hadamard": false,
+  "family_name": "shared_routed_factorized_expert_topk",
+  "family_stage": "mainline",
+  "target_profile": {
+    "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+    "training_hookpoint": "layers.[3].self_attn.q_proj",
+    "d_in": 1024,
+    "n_output": 4096,
+    "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+    "original_matmul_accesses": 4194304
+  },
+  "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+  "d_in": 1024,
+  "n_output": 4096,
+  "original_matmul_accesses": 4194304,
+  "trunk_rank": 40,
+  "stage1_ratio": 0.25,
+  "factorized_hidden_dim": 256,
+  "num_experts": 64,
+  "active_experts": 2,
+  "latents_per_expert": 224
+}
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+res = compute_selection_cost(
+    'shared_routed_factorized_expert_topk',
+    k=96,
+    ef=1,
+    extra_config={
+        'trunk_rank': 16,
+        'stage1_ratio': 0.25,
+        'num_experts': 64,
+        'active_experts': 2,
+        'latents_per_expert': 224,
+        'factorized_hidden_dim': 256,
+    }
+)
+print(res)
+PY" in /root/sparsify-ascend
+ succeeded in 4087ms:
+{'total_accesses': 450560, 'original_matmul_accesses': 4194304, 'ratio': 0.11, 'budget_ratio': 0.07, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 16384, 'shape': '256x64'}, {'name': 'shared_factorized_head', 'accesses': 57344, 'shape': 'shared=1×256x224'}, {'name': 'active_routed_factorized_head', 'accesses': 114688, 'shape': 'active=2×256x224'}], 'deployment_accesses': 393216, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 393216, 'shape': 'K=96×n=4096'}], 'combined_accesses': 843776, 'combined_ratio': 0.2, 'combined_budget_ratio': 0.13, 'combined_feasible': True}
+
+codex
+异构 MoE 这条已实现分支基本都测过了。我补扫两个还没在当前低成本前沿里站住位置、但成本结构不同的兼容 family，看是否存在比继续开 MoE 原型更务实的结构补点。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+families=['lowrank_factorized_residual','lowrank_multi_branch_residual','lowrank_two_stage_residual','routed_lowrank_two_stage_residual']
+for fam in families:
+    hits=[]
+    for p in Path('research/history/round_summaries').glob('round_*.json'):
+        obj=json.loads(p.read_text())
+        if obj.get('family_name')==fam:
+            cfg=obj.get('resolved_candidate_env_config') or {}
+            hits.append((obj['round'], cfg.get('K'), cfg.get('TRUNK_RANK'), cfg.get('FACTORIZED_HIDDEN_DIM'), cfg.get('STAGE1_RATIO'), obj.get('result',{}).get('decision'), obj.get('result',{}).get('val_fvu')))
+    print('\\nFAMILY', fam)
+    for row in sorted(hits)[-6:]:
+        print(row)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+FAMILY lowrank_factorized_residual
+
+FAMILY lowrank_multi_branch_residual
+
+FAMILY lowrank_two_stage_residual
+
+FAMILY routed_lowrank_two_stage_residual
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+configs=[
+ ('lowrank_factorized_residual',{'trunk_rank':16,'factorized_hidden_dim':256}),
+ ('lowrank_multi_branch_residual',{'trunk_rank':16}),
+ ('lowrank_two_stage_residual',{'trunk_rank':16,'stage1_ratio':0.25}),
+ ('routed_lowrank_two_stage_residual',{'trunk_rank':16,'stage1_ratio':0.25}),
+]
+for fam, extra in configs:
+    res=compute_selection_cost(fam,k=96,ef=1,extra_config=extra)
+    print(fam, {kk:res.get(kk) for kk in ['combined_accesses','combined_ratio','deployment_accesses','deployment_ratio','feasible']})
+PY" in /root/sparsify-ascend
+ succeeded in 17175ms:
+lowrank_factorized_residual {'combined_accesses': 1015808, 'combined_ratio': 0.24, 'deployment_accesses': 458752, 'deployment_ratio': 0.11, 'feasible': True}
+lowrank_multi_branch_residual {'combined_accesses': 4688896, 'combined_ratio': 1.12, 'deployment_accesses': 458752, 'deployment_ratio': 0.11, 'feasible': True}
+lowrank_two_stage_residual {'combined_accesses': 2588672, 'combined_ratio': 0.62, 'deployment_accesses': 458752, 'deployment_ratio': 0.11, 'feasible': True}
+routed_lowrank_two_stage_residual {'combined_accesses': 4685824, 'combined_ratio': 1.12, 'deployment_accesses': 458752, 'deployment_ratio': 0.11, 'feasible': True}
+
+codex
+{"command":"run","hypothesis":"最终重构公式为 x_hat = Σ_r β_r(x) u_r + Σ_i α_i(x) b_i，其中 U={u_r} 是静态 low-rank trunk 向量库，B={b_i} 是静态 residual 稀疏库；factorized residual scorer 只改变在线选择/系数计算链路，不改变 decoder 形式。导出到 LUTurbo/Lottable 推理链路时仍是“low-rank trunk 查表/加权和 + residual library lookup + 有限加权和”，静态库不随样本动态生成，因此 `lowrank_factorized_residual` 判定为扩展兼容；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍不得进入 frontier。唯一主假设：相对 r152 仅把 `ARCHITECTURE` 从 `lowrank_expert_residual` 切到 `lowrank_factorized_residual`，保持 `K=96`、`EXPANSION_FACTOR=1`、`TRUNK_RANK=16`、`FACTORIZED_HIDDEN_DIM=256`、优化器与其余训练配方不变，直接回答“去掉 expert 路由，改用低秩 factorized residual scorer”是否能在约 0.24x total_cost 形成一段比现有 0.24x-0.30x low-cost frontier 更有价值的新结构段。","summary":"建议以 r152 为 reference，只改 `ARCHITECTURE=lowrank_factorized_residual`。这轮不是继续细扫 `lowrank_expert_residual` 的局部参数，而是切到一个当前 target 上尚未验证的新兼容 family，用更低的约 0.24x total_cost 直接测试“factorized residual 是否比现有低成本 MoE-like 点更有效”。","change_type":"param_only","expected_win":"explore_unknown","family_name":"lowrank_factorized_residual","family_stage":"prototype","self_review":"这轮满足单变量原则：相对 r152 只改 `ARCHITECTURE`。之所以不继续沿 `lowrank_expert_residual` 下压，是因为 r151-r153 已经回答了这条 family 在当前 target 上的关键问题：`TRUNK_RANK=16` 与 `K=96` 可以形成新的 <0.5x 前沿点，但把 `ACTIVE_EXPERTS` 压到 1 会明显失败；继续在同一 family 上做小步局部扫参的信息增量开始下降。切到 `lowrank_factorized_residual` 更符合当前“结构扩展优先”的要求，也能把成本带直接拉到约 0.24x，补充一个当前 target 上完全缺失的低秩 factorized residual 结构对照。主要风险是该 family 没有 expert 子库，可能在质量上明显落后于当前 low-cost best；但如果它在 0.24x 左右仍能接近或优于现有 `shared_routed_expert_topk` 点，就会给出非常有价值的新 Pareto 段。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_factorized_residual"}],"touched_files":[],"notes_to_memory":["当前 target 上 `lowrank_factorized_residual` 尚无有效验证点；与已经多次试过的 hetero-MoE 分支不同，这轮是在 0.24x 左右补一个完全新的兼容结构槽位。","本地成本自检：在 `K=96, TRUNK_RANK=16, FACTORIZED_HIDDEN_DIM=256` 下，`lowrank_factorized_residual` 的 deployment_accesses=458752、combined_accesses=1015808、combined_ratio≈0.24，低于 1.5×h×n 硬约束，也正好落在当前低成本前沿的关键信息带。","r153 已给出明确负信号：`lowrank_expert_residual` 在 `ACTIVE_EXPERTS=1` 时 FVU=0.1398，说明当前 target 上双 expert 路由仍然重要；因此本轮更适合切换结构假设，而不是继续在同一 family 上做局部压缩。"],"next_hypotheses":["如果 `lowrank_factorized_residual` 在约 0.24x 下明显优于当前 0.24x-0.30x 前沿点，则下一轮保持该 family 不变，只改 `K` 或 `TRUNK_RANK`，继续描它的低成本 Pareto 段。","如果该点质量接近但未超过 `shared_routed_expert_topk`，则说明 factorized residual 有一定价值但不足以替代低成本 MoE-like 路线，后续可再决定是否只改 `FACTORIZED_HIDDEN_DIM` 追查瓶颈。","如果该点明显劣于现有低成本前沿，则可把当前 target 上“factorized residual without experts”这条方向的优先级下调，并把结构预算重新转回新的 expert/MoE-like 原型。"],"reference_round":152}
+tokens used
+1,846,988
