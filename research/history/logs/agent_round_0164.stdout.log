@@ -1,0 +1,1007 @@
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"104"}],"expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"stabilize","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧仍可直接导出为 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”推理链路，因此兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，只能保留为历史参考、不得驱动当前 frontier。r163 已给出清晰负信号：相对 r162 把 `LATENTS_PER_EXPERT` 从 160 压到 144 会使 FVU 从 0.1369 回退到 0.1437，说明当前 low-cost 主线在 `K=112` 下已接近 width floor，继续压 per-expert width 不是更优方向。本轮唯一主假设是：相对 r162 只把 `K` 从 112 降到 104，保持 `ARCHITECTURE=shared_routed_expert_topk`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 不变，测试当前最强 low-cost 点是否存在轻微 deployment overprovision。如果是，则该点应能把 total_cost 从约 0.24x 左移到约 0.23x，同时尽量保住接近 r162 的质量，并争取击败当前 0.23x anchor 的 FVU=0.1421。","summary":"建议以 r162 为 reference，只改 `K=104`。这是一次严格留在 `<0.25x` 主战场内的 matched-cost deployment compression probe：r163 已排除了继续压 `LATENTS_PER_EXPERT` 的方向，现在更有信息量的问题是 r162 的 `K=112` 是否略高于真正需要的 lookup budget。","self_review":"相对 r162 只改一个 env 参数 `K`，满足单变量原则。当前阶段的高优先级仍是回答 `<0.25x` 区域谁能在相近或更低成本下打败现有 low-cost anchor；在 r163 已证伪更小 `LATENTS_PER_EXPERT` 后，继续在同 family 内做一次更低 deployment 成本的 matched probe，比切去一个大概率落到 `0.26x+` 的新 family 更符合当前主战场。选择 `K=104` 而不是回到 `K=96`，是因为 r161→r162 的改进说明这条 width=160 子线对 lookup budget 仍有响应，而 104 是定位 knee 的最小中间点。主要风险是改善幅度可能不足以超越 r161 的 0.23x/0.1421；但无论正负，这一轮都会更清楚回答当前最强 low-cost recipe 是否已经在 `K=112` 吃满 deployment 预算。","needs_sanity":false,"env_overrides":[{"key":"K","value":"104"}],"touched_files":[],"notes_to_memory":["r163 已确认：在 `shared_routed_expert_topk K=112 ACTIVE_EXPERTS=2 NUM_EXPERTS=64` 上把 `LATENTS_PER_EXPERT` 从 160 降到 144 会明显退化，说明当前 low-cost 主线更像已到 width floor，而不是仍有可继续压缩的 per-expert width。","本地成本自检：相对 r162 仅改 `K=104` 后，selection ratio 仍约 0.13x，deployment ratio 约 0.10x，combined ratio 约 0.23x，仍明确处于 `<0.25x` 主战场内。","`shared_routed_factorized_expert_topk` 虽然理论成本可更低，但历史在当前 target 上已给出强负信号（r128 FVU≈0.2248，r142 FVU≈0.2562），本轮不应再让该不强结构占用主战场预算。"],"next_hypotheses":["如果 `K=104` 在约 0.23x 下把 FVU 压到 0.1421 以下，则下一轮保持 family 不变，只改 `K=108` 或直接回到 `K=112` 作更细 deployment knee 定位，判断 104-112 哪个才是当前 width=160 子线的最佳可部署点。","如果 `K=104` 明显接近 r162 的 0.1369，则说明当前最强 low-cost 点确有轻微 deployment overprovision，后续应优先围绕更低 lookup 预算继续细化，而不是再压 `LATENTS_PER_EXPERT`。","如果 `K=104` 明显退化并接近或差于 r161，则说明 r162 的 `K=112` 基本已是这条子线的 deployment knee；下一轮应转向新的 matched-cost 轻量结构对照，而不是继续在线性 K 轴上细扫。"],"reference_round":162}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3e59-7cf9-7560-927a-ce231bf5725c
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 164。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 164 策略模式：低开销探索
+原因：当前 <0.25x 区域最佳 FVU=0.1369，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前低成本参考 family：shared_routed_expert_topk
+当前低成本参考配方：ARCHITECTURE=shared_routed_expert_topk K=112 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前低成本完整配置（source=low_cost_frontier_best）：
+  ARCHITECTURE=shared_routed_expert_topk
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=160
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+本轮要求：
+1. 当前阶段重点是 `<0.25x total_cost` 主战场；`0.25x-0.35x` 只作辅助对照，`>0.4x` 不应继续主导预算。
+2. 当前低成本 baseline 主要是 `shared_routed_expert_topk` 一线；本轮应优先回答“谁能在相近或更低成本下打败它”。
+3. 允许新开 family，但只有在其成本路径明确落在 `<0.25x` 或至少不明显超过 `0.35x` 时才值得优先尝试。
+4. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+5. 不要让 `0.5x` 左右的成功点重新把注意力拉回中成本区；它们只保留作少量质量锚点。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 11 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=163, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=9
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：`<0.25x` 低成本区优先。
+  当前要回答的是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”，而不是“哪个 0.5x 左右结构最好”。
+  `0.25x-0.35x` 只作辅助对照带；`>0.4x` 只保留少量质量锚点，不应继续主导预算。
+
+当前 low-cost 参考线：
+  1. `shared_routed_expert_topk` 是当前 `<0.25x` 区域最强兼容 baseline；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。
+  2. `expert_topk` 只作为更极左侧成本 anchor；若质量明显落后，不应继续主导预算。
+
+当前高优先级方向：
+  1. `shared_routed_expert_topk` 的 matched-cost 轻量变体。
+     优先尝试更小 K、更小 `LATENTS_PER_EXPERT`、更轻 scorer / router，前提是总成本仍落在 `<0.25x` 或尽量接近它。
+  2. 更轻的 shared+routed / hetero-MoE 变体。
+     只有在 shared 分支不会把成本自然抬到 `>0.35x` 时才值得继续。
+  3. 极小 K 与更轻 expert 子库。
+     目标是在不显著牺牲 FVU 的前提下继续压 deployment 与 active-path 成本。
+  4. very-light residual / factorized 变体。
+     仅当它们能保持在 low-cost 带内时才值得尝试；不要默认引入会自然抬高到中成本区的 trunk / residual 负担。
+
+当前应下调优先级的方向：
+  1. 天然落在 `0.45x-0.55x` 左右的 `lowrank_expert_residual` 式结构，除非只作少量质量对照。
+  2. 已经多轮失败的 shared-lowrank two-stage / hetero residual 变体。
+  3. 任何只是把成本抬到 `>0.4x` 却不能直接回答 `<0.25x` 问题的结构探针。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.2x (sel=0.13x + deploy=0.06x)  fvu=0.15513789653778076  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.21x (sel=0.13x + deploy=0.08x)  fvu=0.14842143654823303  arch=shared_routed_expert_topk  K=80 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.22x (sel=0.16x + deploy=0.06x)  fvu=0.14638903737068176  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.23x (sel=0.13x + deploy=0.09x)  fvu=0.14208984375  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.24x (sel=0.13x + deploy=0.11x)  fvu=0.13694503903388977  arch=shared_routed_expert_topk  K=112 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.25x (sel=0.16x + deploy=0.09x)  fvu=0.13472524285316467  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  参考：`0.25x-0.35x` 辅助带当前有 5 个 frontier 点。
+
+成本状态：
+  当前最佳 <0.25x 点 → shared_routed_expert_topk (K=112, EF=1) [FEASIBLE]:
+    总成本: 0.24x | 预算比率: 0.16x | encoder: 0.13x | 部署: 0.11x | FVU: 0.13694503903388977
+  当前最佳 0.25x-0.5x 点 → lowrank_expert_residual (K=96, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.38x | 部署: 0.11x | FVU: 0.09837484359741211
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，4）：
+  r160 shared_routed_expert_topk param_only -> keep fvu=0.14842143654823303 657s | 最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)...
+  r161 shared_routed_expert_topk param_only -> keep fvu=0.14208984375 624s | 最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)...
+  r162 shared_routed_expert_topk param_only -> keep fvu=0.13694503903388977 630s | 最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)...
+  r163 shared_routed_expert_topk param_only -> discard fvu=0.14372655749320984 885s | 最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)...
+
+最近可用 reference_round 的完整配置：
+  r162 shared_routed_expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_routed_expert_topk
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=160
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r152 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r154 lowrank_factorized_residual (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_factorized_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r148 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+操作提示：
+  1. 当前主战场是 `total_cost < 0.25x`。`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点，不应继续主导预算。
+  2. 当前 `<0.25x` 最强低成本线是 `shared_routed_expert_topk`；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。后续实验应优先回答谁能在相近或更低成本下打败它。
+  3. 在 `<0.25x` 区域，优先尝试更轻 shared+routed / 极小 K / 更小 `LATENTS_PER_EXPERT` / 更轻 scorer 或 router。只有在仍能保持 low-cost 带时，very-light residual 或 factorized 变体才值得尝试；若新 family 连续 1-2 轮明显劣于同成本 anchors，就切走，不要长时间停留。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- 当前主战场应放在 `<0.25x total_cost` 区域；`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点
+- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline，而不是被直接视为“旧 family”
+- `expert_topk` 仍有极低成本 anchor 价值，但在 `<0.25x` 的质量明显弱于当前 shared+routed 主线
+- `lowrank_expert_residual` 在 `0.49x-0.54x` 一带给出了当前更强的质量锚点，但这不意味着后续应让中成本结构继续主导搜索预算
+
+一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，而是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+| `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+当前要基于 r163 的负信号重新选一个单变量实验。我先核对 r163 的实际结果和低成本候选 family 的近期记录，避免把已经证伪的轴再重复一轮。
+exec
+/bin/bash -lc "sed -n '1,140p' research/history/round_summaries/round_0163.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 163,
+  "timestamp": 1774868338,
+  "started_at": 1774867453,
+  "ended_at": 1774868338,
+  "duration_sec": 885,
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "stabilize",
+  "session_id": "019d3e59-7cf9-7560-927a-ce231bf5725c",
+  "timeline_event_ids": [
+    "evt_1774867453051963838",
+    "evt_1774867884324975043",
+    "evt_1774868338581770284"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u4ecd\u662f\u201cshared \u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\u201d\uff0c\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u4ecd\u662f\u4e0d\u517c\u5bb9\uff0c\u53ea\u4fdd\u7559\u5386\u53f2\u53c2\u8003\u3001\u4e0d\u5f97\u9a71\u52a8\u5f53\u524d frontier\u3002\u5f53\u524d `<0.25x` \u4e3b\u6218\u573a\u91cc\uff0cr159\u2192r162 \u5df2\u8bc1\u660e `LATENTS_PER_EXPERT=160` \u8fd9\u6761\u66f4\u8f7b shared+routed \u5b50\u7ebf\u5728 `K=64\u219280\u219296\u2192112` \u4e0a\u6301\u7eed\u6539\u5584\u5e76\u628a FVU \u538b\u5230 0.1369\uff0c\u8bf4\u660e\u5b83\u5df2\u5177\u5907\u53ef\u7528\u8d28\u91cf\uff1b\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r162 \u53ea\u628a `LATENTS_PER_EXPERT` \u4ece 160 \u964d\u5230 144\uff0c\u4fdd\u6301 `ARCHITECTURE=shared_routed_expert_topk`\u3001`K=112`\u3001`ACTIVE_EXPERTS=2`\u3001`NUM_EXPERTS=64`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0d\u53d8\uff0c\u6d4b\u8bd5 r162 \u8fd9\u4e2a 0.24x \u70b9\u662f\u5426\u5df2\u7ecf\u7565\u5fae width-overprovisioned\u3002\u82e5\u662f\uff0c\u5219\u8be5\u70b9\u5e94\u80fd\u5728\u603b\u6210\u672c\u7ea6 0.23x \u4e0b\u4fdd\u4f4f\u5927\u90e8\u5206\u8d28\u91cf\uff0c\u5e76\u4e89\u53d6\u51fb\u8d25\u5f53\u524d 0.23x frontier \u951a\u70b9 FVU=0.1421\u3002",
+    "summary": "\u5efa\u8bae\u4ee5 r162 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=144`\u3002\u8fd9\u662f\u4e00\u6b21\u4e25\u683c\u7559\u5728 `<0.25x` \u4e3b\u6218\u573a\u5185\u7684 matched-cost \u8f7b\u91cf\u5316 probe\uff0c\u76f4\u63a5\u6d4b\u8bd5\u5f53\u524d\u6700\u5f3a low-cost \u4e3b\u7ebf\u80fd\u5426\u4ece\u7ea6 0.24x \u5de6\u79fb\u5230\u7ea6 0.23x\uff0c\u540c\u65f6\u4fdd\u4f4f\u8db3\u4ee5\u8fdb\u5165 Pareto frontier \u7684\u8d28\u91cf\u3002",
+    "change_type": "param_only",
+    "expected_win": "lower_cost",
+    "family_name": "shared_routed_expert_topk",
+    "family_stage": "stabilize",
+    "self_review": "\u76f8\u5bf9 r162 \u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `LATENTS_PER_EXPERT`\uff0c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\u3002\u9009\u62e9 144 \u800c\u4e0d\u662f\u7ee7\u7eed\u6539 `K`\uff0c\u662f\u56e0\u4e3a r159-r162 \u5df2\u57fa\u672c\u5b8c\u6210 width=160 \u5b50\u7ebf\u7684 deployment knee \u5b9a\u4f4d\uff1b\u5f53\u524d\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u53d8\u6210\u201cr162 \u7684 0.24x \u70b9\u662f\u5426\u8fd8\u80fd\u5728\u4e0d\u4e22\u592a\u591a\u8d28\u91cf\u7684\u524d\u63d0\u4e0b\u7ee7\u7eed\u5de6\u79fb\u201d\u3002\u9009\u62e9 144 \u800c\u4e0d\u662f\u66f4\u6fc0\u8fdb\u7684 128\uff0c\u662f\u4e3a\u4e86\u5148\u505a\u6700\u5c0f\u3001\u53ef\u89e3\u91ca\u7684 width compression probe\uff0c\u4f18\u5148\u63d0\u9ad8\u5f62\u6210\u65b0 `<0.25x` \u524d\u6cbf\u70b9\u7684\u6982\u7387\u3002\u4e3b\u8981\u98ce\u9669\u662f expert \u5b50\u5e93\u4e00\u65e6\u7ee7\u7eed\u7f29\u7a84\uff0cFVU \u4f1a\u56de\u9000\u5230\u73b0\u6709 0.23x \u951a\u70b9\u4e4b\u4e0a\uff1b\u4f46\u8fd9\u540c\u6837\u80fd\u6e05\u695a\u754c\u5b9a\u5f53\u524d low-cost \u4e3b\u7ebf\u7684 width floor\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "LATENTS_PER_EXPERT",
+        "value": "144"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "\u672c\u5730\u6210\u672c\u81ea\u68c0\uff1a\u76f8\u5bf9 r162 \u4ec5\u6539 `LATENTS_PER_EXPERT=144` \u540e\uff0c`shared_routed_expert_topk` \u7684 selection ratio \u7ea6 0.12x\u3001deployment ratio \u7ea6 0.11x\u3001combined ratio \u7ea6 0.23x\uff0c\u4ecd\u5904\u4e8e\u5f53\u524d `<0.25x` \u4e3b\u6218\u573a\u5185\u3002",
+      "`shared_routed_expert_topk` \u4ecd\u662f\u5f53\u524d\u517c\u5bb9 low-cost frontier holder\uff1b`LATENTS_PER_EXPERT`\u3001`K`\u3001`ACTIVE_EXPERTS`\u3001`NUM_EXPERTS` \u7684 wiring \u5df2\u5728\u5386\u53f2\u8f6e\u6b21\u4e2d\u7a33\u5b9a\u751f\u6548\uff0c\u672c\u8f6e\u4e0d\u9700\u8981\u4ee3\u7801\u6539\u52a8\u3002",
+      "`ACTIVE_EXPERTS=1` \u5728\u8be5 family \u7684\u4f4e\u6210\u672c\u533a\u5df2\u7ed9\u51fa\u6e05\u6670\u8d1f\u4fe1\u53f7\uff0c\u56e0\u6b64\u5f53\u524d\u66f4\u4f18\u5148\u538b per-expert width\uff0c\u800c\u4e0d\u662f\u518d\u6b21\u7f29 active path\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c `LATENTS_PER_EXPERT=144` \u5728\u7ea6 0.23x \u4e0b\u4ecd\u628a FVU \u538b\u5230 0.142 \u5de6\u53f3\u6216\u66f4\u597d\uff0c\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=128`\uff0c\u7ee7\u7eed\u6d4b\u8bd5\u8fd9\u6761 width \u538b\u7f29\u7ebf\u80fd\u5426\u628a frontier \u518d\u5411\u5de6\u63a8\u8fdb\u5230\u7ea6 0.22x\u3002",
+      "\u5982\u679c `LATENTS_PER_EXPERT=144` \u53ea\u5c0f\u5e45\u9000\u5316\u4f46\u672a\u5f62\u6210\u65b0\u524d\u6cbf\uff0c\u4e0b\u4e00\u8f6e\u56de\u5230 r162 \u914d\u65b9\uff0c\u53ea\u6539 `NUM_EXPERTS=96`\uff0c\u6d4b\u8bd5\u5728\u4ecd\u63a5\u8fd1 low-cost \u5e26\u4e0a\u6cbf\u65f6\u66f4\u5927\u9759\u6001\u5bb9\u91cf\u662f\u5426\u6bd4\u7ee7\u7eed\u538b\u5bbd\u5ea6\u66f4\u503c\u5f97\u3002",
+      "\u5982\u679c `LATENTS_PER_EXPERT=144` \u660e\u663e\u9000\u5316\u5230\u63a5\u8fd1\u6216\u5dee\u4e8e\u73b0\u6709 0.23x \u951a\u70b9\uff0c\u5219\u53ef\u66f4\u660e\u786e\u8bb0\u4e0b\uff1a\u5f53\u524d target \u4e0a `LATENTS_PER_EXPERT=160` \u5df2\u63a5\u8fd1\u8fd9\u6761 family \u7684 width floor\uff0c\u540e\u7eed `<0.25x` \u9884\u7b97\u5e94\u8f6c\u5411\u65b0\u7684 matched-cost \u8f7b\u91cf\u7ed3\u6784\u5bf9\u7167\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u4e0b\u538b\u8be5\u8f74\u3002"
+    ],
+    "reference_round": 162
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774868338",
+    "val_fvu": "0.14372655749320984",
+    "observed_fvu": "0.143727",
+    "k": "112",
+    "architecture": "shared_routed_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111044.585227",
+    "baseline_ratio": "0.999943",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0163/round0163_standard_1774867884_dp2_bs1_ga8_ef1_k112_20260330_185130",
+    "experiment_id": "r163_1774868338",
+    "head_commit": "1ad55a3b100bb77e6f566e1abfc15dec79f758dc",
+    "description": "\u5efa\u8bae\u4ee5 r162 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=144`\u3002\u8fd9\u662f\u4e00\u6b21\u4e25\u683c\u7559\u5728 `<0.25x` \u4e3b\u6218\u573a\u5185\u7684 matched-cost \u8f7b\u91cf\u5316 probe\uff0c\u76f4\u63a5\u6d4b\u8bd5\u5f53\u524d\u6700\u5f3a low-cost \u4e3b\u7ebf\u80fd\u5426\u4ece\u7ea6 0.24x \u5de6\u79fb\u5230\u7ea6 0.23x\uff0c\u540c\u65f6\u4fdd\u4f4f\u8db3\u4ee5\u8fdb\u5165 Pareto frontier \u7684\u8d28\u91cf\u3002",
+    "self_review": "\u76f8\u5bf9 r162 \u53ea\u6539\u4e00\u4e2a env \u53c2\u6570 `LATENTS_PER_EXPERT`\uff0c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\u3002\u9009\u62e9 144 \u800c\u4e0d\u662f\u7ee7\u7eed\u6539 `K`\uff0c\u662f\u56e0\u4e3a r159-r162 \u5df2\u57fa\u672c\u5b8c\u6210 width=160 \u5b50\u7ebf\u7684 deployment knee \u5b9a\u4f4d\uff1b\u5f53\u524d\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u53d8\u6210\u201cr162 \u7684 0.24x \u70b9\u662f\u5426\u8fd8\u80fd\u5728\u4e0d\u4e22\u592a\u591a\u8d28\u91cf\u7684\u524d\u63d0\u4e0b\u7ee7\u7eed\u5de6\u79fb\u201d\u3002\u9009\u62e9 144 \u800c\u4e0d\u662f\u66f4\u6fc0\u8fdb\u7684 128\uff0c\u662f\u4e3a\u4e86\u5148\u505a\u6700\u5c0f\u3001\u53ef\u89e3\u91ca\u7684 width compression probe\uff0c\u4f18\u5148\u63d0\u9ad8\u5f62\u6210\u65b0 `<0.25x` \u524d\u6cbf\u70b9\u7684\u6982\u7387\u3002\u4e3b\u8981\u98ce\u9669\u662f expert \u5b50\u5e93\u4e00\u65e6\u7ee7\u7eed\u7f29\u7a84\uff0cFVU \u4f1a\u56de\u9000\u5230\u73b0\u6709 0.23x \u951a\u70b9\u4e4b\u4e0a\uff1b\u4f46\u8fd9\u540c\u6837\u80fd\u6e05\u695a\u754c\u5b9a\u5f53\u524d low-cost \u4e3b\u7ebf\u7684 width floor\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0163_standard_1774867884.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0163/round0163_standard_1774867884_dp2_bs1_ga8_ef1_k112_20260330_185130/metrics.jsonl",
+    "curve_start_fvu": "0.193761",
+    "curve_mid_fvu": "0.159187",
+    "curve_end_fvu": "0.143727",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "112",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "40",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "64",
+    "LATENTS_PER_EXPERT": "160",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "112",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "40",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "64",
+    "LATENTS_PER_EXPERT": "144",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "changed_keys": [
+    "LATENTS_PER_EXPERT"
+  ],
+  "reference_source": "reference_round:r162",
+  "runtime_config_json": {
+    "architecture": "shared_routed_expert_topk",
+    "expansion_factor": 1,
+    "k": 112,
+    "optimizer": "adam",
+    "lr": "8e-4",
+    "hookpoints": "layers.[3].self_attn.q_proj",
+    "batch_size": 1,
+    "grad_acc_steps": 8,
+    "micro_acc_steps": 1,
+    "auxk_alpha": 0.03125,
+    "dead_feature_threshold": 10000000,
+    "use_hadamard": false,
+    "family_name": "shared_routed_expert_topk",
+    "family_stage": "stabilize",
+    "target_profile": {
+      "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/timeline.jsonl
+
+exec
+/bin/bash -lc "rg -n 'shared_routed_factorized_expert_topk|shared_lowrank_routed_expert_topk|factorized_expert_topk|shared_routed_expert_topk' research/history/round_summaries research/history/memory.json | tail -n 200" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0115.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0115.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0115.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0115.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0115.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5e93\u4e0e\u5404 routed expert \u5b50\u5e93\u90fd\u662f\u771f\u6b63\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u5bfc\u51fa\u4ecd\u662f LUTurbo/Lottable \u7684\u201cshared \u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\u201d\u6d41\u6c34\u7ebf\uff0c\u56e0\u6b64\u8be5 family \u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u57fa\u4e8e\u5f53\u524d\u771f\u5b9e frontier\uff0c`shared_routed_expert_topk` \u5df2\u7ecf\u5f62\u6210\u6700\u5f3a\u7684 <0.5x \u517c\u5bb9\u4f4e\u6210\u672c\u6bb5\uff0c\u800c r119-r120 \u8bf4\u660e `two_stage_residual_expert` \u5728\u5f53\u524d `K=96` recipe \u4e0a\u8fde\u7eed\u4e24\u8f6e\u6ca1\u6709\u5f62\u6210\u65b0\u975e\u652f\u914d\u70b9\uff1b\u4e0b\u4e00\u8f6e\u5e94\u6309\u89c4\u5219\u5207 family/\u5207\u5047\u8bbe\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u91cd\u590d staged residual\u3002\u76f8\u5bf9 r118 \u4ec5\u628a `K` \u4ece 80 \u63d0\u5230 96\uff0c\u4fdd\u6301 `ARCHITECTURE=shared_routed_expert_topk`\u3001`NUM_EXPERTS=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`EF=1`\u3001`adam`\u3001`8e-4` \u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u6700\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\uff1a\u8fd9\u6761\u66f4\u7a84 per-expert width \u7684 shared+routed \u5b50\u7ebf\u5230\u5e95\u662f width-limited\uff0c\u8fd8\u662f\u4ecd\u7136\u4e3b\u8981\u53d7 deployment lookup budget \u9650\u5236\u3002\u6309\u5f53\u524d 1024x4096 cost proxy\uff0cselection \u7ef4\u6301\u7ea6 0.156x\uff0cdeployment \u4ece 0.078x \u5347\u5230 0.094x\uff0ctotal \u7ea6 0.25x\uff0c\u8fdc\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002\u82e5 FVU \u80fd\u660e\u663e\u4f18\u4e8e r118 \u7684 0.13995\uff0c\u5e76\u903c\u8fd1\u6216\u4f18\u4e8e r113 \u7684 0.13499\uff0c\u5219\u53ef\u5728 0.25x \u5de6\u53f3\u8865\u51fa\u4e00\u6bb5\u65b0\u7684\u4f4e\u6210\u672c Pareto \u951a\u70b9\u3002",
+research/history/round_summaries/round_0121.json:20:    "summary": "\u5207\u56de\u5f53\u524d\u771f\u5b9e\u6700\u5f3a\u7684\u4f4e\u6210\u672c\u517c\u5bb9\u4e3b\u7ebf `shared_routed_expert_topk`\u3002\u4ee5 r118 \u4e3a reference\uff0c\u53ea\u628a `K` \u4ece 80 \u63d0\u5230 96\uff0c\u6d4b\u8bd5 `ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192` \u8fd9\u6761\u7a84\u5bbd\u5ea6 shared+routed \u5206\u652f\u662f\u5426\u4e3b\u8981\u53d7 lookup budget \u9650\u5236\uff0c\u5e76\u4e89\u53d6\u5728\u7ea6 0.25x total_cost \u5904\u8865\u51fa\u65b0\u7684\u4f4e\u6210\u672c Pareto \u951a\u70b9\u3002",
+research/history/round_summaries/round_0121.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:25:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r118 \u53ea\u6539 `K`\u3002\u8fd9\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u76f2\u76ee K \u8f74\u7ec6\u626b\uff0c\u56e0\u4e3a\u5f53\u524d\u771f\u6b63\u6301\u6709\u4f4e\u6210\u672c\u517c\u5bb9\u524d\u6cbf\u7684\u662f `shared_routed_expert_topk`\uff0c\u800c\u4e14\u672c\u8f6e\u4e13\u95e8\u56de\u7b54\u7684\u662f `LATENTS_PER_EXPERT=192` \u8fd9\u6761\u66f4\u7a84 expert \u5b50\u7ebf\u662f\u5426 deployment-limited\u3002\u9009\u62e9 r118 \u800c\u4e0d\u662f r119/r120 \u4f5c reference\uff0c\u662f\u4e3a\u4e86\u907f\u514d\u628a\u4e24\u8f6e\u5df2\u63a5\u8fd1\u7684 staged residual \u8d1f\u7ed3\u679c\u7ee7\u7eed\u5ef6\u957f\uff1b\u9009\u62e9 `K=96` \u800c\u4e0d\u662f\u66f4\u9ad8\uff0c\u662f\u4e3a\u4e86\u628a\u5b9e\u9a8c\u7559\u5728\u7ea6 0.25x \u7684\u4f4e\u6210\u672c\u5e26\u5185\uff0c\u4f18\u5148\u8865\u6700\u6b20\u8986\u76d6\u7684\u533a\u57df\u3002",
+research/history/round_summaries/round_0121.json:35:      "\u5f53\u524d\u5de5\u4f5c\u533a\u771f\u5b9e frontier \u5df2\u88ab `shared_routed_expert_topk` \u91cd\u5199\uff1ar107-r116 \u5f62\u6210\u4e86\u4ece\u7ea6 0.42x \u5230 0.22x \u7684\u8fde\u7eed\u517c\u5bb9\u4f4e\u6210\u672c Pareto \u6bb5\uff0c\u4f18\u5148\u7ea7\u9ad8\u4e8e\u7528\u6237\u63d0\u793a\u91cc\u8f83\u65e7\u7684 `<0.5x` \u6458\u8981\u3002",
+research/history/round_summaries/round_0121.json:54:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:63:    "description": "\u5207\u56de\u5f53\u524d\u771f\u5b9e\u6700\u5f3a\u7684\u4f4e\u6210\u672c\u517c\u5bb9\u4e3b\u7ebf `shared_routed_expert_topk`\u3002\u4ee5 r118 \u4e3a reference\uff0c\u53ea\u628a `K` \u4ece 80 \u63d0\u5230 96\uff0c\u6d4b\u8bd5 `ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192` \u8fd9\u6761\u7a84\u5bbd\u5ea6 shared+routed \u5206\u652f\u662f\u5426\u4e3b\u8981\u53d7 lookup budget \u9650\u5236\uff0c\u5e76\u4e89\u53d6\u5728\u7ea6 0.25x total_cost \u5904\u8865\u51fa\u65b0\u7684\u4f4e\u6210\u672c Pareto \u951a\u70b9\u3002",
+research/history/round_summaries/round_0121.json:64:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r118 \u53ea\u6539 `K`\u3002\u8fd9\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u76f2\u76ee K \u8f74\u7ec6\u626b\uff0c\u56e0\u4e3a\u5f53\u524d\u771f\u6b63\u6301\u6709\u4f4e\u6210\u672c\u517c\u5bb9\u524d\u6cbf\u7684\u662f `shared_routed_expert_topk`\uff0c\u800c\u4e14\u672c\u8f6e\u4e13\u95e8\u56de\u7b54\u7684\u662f `LATENTS_PER_EXPERT=192` \u8fd9\u6761\u66f4\u7a84 expert \u5b50\u7ebf\u662f\u5426 deployment-limited\u3002\u9009\u62e9 r118 \u800c\u4e0d\u662f r119/r120 \u4f5c reference\uff0c\u662f\u4e3a\u4e86\u907f\u514d\u628a\u4e24\u8f6e\u5df2\u63a5\u8fd1\u7684 staged residual \u8d1f\u7ed3\u679c\u7ee7\u7eed\u5ef6\u957f\uff1b\u9009\u62e9 `K=96` \u800c\u4e0d\u662f\u66f4\u9ad8\uff0c\u662f\u4e3a\u4e86\u628a\u5b9e\u9a8c\u7559\u5728\u7ea6 0.25x \u7684\u4f4e\u6210\u672c\u5e26\u5185\uff0c\u4f18\u5148\u8865\u6700\u6b20\u8986\u76d6\u7684\u533a\u57df\u3002",
+research/history/round_summaries/round_0121.json:80:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:101:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:126:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:138:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0121.json:161:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0141.json:7:  "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_{i\u2208S_sh(h(x))} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(h(x))} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d h(x)=ReLU(Bx)\uff0cU={u_i} \u662f shared \u9759\u6001\u5411\u91cf\u5e93\uff0c{B_e} \u662f routed expert \u9759\u6001\u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u53ef\u5bfc\u51fa\u4e3a\u201cshared low-rank projection + shared library lookup + routed expert local top-k + \u6709\u9650\u52a0\u6743\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `shared_lowrank_routed_expert_topk` \u5224\u5b9a\u4e3a\u76f4\u63a5\u517c\u5bb9\uff0c\u4e0d\u662f\u4e0d\u517c\u5bb9 family\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1a\u76f8\u5bf9 r123 \u4ec5\u628a `ARCHITECTURE` \u4ece `shared_routed_expert_topk` \u5207\u5230 `shared_lowrank_routed_expert_topk`\uff0c\u4fdd\u6301 `K=112`\u3001`EXPANSION_FACTOR=1`\u3001`ACTIVE_EXPERTS=2`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`LATENTS_PER_EXPERT=224`\u3001`NUM_EXPERTS=64` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u505a\u4e00\u6b21 matched-cost hetero-MoE \u7ed3\u6784\u5bf9\u7167\uff0c\u56de\u7b54\u201cshared low-rank basis + expert-specific local head\u201d\u8fd9\u6761\u7ebf\u5728\u7ea6 0.30x total_cost \u4e0b\u662f\u5426\u80fd\u5f62\u6210\u6bd4\u5f53\u524d low-cost anchor \u66f4\u6709\u4ef7\u503c\u7684\u65b0\u7ed3\u6784\u6bb5\u3002",
+research/history/round_summaries/round_0141.json:20:    "summary": "\u5efa\u8bae\u4ee5 r123 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\u3002\u8fd9\u662f\u4e00\u8f6e\u9762\u5411\u4f4e\u6210\u672c\u524d\u6cbf\u7684 matched-cost \u7ed3\u6784\u5bf9\u7167\uff0c\u7528\u5f53\u524d\u6700\u76f8\u5173\u7684 low-cost anchor \u76f4\u63a5\u56de\u7b54\u201cshared low-rank basis + expert-specific local top-k\u201d\u662f\u5426\u503c\u5f97\u7ee7\u7eed\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u6700\u8fd1\u8fde\u7eed\u5931\u5229\u7684 residual \u53d8\u4f53\u4e0a\u505a\u5c40\u90e8\u538b\u7f29\u3002",
+research/history/round_summaries/round_0141.json:23:    "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:25:    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r123 \u53ea\u6539 `ARCHITECTURE`\u3002\u5728 `shared_lowrank_routed_expert_residual` \u5df2\u8fde\u7eed\u4e24\u8f6e\u672a\u5f62\u6210\u65b0\u975e\u652f\u914d\u70b9\u540e\uff0c\u7ee7\u7eed\u6cbf\u540c\u4e00 family \u505a `FACTORIZED_HIDDEN_DIM` \u6216 `K` \u7684\u5c40\u90e8\u626b\u53c2\u4fe1\u606f\u589e\u91cf\u504f\u4f4e\uff1b\u5207\u56de `shared_lowrank_routed_expert_topk` \u505a matched-cost architecture swap\uff0c\u66f4\u7b26\u5408\u5f53\u524d\u201c\u7ed3\u6784\u6269\u5c55\u4f18\u5148\u201d\u548c\u5bf9 hetero MoE \u7684\u660e\u786e\u4f18\u5148\u7ea7\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u5148\u524d\u5728\u66f4\u9ad8\u5bb9\u91cf\u914d\u65b9\u4e0b\u5df2\u6709\u8d1f\u4fe1\u53f7\uff1b\u4f46\u5f53\u524d\u8fd9\u6b21\u662f\u66f4\u4f4e\u6210\u672c\u3001\u4e0e low-cost anchor \u4e25\u683c\u5bf9\u7167\u7684\u91cd\u9a8c\uff0c\u7ed3\u8bba\u4f1a\u66f4\u6e05\u6670\u3002",
+research/history/round_summaries/round_0141.json:30:        "value": "shared_lowrank_routed_expert_topk"
+research/history/round_summaries/round_0141.json:36:      "\u672c\u8f6e\u4e0d\u662f\u56de\u5230 `shared_routed_expert_topk` \u505a\u65e7 family \u5c40\u90e8\u5fae\u8c03\uff0c\u800c\u662f\u4ee5\u5f53\u524d\u4f4e\u6210\u672c reference r123 \u4e3a matched baseline\uff0c\u76f4\u63a5\u91cd\u9a8c\u66f4\u7b26\u5408\u5f53\u524d agenda \u7684 hetero MoE \u7ed3\u6784 `shared_lowrank_routed_expert_topk`\u3002",
+research/history/round_summaries/round_0141.json:37:      "\u672c\u5730\u6210\u672c\u81ea\u68c0\uff1a\u5728 r123 \u914d\u65b9\u4e0b\u5207\u5230 `shared_lowrank_routed_expert_topk` \u540e\uff0cselection_accesses=794624\u3001deployment_accesses=458752\u3001combined_accesses=1253376\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 combined_ratio\u22480.30\uff0c\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002"
+research/history/round_summaries/round_0141.json:40:      "\u5982\u679c\u8be5\u70b9\u5728\u7ea6 0.30x \u4e0b\u660e\u663e\u4f18\u4e8e\u73b0\u6709 `shared_routed_expert_topk` \u90bb\u8fd1\u951a\u70b9\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301\u8be5 family \u4e0d\u53d8\uff0c\u53ea\u6539 `FACTORIZED_HIDDEN_DIM` \u6216 `LATENTS_PER_EXPERT` \u7ee7\u7eed\u538b\u4f4e shared/routed \u6210\u672c\u3002",
+research/history/round_summaries/round_0141.json:53:    "architecture": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:62:    "description": "\u5efa\u8bae\u4ee5 r123 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\u3002\u8fd9\u662f\u4e00\u8f6e\u9762\u5411\u4f4e\u6210\u672c\u524d\u6cbf\u7684 matched-cost \u7ed3\u6784\u5bf9\u7167\uff0c\u7528\u5f53\u524d\u6700\u76f8\u5173\u7684 low-cost anchor \u76f4\u63a5\u56de\u7b54\u201cshared low-rank basis + expert-specific local top-k\u201d\u662f\u5426\u503c\u5f97\u7ee7\u7eed\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u6700\u8fd1\u8fde\u7eed\u5931\u5229\u7684 residual \u53d8\u4f53\u4e0a\u505a\u5c40\u90e8\u538b\u7f29\u3002",
+research/history/round_summaries/round_0141.json:63:    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r123 \u53ea\u6539 `ARCHITECTURE`\u3002\u5728 `shared_lowrank_routed_expert_residual` \u5df2\u8fde\u7eed\u4e24\u8f6e\u672a\u5f62\u6210\u65b0\u975e\u652f\u914d\u70b9\u540e\uff0c\u7ee7\u7eed\u6cbf\u540c\u4e00 family \u505a `FACTORIZED_HIDDEN_DIM` \u6216 `K` \u7684\u5c40\u90e8\u626b\u53c2\u4fe1\u606f\u589e\u91cf\u504f\u4f4e\uff1b\u5207\u56de `shared_lowrank_routed_expert_topk` \u505a matched-cost architecture swap\uff0c\u66f4\u7b26\u5408\u5f53\u524d\u201c\u7ed3\u6784\u6269\u5c55\u4f18\u5148\u201d\u548c\u5bf9 hetero MoE \u7684\u660e\u786e\u4f18\u5148\u7ea7\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u5148\u524d\u5728\u66f4\u9ad8\u5bb9\u91cf\u914d\u65b9\u4e0b\u5df2\u6709\u8d1f\u4fe1\u53f7\uff1b\u4f46\u5f53\u524d\u8fd9\u6b21\u662f\u66f4\u4f4e\u6210\u672c\u3001\u4e0e low-cost anchor \u4e25\u683c\u5bf9\u7167\u7684\u91cd\u9a8c\uff0c\u7ed3\u8bba\u4f1a\u66f4\u6e05\u6670\u3002",
+research/history/round_summaries/round_0141.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0141.json:100:    "ARCHITECTURE": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:125:    "architecture": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:137:    "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:160:    "ARCHITECTURE": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0118.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:20:    "summary": "\u4ee5 r116 \u4e3a reference\uff0c\u4fdd\u6301 `shared_routed_expert_topk`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`NUM_EXPERTS=64` \u4e0d\u53d8\uff0c\u53ea\u6539 `K=80`\uff0c\u76f4\u63a5\u6bd4\u8f83\u201c\u52a0\u5c11\u91cf lookup budget\u201d\u662f\u5426\u6bd4 r117 \u7684\u201c\u52a0 routed expert\u201d\u66f4\u503c\u5f97\u3002",
+research/history/round_summaries/round_0118.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:35:      "\u5b9e\u9645\u5de5\u4f5c\u533a\u4f4e\u6210\u672c frontier \u5df2\u7531 `shared_routed_expert_topk` \u4e3b\u5bfc\uff1ar113 \u7ea6 0.27x / FVU 0.1350\uff0cr115 \u7ea6 0.24x / 0.1397\uff0cr116 \u7ea6 0.22x / 0.1464\uff1b\u63d0\u793a\u4e2d\u7684 `<0.5x` \u6458\u8981\u5df2\u660e\u663e\u8fc7\u65f6\u3002",
+research/history/round_summaries/round_0118.json:37:      "\u672c\u5730 cost \u4f30\u7b97\u663e\u793a\uff1a`shared_routed_expert_topk K=80 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` \u7684 selection_accesses=655360\u3001deployment_accesses=327680\u3001combined_accesses=983040\uff0ccombined_ratio \u7ea6 0.23\uff0c\u660e\u663e\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002"
+research/history/round_summaries/round_0118.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:62:    "description": "\u4ee5 r116 \u4e3a reference\uff0c\u4fdd\u6301 `shared_routed_expert_topk`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`NUM_EXPERTS=64` \u4e0d\u53d8\uff0c\u53ea\u6539 `K=80`\uff0c\u76f4\u63a5\u6bd4\u8f83\u201c\u52a0\u5c11\u91cf lookup budget\u201d\u662f\u5426\u6bd4 r117 \u7684\u201c\u52a0 routed expert\u201d\u66f4\u503c\u5f97\u3002",
+research/history/round_summaries/round_0118.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0118.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d B^sh \u662f\u59cb\u7ec8\u6fc0\u6d3b\u7684\u9759\u6001 shared \u5b50\u5e93\uff0cE(x) \u662f\u8f7b\u91cf router \u9009\u51fa\u7684\u5c11\u91cf routed experts\uff0c\u6240\u6709\u539f\u5b50\u90fd\u6765\u81ea\u9759\u6001\u5411\u91cf\u5e93\uff0c\u56e0\u6b64\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1ar103 \u5df2\u8bc1\u660e `shared_routed_expert_topk` \u80fd\u7a33\u5b9a\u8bad\u7ec3\u5e76\u5728\u7ea6 total_cost=0.63x \u53d6\u5f97 FVU=0.1188\uff0c\u63a5\u4e0b\u6765\u6700\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\u5b83\u662f\u5426\u4ecd\u53d7 routed \u603b\u5bb9\u91cf\u9650\u5236\uff1b\u76f8\u5bf9 r103 \u4ec5\u628a `NUM_EXPERTS: 32 -> 64`\uff0c\u4fdd\u6301 `ACTIVE_EXPERTS=1` \u7684\u77ed\u6fc0\u6d3b\u8def\u5f84\u4e0e\u5176\u4f59 recipe \u4e0d\u53d8\uff0c\u5982\u679c shared+routed MoE-like \u65b9\u5411\u786e\u5b9e\u503c\u5f97\u7ee7\u7eed\uff0c\u5219\u5e94\u5728\u51e0\u4e4e\u540c\u4e00\u6210\u672c\u5e26\uff08fresh cost \u7ea6 selection=0.52x\u3001deployment=0.12x\u3001total=0.64x\uff09\u8fdb\u4e00\u6b65\u538b\u4f4e FVU\u3002",
+research/history/round_summaries/round_0104.json:20:    "summary": "\u6cbf `shared_routed_expert_topk` \u505a\u7b2c\u4e00\u6b21\u771f\u5b9e\u5bb9\u91cf\u6269\u5c55 probe\uff1a\u76f8\u5bf9 r103 \u53ea\u589e\u5927 `NUM_EXPERTS`\uff0c\u76f4\u63a5\u5224\u65ad shared+routed \u7ed3\u6784\u5728\u4fdd\u6301\u77ed active path \u65f6\u662f\u5426\u8fd8\u6709 sparse-capacity \u6536\u76ca\u3002",
+research/history/round_summaries/round_0104.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:35:      "r103 \u5df2\u786e\u8ba4 `shared_routed_expert_topk` \u53ef\u7a33\u5b9a\u8bad\u7ec3\uff0c\u6700\u8fd1\u4e24\u8f6e crash \u4e0d\u662f\u8be5 family \u524d\u5411/\u53cd\u5411\u5b9e\u73b0\u95ee\u9898\u3002",
+research/history/round_summaries/round_0104.json:37:      "fresh cost \u4f30\u7b97\uff1a`shared_routed_expert_topk K=128 EF=1 NUM_EXPERTS=64` \u7684 selection\u22480.52x\u3001deployment\u22480.12x\u3001total\u22480.64x\uff0c\u4ecd\u5728\u5141\u8bb8\u7684 0.3x-0.8x \u7ed3\u6784 anchor \u5e26\u5185\u3002"
+research/history/round_summaries/round_0104.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:62:    "description": "\u6cbf `shared_routed_expert_topk` \u505a\u7b2c\u4e00\u6b21\u771f\u5b9e\u5bb9\u91cf\u6269\u5c55 probe\uff1a\u76f8\u5bf9 r103 \u53ea\u589e\u5927 `NUM_EXPERTS`\uff0c\u76f4\u63a5\u5224\u65ad shared+routed \u7ed3\u6784\u5728\u4fdd\u6301\u77ed active path \u65f6\u662f\u5426\u8fd8\u6709 sparse-capacity \u6536\u76ca\u3002",
+research/history/round_summaries/round_0104.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:98:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:121:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:133:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0104.json:154:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0087.json:7:  "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_{i\u2208S_{e(z)}(z)} \u03b1_{e,i}(x) b_{e,i}\uff0c\u5176\u4e2d z = Bx \u662f\u5171\u4eab\u4f4e\u7ef4\u6295\u5f71\uff0ce(z) \u662f\u8f7b\u91cf router \u9009\u51fa\u7684\u5355\u4e2a expert\uff0c{B_e} \u5bf9\u5e94\u82e5\u5e72\u9759\u6001 expert \u5b50\u5e93\uff0c\u6700\u7ec8\u91cd\u6784\u4ecd\u662f\u9759\u6001\u5411\u91cf\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\u3002\u5728\u7ebf\u5bfc\u51fa\u94fe\u8def\u53ef\u5199\u6210\u201cshared low-rank projection -> router \u9009\u9759\u6001 expert \u5b50\u5e93 -> expert \u5185 low-rank head \u505a local scoring/top-k -> \u67e5\u8868\u52a0\u6743\u6c42\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `factorized_expert_topk` \u5c5e\u4e8e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8 frontier\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1a\u76f8\u5bf9 r74 \u4ec5\u628a `ARCHITECTURE` \u4ece `expert_topk` \u5207\u5230 `factorized_expert_topk`\uff0c\u5728\u4fdd\u6301 `K=160`\u3001`NUM_EXPERTS=128`\u3001`EXPANSION_FACTOR=1`\u3001`OPTIMIZER=adam`\u3001`LR=8e-4` \u548c\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\u65f6\uff0cshared-basis expert routing \u80fd\u5728\u4ecd\u5904\u4e8e\u4f4e\u5230\u4e2d\u6210\u672c\u5e26\u7684\u524d\u63d0\u4e0b\uff0c\u6bd4 routed-only `expert_topk` \u66f4\u6709\u6548\u5730\u5229\u7528\u5b50\u5e93\u5bb9\u91cf\uff0c\u4ece\u800c\u628a\u5f53\u524d\u4f4e\u5f00\u9500 Pareto \u524d\u6cbf\u5411\u4e0b\u63a8\u8fdb\u3002\u6309\u5f53\u524d\u6210\u672c\u6a21\u578b\u7c97\u4f30\uff0cselection \u7ea6 0.33x\u3001deployment \u7ea6 0.16x\u3001total \u7ea6 0.49x\uff0c\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002",
+research/history/round_summaries/round_0087.json:20:    "summary": "Round 87 \u4e0d\u56de\u5230\u65e7 family \u7684 K \u8f74\u5fae\u8c03\uff0c\u800c\u662f\u7528\u4e00\u4e2a\u9ad8\u4fe1\u606f\u91cf\u3001\u5df2\u5b9e\u73b0\u4f46\u5f53\u524d target \u5c1a\u672a\u5145\u5206\u9a8c\u8bc1\u7684\u7ed3\u6784\u65b9\u5411\u8865\u4f4e\u6210\u672c\u524d\u6cbf\uff1a\u4ee5 r74 \u4e3a matched reference\uff0c\u53ea\u5207\u6362\u5230 `factorized_expert_topk`\u3002\u8fd9\u76f4\u63a5\u56de\u7b54\u63d0\u793a\u91cc\u4f18\u5148\u7ea7\u5f88\u9ad8\u7684\u201cexpert \u5185 low-rank / shared-basis routing\u201d\u662f\u5426\u6bd4 routed-only MoE-like \u66f4\u503c\u5f97\u7ee7\u7eed\u3002",
+research/history/round_summaries/round_0087.json:23:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:30:        "value": "factorized_expert_topk"
+research/history/round_summaries/round_0087.json:35:      "`factorized_expert_topk` \u7684\u6700\u7ec8\u5bfc\u51fa\u5f62\u5f0f\u4ecd\u662f\u9759\u6001 expert \u5b50\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff1b\u5171\u4eab\u4f4e\u79e9\u6295\u5f71\u4e0e expert head \u53ea\u6539\u53d8\u5728\u7ebf\u6253\u5206\u94fe\u8def\uff0c\u4e0d\u5f15\u5165\u52a8\u6001\u5b57\u5178\u3002",
+research/history/round_summaries/round_0087.json:37:      "\u6309\u5f53\u524d 1024x4096 cost proxy \u7c97\u4f30\uff0c`factorized_expert_topk K=160 EF=1 NUM_EXPERTS=128` \u7684 total_cost \u7ea6 0.49x\uff0c\u6b63\u597d\u843d\u5728\u5f53\u524d\u6700\u9700\u8981\u8865\u5f3a\u7684\u4f4e\u6210\u672c\u5e26\u3002",
+research/history/round_summaries/round_0087.json:41:      "\u5982\u679c `factorized_expert_topk` \u5728\u8fd1\u540c\u6210\u672c\u4e0b\u660e\u663e\u4f18\u4e8e r74\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `K=128`\uff0c\u6d4b\u8bd5\u8fd9\u6761 shared-basis routed \u524d\u6cbf\u80fd\u5426\u7ee7\u7eed\u5411\u5de6\u5ef6\u4f38\u3002",
+research/history/round_summaries/round_0087.json:42:      "\u5982\u679c `factorized_expert_topk` \u4f18\u4e8e r74 \u4f46\u4ecd\u660e\u663e\u843d\u540e\u4e8e <0.5x \u6700\u4f18\u70b9\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `NUM_EXPERTS` \u6216 `FACTORIZED_HIDDEN_DIM`\uff0c\u533a\u5206\u74f6\u9888\u662f\u5728\u603b\u9759\u6001\u5bb9\u91cf\u8fd8\u662f shared basis \u5bbd\u5ea6\u3002",
+research/history/round_summaries/round_0087.json:54:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:63:    "description": "Round 87 \u4e0d\u56de\u5230\u65e7 family \u7684 K \u8f74\u5fae\u8c03\uff0c\u800c\u662f\u7528\u4e00\u4e2a\u9ad8\u4fe1\u606f\u91cf\u3001\u5df2\u5b9e\u73b0\u4f46\u5f53\u524d target \u5c1a\u672a\u5145\u5206\u9a8c\u8bc1\u7684\u7ed3\u6784\u65b9\u5411\u8865\u4f4e\u6210\u672c\u524d\u6cbf\uff1a\u4ee5 r74 \u4e3a matched reference\uff0c\u53ea\u5207\u6362\u5230 `factorized_expert_topk`\u3002\u8fd9\u76f4\u63a5\u56de\u7b54\u63d0\u793a\u91cc\u4f18\u5148\u7ea7\u5f88\u9ad8\u7684\u201cexpert \u5185 low-rank / shared-basis routing\u201d\u662f\u5426\u6bd4 routed-only MoE-like \u66f4\u503c\u5f97\u7ee7\u7eed\u3002",
+research/history/round_summaries/round_0087.json:96:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:116:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:128:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0087.json:146:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0110.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d B^sh \u662f\u59cb\u7ec8\u6fc0\u6d3b\u7684\u9759\u6001 shared \u5b50\u5e93\uff0cE(x) \u662f\u8f7b\u91cf router \u9009\u51fa\u7684\u5c11\u91cf routed experts\uff0c\u6240\u6709\u539f\u5b50\u90fd\u6765\u81ea\u9759\u6001\u5411\u91cf\u5e93\uff0c\u56e0\u6b64\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u660e\u786e\u6392\u9664\u4e0d\u517c\u5bb9 family\uff1a`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled \u7ed3\u6784\u4e0d\u80fd\u9a71\u52a8 frontier\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1ar107\u2192r109 \u5df2\u7ecf\u628a `shared_routed_expert_topk` \u7684\u4f4e\u6210\u672c\u524d\u6cbf\u4ece\u7ea6 0.42x \u5de6\u79fb\u5230\u7ea6 0.34x\uff0c\u5e76\u8868\u660e `ACTIVE_EXPERTS=2` \u7684 shared+routed \u7ec4\u5408\u503c\u5f97\u7ee7\u7eed\uff1b\u4f46 r108\u2192r109 \u7684\u9000\u5316\u8bf4\u660e\u7ee7\u7eed\u5355\u7eaf\u538b\u90e8\u7f72\u4fa7 `K` \u53ef\u80fd\u5df2\u7ecf\u5f00\u59cb\u4f24\u5bb3\u5c40\u90e8 lookup budget\u3002\u76f8\u5bf9 r109 \u4ec5\u628a `LATENTS_PER_EXPERT` \u4ece 320 \u964d\u5230 288\uff0c\u5728\u4fdd\u6301 `K=96`\u3001`ACTIVE_EXPERTS=2`\u3001`NUM_EXPERTS=64`\u3001`EF=1` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\u65f6\uff0c\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c\u603b\u6210\u672c\u5c06\u7ea6\u4ece 0.34x \u8fdb\u4e00\u6b65\u964d\u5230 0.32x\uff0c\u800c\u4e0d\u518d\u989d\u5916\u538b\u7f29 sparse lookup \u9884\u7b97\uff1b\u5982\u679c FVU \u660e\u663e\u4f18\u4e8e\u5f53\u524d 0.19x \u7684 `expert_topk K=128` \u548c\u73b0\u6709 0.34x shared+routed \u70b9\uff0c\u5219\u8bf4\u660e shared+routed \u4f4e\u6210\u672c\u7ebf\u4e0b\u4e00\u6b65\u66f4\u8be5\u4ece encoder \u5bbd\u5ea6\u538b\u7f29\u800c\u4e0d\u662f\u7ee7\u7eed\u964d K\u3002",
+research/history/round_summaries/round_0110.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:36:      "\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c`shared_routed_expert_topk K=96 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=288` \u7684 selection\u22480.23x\u3001deployment\u22480.09x\u3001total\u22480.32x\uff0c\u660e\u663e\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002",
+research/history/round_summaries/round_0110.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0110.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0098.json:25:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r96 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u5c40\u90e8 K \u8f74\uff0c\u4e5f\u4e0d\u662f\u7ee7\u7eed\u91cd\u590d routed-only \u6216 `factorized_expert_topk` \u7684\u5df2\u5426\u5b9a\u65b9\u5411\uff0c\u800c\u662f\u5bf9\u5f53\u524d\u5df2\u5b8c\u6210 knee \u5b9a\u4f4d\u7684\u6709\u6548\u4e3b\u7ebf\u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf matched \u7ed3\u6784\u5207\u6362\u3002\u4e3b\u8981\u98ce\u9669\u662f\u53c2\u8003\u914d\u7f6e\u4e2d\u7684 `STAGE1_RATIO=0.25` \u5728 `lowrank_expert_topk` \u4e0b\u539f\u672c\u4e0d\u751f\u6548\u3001\u5728\u65b0 family \u4e0b\u4f1a\u5f00\u59cb\u751f\u6548\uff0c\u56e0\u6b64\u8fd9\u662f\u201crecipe matched\u3001\u4f46\u5e76\u975e\u6240\u6709\u65cb\u94ae\u90fd\u8bed\u4e49\u5171\u4eab\u201d\u7684 architecture swap\uff1b\u4e0d\u8fc7\u8fd9\u6b63\u662f\u5f53\u524d\u9700\u8981\u7684\u771f\u5b9e\u90e8\u7f72\u53ef\u884c\u7ed3\u6784\u5bf9\u7167\u3002",
+research/history/round_summaries/round_0098.json:38:      "`factorized_expert_topk` \u4e0e routed-only `ACTIVE_EXPERTS>1` \u65b9\u5411\u4ecd\u7ef4\u6301\u8d1f\u4fe1\u53f7\uff0c\u672c\u8f6e\u7ee7\u7eed\u907f\u5f00\u8fd9\u4e9b\u5df2\u4f4e\u4f18\u5148\u7ea7\u8def\u7ebf\u3002"
+research/history/round_summaries/round_0098.json:64:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r96 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u5c40\u90e8 K \u8f74\uff0c\u4e5f\u4e0d\u662f\u7ee7\u7eed\u91cd\u590d routed-only \u6216 `factorized_expert_topk` \u7684\u5df2\u5426\u5b9a\u65b9\u5411\uff0c\u800c\u662f\u5bf9\u5f53\u524d\u5df2\u5b8c\u6210 knee \u5b9a\u4f4d\u7684\u6709\u6548\u4e3b\u7ebf\u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf matched \u7ed3\u6784\u5207\u6362\u3002\u4e3b\u8981\u98ce\u9669\u662f\u53c2\u8003\u914d\u7f6e\u4e2d\u7684 `STAGE1_RATIO=0.25` \u5728 `lowrank_expert_topk` \u4e0b\u539f\u672c\u4e0d\u751f\u6548\u3001\u5728\u65b0 family \u4e0b\u4f1a\u5f00\u59cb\u751f\u6548\uff0c\u56e0\u6b64\u8fd9\u662f\u201crecipe matched\u3001\u4f46\u5e76\u975e\u6240\u6709\u65cb\u94ae\u90fd\u8bed\u4e49\u5171\u4eab\u201d\u7684 architecture swap\uff1b\u4e0d\u8fc7\u8fd9\u6b63\u662f\u5f53\u524d\u9700\u8981\u7684\u771f\u5b9e\u90e8\u7f72\u53ef\u884c\u7ed3\u6784\u5bf9\u7167\u3002",
+research/history/round_summaries/round_0161.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u53ea\u505a\u8f7b\u91cf router \u9009\u62e9\u5c11\u91cf routed experts\uff0c\u7136\u540e\u6267\u884c shared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled family \u4ecd\u660e\u786e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8 frontier\u3002r159\u2192r160 \u5df2\u8bc1\u660e `LATENTS_PER_EXPERT=160` \u8fd9\u6761\u66f4\u8f7b shared+routed \u5b50\u7ebf\u5728 `<0.25x` \u5e26\u5185\u4ecd\u53ef\u901a\u8fc7\u589e\u52a0\u5c11\u91cf lookup budget \u7a33\u5b9a\u6539\u5584\uff080.20x/0.1551 -> 0.21x/0.1484\uff09\uff0c\u56e0\u6b64\u5f53\u524d\u6700\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\u8fd9\u6761\u5b50\u7ebf\u662f\u5426\u4ecd\u4e3b\u8981\u53d7 deployment lookup \u9650\u5236\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r160 \u4ec5\u628a `K` \u4ece 80 \u63d0\u5230 96\uff0c\u4fdd\u6301 `ARCHITECTURE=shared_routed_expert_topk`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=160`\u3001`NUM_EXPERTS=64` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u53ef\u4ee5\u628a total_cost \u63a7\u5236\u5728\u7ea6 0.22x\uff0c\u540c\u65f6\u7ee7\u7eed\u663e\u8457\u6539\u5584 FVU\uff1b\u82e5\u80fd\u903c\u8fd1\u6216\u4f18\u4e8e\u5f53\u524d 0.22x \u951a\u70b9 0.1464\uff0c\u5e76\u5c3d\u91cf\u63a5\u8fd1 0.24x \u951a\u70b9 0.1397\uff0c\u5219\u8bf4\u660e\u66f4\u8f7b expert \u5b50\u5e93\u8fd9\u6761\u4f4e\u6210\u672c\u4e3b\u7ebf\u4ecd\u503c\u5f97\u7ee7\u7eed\uff0c\u800c\u4e0d\u662f\u9a6c\u4e0a\u56de\u5230\u66f4\u5bbd\u5b50\u5e93\u6216\u5207\u5230\u522b\u7684 family\u3002",
+research/history/round_summaries/round_0161.json:20:    "summary": "\u4ee5 r160 \u4e3a reference\uff0c\u4fdd\u6301\u5f53\u524d\u66f4\u8f7b\u7684 `shared_routed_expert_topk` \u914d\u65b9\u4e0d\u53d8\uff0c\u53ea\u6539 `K=96`\u3002\u8fd9\u662f\u4e00\u8f6e\u4e25\u683c\u7559\u5728 `<0.25x` \u4e3b\u6218\u573a\u7684 matched-cost deployment probe\uff0c\u76f4\u63a5\u6d4b\u8bd5 `LATENTS_PER_EXPERT=160` \u8fd9\u6761\u66f4\u8f7b shared+routed \u5b50\u7ebf\u662f\u5426\u8fd8\u80fd\u5728\u7ea6 0.22x \u6210\u672c\u4e0b\u7ee7\u7eed\u5411\u73b0\u6709 low-cost best \u9760\u8fd1\u3002",
+research/history/round_summaries/round_0161.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:35:      "r159 \u5df2\u7ed9\u51fa\u66f4\u5de6 low-cost anchor\uff1a`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` \u5728\u7ea6 0.20x total_cost \u4e0b\u8fbe\u5230 FVU 0.1551\u3002",
+research/history/round_summaries/round_0161.json:38:      "\u672c\u8f6e\u4e0d\u9700\u8981\u4ee3\u7801\u4fee\u6539\uff1b`K`\u3001`LATENTS_PER_EXPERT`\u3001`ACTIVE_EXPERTS` \u4e0e `shared_routed_expert_topk` \u7684 wiring \u5df2\u5728\u5386\u53f2\u8f6e\u6b21\u4e2d\u7a33\u5b9a\u751f\u6548\u3002"
+research/history/round_summaries/round_0161.json:43:      "\u5982\u679c `K=96` \u4ecd\u660e\u663e\u843d\u540e\u4e8e\u540c\u6210\u672c anchors\uff0c\u5219\u53ef\u4e0b\u8c03 width=160 \u5b50\u7ebf\u4f18\u5148\u7ea7\uff0c\u4e0b\u4e00\u8f6e\u6539\u505a low-cost matched architecture probe\uff0c\u4f8b\u5982\u76f4\u63a5\u5bf9\u7167 `shared_routed_factorized_expert_topk` \u662f\u5426\u80fd\u5728\u540c\u6210\u672c\u5e26\u63d0\u4f9b\u66f4\u4f18\u8d28\u91cf\u3002"
+research/history/round_summaries/round_0161.json:54:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:63:    "description": "\u4ee5 r160 \u4e3a reference\uff0c\u4fdd\u6301\u5f53\u524d\u66f4\u8f7b\u7684 `shared_routed_expert_topk` \u914d\u65b9\u4e0d\u53d8\uff0c\u53ea\u6539 `K=96`\u3002\u8fd9\u662f\u4e00\u8f6e\u4e25\u683c\u7559\u5728 `<0.25x` \u4e3b\u6218\u573a\u7684 matched-cost deployment probe\uff0c\u76f4\u63a5\u6d4b\u8bd5 `LATENTS_PER_EXPERT=160` \u8fd9\u6761\u66f4\u8f7b shared+routed \u5b50\u7ebf\u662f\u5426\u8fd8\u80fd\u5728\u7ea6 0.22x \u6210\u672c\u4e0b\u7ee7\u7eed\u5411\u73b0\u6709 low-cost best \u9760\u8fd1\u3002",
+research/history/round_summaries/round_0161.json:80:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:101:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:126:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:138:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:161:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0079.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{r=1..R} \u03b2_r(x) u_r + \u03a3_{i\u2208S_{e(x)}(x)} \u03b1_{e,i}(x) b_{e,i} + \u03a3_j \u03b3_j(x) c_j\uff0c\u5176\u4e2d U={u_r} \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c{B_e} \u662f\u9759\u6001 expert \u5b50\u5e93\uff0cC={c_j} \u662f\u9759\u6001 residual \u8865\u507f\u5e93\u3002\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u5728\u7ebf\u94fe\u8def\u4ecd\u662f\u201ctrunk \u67e5\u8868 + \u5355 expert \u5b50\u5e93\u67e5\u8868 + residual \u8865\u507f\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `lowrank_expert_residual` \u5c5e\u4e8e\u6269\u5c55\u517c\u5bb9\u3002\u517c\u5bb9\u6027\u5148\u7b5b\u6e05\u695a\uff1a`expert_topk` \u76f4\u63a5\u517c\u5bb9\uff1b`lowrank_expert_topk`\u3001`lowrank_expert_residual`\u3001`two_stage_residual_expert`\u3001`factorized_expert_topk` \u5c5e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8 frontier\u3002r77 \u4e0e r78 \u5df2\u7ed9\u51fa\u6e05\u6670\u8d1f\u4fe1\u53f7\uff1ashared-basis `factorized_expert_topk` \u660e\u663e\u5f31\u4e8e matched `expert_topk`\uff0c\u800c routed-only `expert_topk` \u628a `K` \u4ece 160 \u63d0\u5230 192 \u4e5f\u8fdb\u4e00\u6b65\u9000\u5316\uff0c\u8bf4\u660e\u5f53\u524d\u4f4e\u6210\u672c\u5e26\u7684\u4e3b\u74f6\u9888\u5df2\u4e0d\u4e3b\u8981\u5728 routed-only scorer \u6216 lookup budget\u3002\u76f8\u5bf9 r76 \u4ec5\u628a `STAGE1_RATIO` \u4ece 0.25 \u63d0\u5230 0.5\uff0c\u5728\u4fdd\u6301 `ARCHITECTURE=lowrank_expert_residual`\u3001`K=128`\u3001`TRUNK_RANK=32`\u3001`NUM_EXPERTS=64`\u3001`EXPANSION_FACTOR=1`\u3001`OPTIMIZER=adam`\u3001`LR=8e-4` \u548c\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\u65f6\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u4e09\u6bb5\u5f0f\u4f4e\u6210\u672c\u4e3b\u7ebf\u7684\u5173\u952e\u672a\u51b3\u95ee\u9898\uff1ar76 \u7684\u5bb9\u91cf\u6269\u5c55\u672a\u7ee7\u7eed\u6539\u5584\uff0c\u7a76\u7adf\u662f\u56e0\u4e3a routed expert \u603b\u5bb9\u91cf\u5df2\u9971\u548c\uff0c\u8fd8\u662f\u56e0\u4e3a\u5f53\u524d `stage1_k` \u53ea\u5360\u603b K \u7684 25%\uff0c\u5bfc\u81f4\u65b0\u589e expert \u5bb9\u91cf\u6839\u672c\u6ca1\u6709\u88ab\u8db3\u591f\u6fc0\u6d3b\u3002\u5982\u679c\u540e\u8005\u6210\u7acb\uff0c\u90a3\u4e48\u5728\u51e0\u4e4e\u4e0d\u6539\u53d8\u603b\u6210\u672c\u7684\u524d\u63d0\u4e0b\uff0c\u628a\u66f4\u591a\u5728\u7ebf\u9884\u7b97\u5206\u7ed9 expert stage\u3001\u51cf\u5c11\u5168\u5c40 residual cleanup\uff0c\u5e94\u80fd\u5728\u5f53\u524d\u4f4e\u5230\u4e2d\u6210\u672c\u5e26\u7ee7\u7eed\u538b\u4f4e FVU\uff0c\u5e76\u66f4\u6e05\u695a\u754c\u5b9a\u8fd9\u6761 `lowrank + expert + residual` \u524d\u6cbf\u771f\u6b63\u9700\u8981\u7684 budget split\u3002",
+research/history/round_summaries/round_0079.json:20:    "summary": "Round 79 \u4e0d\u7ee7\u7eed\u8ffd routed-only `expert_topk`\uff0c\u4e5f\u4e0d\u518d\u6cbf\u5df2\u5931\u6548\u7684 `factorized_expert_topk` \u65b9\u5411\u8ffd\u52a0\u5bbd\u5ea6\uff0c\u800c\u662f\u56de\u5230\u5f53\u524d\u6700\u5f3a\u517c\u5bb9\u4e09\u6bb5\u5f0f family \u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf\u540c\u6210\u672c\u5f52\u56e0\u5b9e\u9a8c\u3002\u4ee5 r76 \u4e3a reference\uff0c\u53ea\u628a `STAGE1_RATIO` \u4ece 0.25 \u63d0\u5230 0.5\uff0c\u76f4\u63a5\u6d4b\u8bd5\u4f4e\u6210\u672c `lowrank_expert_residual` \u7684\u74f6\u9888\u7a76\u7adf\u5728 expert-stage \u9884\u7b97\u5206\u914d\uff0c\u8fd8\u662f\u5df2\u7ecf\u8f6c\u5230 trunk / residual \u4fa7\u3002",
+research/history/round_summaries/round_0079.json:36:      "r77 \u7684 `factorized_expert_topk` \u4e0e r78 \u7684 `expert_topk K=192` \u90fd\u7ed9\u51fa\u8d1f\u4fe1\u53f7\uff0c\u8bf4\u660e\u5f53\u524d\u4f4e\u6210\u672c\u5e26\u7684\u4e3b\u74f6\u9888\u5df2\u4e0d\u4e3b\u8981\u5728 shared-basis scorer \u6216 routed-only lookup budget\u3002",
+research/history/round_summaries/round_0079.json:63:    "description": "Round 79 \u4e0d\u7ee7\u7eed\u8ffd routed-only `expert_topk`\uff0c\u4e5f\u4e0d\u518d\u6cbf\u5df2\u5931\u6548\u7684 `factorized_expert_topk` \u65b9\u5411\u8ffd\u52a0\u5bbd\u5ea6\uff0c\u800c\u662f\u56de\u5230\u5f53\u524d\u6700\u5f3a\u517c\u5bb9\u4e09\u6bb5\u5f0f family \u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf\u540c\u6210\u672c\u5f52\u56e0\u5b9e\u9a8c\u3002\u4ee5 r76 \u4e3a reference\uff0c\u53ea\u628a `STAGE1_RATIO` \u4ece 0.25 \u63d0\u5230 0.5\uff0c\u76f4\u63a5\u6d4b\u8bd5\u4f4e\u6210\u672c `lowrank_expert_residual` \u7684\u74f6\u9888\u7a76\u7adf\u5728 expert-stage \u9884\u7b97\u5206\u914d\uff0c\u8fd8\u662f\u5df2\u7ecf\u8f6c\u5230 trunk / residual \u4fa7\u3002",
+research/history/round_summaries/round_0071.json:7:  "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:26:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a x_hat = \u03a3_{i\u2208S_{e(h(x))}(h(x))} \u03b1_{e,i}(h(x)) b_{e,i}\uff0c\u5176\u4e2d h(x)=ReLU(Bx) \u662f\u5171\u4eab\u4f4e\u7ef4\u6295\u5f71\uff0ce(h(x)) \u662f\u8f7b\u91cf router \u9009\u51fa\u7684\u5355\u4e2a expert\uff0c{b_{e,i}} \u662f\u5404 expert \u7684\u9759\u6001\u5b50\u5e93\u539f\u5b50\u3002\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u94fe\u8def\u662f\uff1a\u5148\u505a\u5171\u4eab\u4f4e\u7ef4\u6295\u5f71 h(x)\uff0c\u518d\u505a router \u9009\u5355\u4e2a\u9759\u6001 expert \u5b50\u5e93\uff0c\u518d\u7531\u8be5 expert \u7684\u5c0f\u578b head \u5728\u4f4e\u7ef4\u7a7a\u95f4\u4e0a\u6253\u5206\u5e76\u505a local top-k\uff0c\u6700\u540e\u628a (e,i) \u6241\u5e73\u5316\u4e3a\u9759\u6001\u5e93\u67e5\u8868\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff1b\u9759\u6001\u5e93\u672c\u8eab\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64\u8be5 family \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\u3002\u517c\u5bb9\u6027\u5148\u9a8c\u5728\u672c\u8f6e\u4fdd\u6301\u6e05\u6670\uff1a`expert_topk` \u76f4\u63a5\u517c\u5bb9\uff1b`lowrank_expert_topk`\u3001`lowrank_expert_residual`\u3001`two_stage_residual_expert` \u4e0e\u672c\u8f6e\u65b0\u589e\u7684 `factorized_expert_topk` \u90fd\u5c5e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u53ea\u80fd\u7559\u4f5c\u5386\u53f2\u53c2\u8003\uff0c\u4e0d\u80fd\u7ee7\u7eed\u9a71\u52a8 frontier\u3002\u76f8\u5bf9 r69 \u4ec5\u628a `ARCHITECTURE` \u4ece `expert_topk` \u5207\u5230 `factorized_expert_topk`\uff0c\u4fdd\u6301 `K=160`\u3001`NUM_EXPERTS=32`\u3001`EF=1` \u4e0e\u8bad\u7ec3 recipe \u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u9ad8\u4f18\u5148\u7ea7\u95ee\u9898\uff1a\u628a shared low-rank basis \u653e\u8fdb expert \u5185\u90e8 head\uff0c\u800c\u4e0d\u662f\u653e\u5728 expert \u5916\u90e8\u505a\u5168\u5c40 trunk\uff0c\u662f\u5426\u80fd\u5728\u4e0d\u62c9\u957f active path \u7684\u524d\u63d0\u4e0b\u5f62\u6210\u65b0\u7684\u4f4e\u6210\u672c Pareto \u6bb5\u3002\u6309\u5f53\u524d proxy \u7c97\u4f30\uff0cshared basis + active expert head \u7684 encoder \u6210\u672c\u5e94\u4ecd\u843d\u5728\u7ea6 0.3x \u91cf\u7ea7\uff0c\u914d\u5408 `K=160` \u7684\u90e8\u7f72\u6210\u672c\u540e\u603b\u6210\u672c\u9884\u8ba1\u4ecd\u5728\u7ea6 0.45x-0.5x \u5e26\uff0c\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002",
+research/history/round_summaries/round_0071.json:27:    "summary": "Round 70 \u5df2\u7ecf\u8bf4\u660e\u73b0\u6709 `lowrank_expert_topk` \u7684 EF=1 \u5916\u7f6e trunk \u539f\u578b\u4e0d\u8db3\u4ee5\u7ee7\u7eed\u652f\u6491\u4f4e\u6210\u672c\u524d\u6cbf\u3002\u672c\u8f6e\u4e0d\u518d\u8865\u65e7 family \u7684\u5c40\u90e8\u70b9\uff0c\u800c\u662f\u65b0\u589e\u4e00\u4e2a\u66f4\u8d34\u8fd1\u5f53\u524d\u9ad8\u4fe1\u606f\u91cf\u5047\u8bbe\u7684\u6700\u5c0f\u539f\u578b `factorized_expert_topk`\uff0c\u5e76\u4ee5 r69 \u4e3a matched reference \u53ea\u6539 `ARCHITECTURE`\uff0c\u9a8c\u8bc1\u201cshared low-rank basis + routed expert head\u201d\u662f\u5426\u4f18\u4e8e\u7eaf routed-only `expert_topk`\u3002",
+research/history/round_summaries/round_0071.json:30:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:37:        "value": "factorized_expert_topk"
+research/history/round_summaries/round_0071.json:45:      "Round 71 \u4f18\u5148\u65b0\u589e `factorized_expert_topk`\uff0c\u8986\u76d6\u5f53\u524d\u672a\u5b9e\u73b0\u4f46\u9ad8\u4f18\u5148\u7ea7\u7684 `shared low-rank basis + expert-specific head` \u7ed3\u6784\u69fd\u4f4d\u3002",
+research/history/round_summaries/round_0071.json:51:      "\u5982\u679c `factorized_expert_topk` \u5728\u4e0e r69 \u76f8\u8fd1\u603b\u6210\u672c\u4e0b\u660e\u663e\u4f18\u4e8e routed-only `expert_topk`\uff0c\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u663e\u5f0f\u8bbe\u7f6e `FACTORIZED_HIDDEN_DIM`\uff0c\u6d4b\u8bd5\u5171\u4eab basis \u5bbd\u5ea6\u662f\u5426\u662f\u8be5\u65b0\u7ed3\u6784\u7684\u4e3b\u63a7\u5236\u65cb\u94ae\u3002",
+research/history/round_summaries/round_0071.json:64:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:72:    "description": "\u6309 repair checklist \u4fee\u590d `factorized_expert_topk` \u7684\u67b6\u6784\u6ce8\u518c\u94fe\u4e0e\u6700\u5c0f\u5b9e\u73b0\uff1a\u8865\u4e0a config whitelist\u3001factory dispatch \u548c concrete class\uff0c\u4fdd\u6301\u539f\u59cb family \u4e0e env_overrides \u4e0d\u53d8\u3002\u5df2\u7528\u5931\u8d25\u65f6\u76f8\u540c\u7684 `(architecture=factorized_expert_topk, K=160, EF=1)` \u5b8c\u6210 instantiate/forward/backward smoke\uff0c\u539f\u59cb\u5b9e\u9a8c\u73b0\u5728\u53ef\u4ee5\u7ee7\u7eed\u8fd0\u884c\u3002",
+research/history/round_summaries/round_0071.json:105:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:125:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:137:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0071.json:155:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0099.json:38:      "\u5f53\u524d\u4e0d\u5e94\u628a `expert_topk ACTIVE_EXPERTS>1` \u6216 `factorized_expert_topk` \u7684\u8d1f\u4fe1\u53f7\u5916\u63a8\u5230 future shared+routed-expert \u65b0 family\uff1b\u4f46\u5728\u73b0\u6709 family \u4ecd\u6709\u9ad8\u4fe1\u606f\u91cf\u5355\u53d8\u91cf\u95ee\u9898\u65f6\uff0c\u4e5f\u4e0d\u5e94\u63d0\u524d\u5207\u53bb code-edit\u3002"
+research/history/round_summaries/round_0073.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_e \u03a3_{i\u2208S_e(x)} \u03b1_{e,i}(x) b_{e,i}\uff0c\u5176\u4e2d e(x) \u7531\u8f7b\u91cf router \u9009\u51fa\u7684\u5355\u4e2a expert\uff0c{B_e} \u662f\u9759\u6001 expert \u5b50\u5e93\u3002\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u5728\u7ebf\u94fe\u8def\u4ecd\u662f\u201crouter \u9009\u5355\u4e2a\u9759\u6001\u5b50\u5e93 -> \u5b50\u5e93\u5185 local top-k -> \u67e5\u8868\u52a0\u6743\u6c42\u548c\u201d\uff0c\u4e0d\u4f9d\u8d56\u52a8\u6001\u751f\u6210\u5b57\u5178\uff0c\u56e0\u6b64 `expert_topk` \u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u517c\u5bb9\u6027\u5148\u7b5b\u6e05\u695a\uff1a`expert_topk` \u76f4\u63a5\u517c\u5bb9\uff1b`lowrank_expert_topk`\u3001`lowrank_expert_residual`\u3001`two_stage_residual_expert`\u3001`factorized_expert_topk` \u5c5e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u7ee7\u7eed\u9a71\u52a8 frontier\u3002\u76f8\u5bf9 r69 \u4ec5\u628a `NUM_EXPERTS` \u4ece 32 \u63d0\u5230 64\uff0c\u5728\u4fdd\u6301 `ARCHITECTURE=expert_topk`\u3001`K=160`\u3001`EXPANSION_FACTOR=1`\u3001`OPTIMIZER=adam`\u3001`LR=8e-4` \u548c\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\u65f6\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u4f4e\u6210\u672c\u5e26\u6700\u5173\u952e\u7684 MoE-like \u7ed3\u6784\u95ee\u9898\uff1a\u5982\u679c routed-only family \u5728 0.22x \u5de6\u53f3\u7684\u74f6\u9888\u4ecd\u6709\u4e00\u90e8\u5206\u6765\u81ea\u603b\u9759\u6001\u5b50\u5e93\u5bb9\u91cf\u4e0d\u8db3\uff0c\u800c\u4e0d\u662f\u67e5\u8868\u9884\u7b97\u672c\u8eab\uff0c\u90a3\u4e48\u628a\u603b\u5bb9\u91cf\u7ee7\u7eed\u505a true sparse-capacity \u6269\u5bb9\u3001\u540c\u65f6\u4fdd\u6301 `ACTIVE_EXPERTS=1` \u7684\u77ed\u6fc0\u6d3b\u8def\u5f84\uff0c\u5e94\u80fd\u5728\u51e0\u4e4e\u540c\u4e00 total_cost \u4e0b\u7ee7\u7eed\u538b\u4f4e FVU\uff0c\u5e76\u5f62\u6210\u65b0\u7684\u4f4e\u5f00\u9500 Pareto \u6bb5\u3002",
+research/history/round_summaries/round_0073.json:25:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r69 \u53ea\u6539 `NUM_EXPERTS`\u3002\u8fd9\u4e0d\u662f plain selector \u7684\u91cd\u590d\u626b\u70b9\uff0c\u4e5f\u4e0d\u662f\u65e7 family \u7684 K \u8f74\u5fae\u8c03\uff0c\u800c\u662f\u5f53\u524d\u4f18\u5148\u7ea7\u6700\u9ad8\u7684 true MoE-like \u5bb9\u91cf\u6269\u5bb9\u9a8c\u8bc1\u3002\u76f8\u6bd4\u7ee7\u7eed\u8ffd `factorized_expert_topk` \u7684\u5c40\u90e8\u5bbd\u5ea6\uff0c\u5148\u5728\u5df2\u9a8c\u8bc1\u53ef\u8fd0\u884c\u3001\u4e14\u76f4\u63a5\u517c\u5bb9\u7684 routed-only family \u4e0a\u56de\u7b54\u201c\u5bb9\u91cf\u662f\u5426\u4ecd\u6709\u6536\u76ca\u201d\u66f4\u7b26\u5408 Round 73 \u7684\u4f4e\u5f00\u9500\u63a2\u7d22\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f routed-only \u65b9\u5411\u5728 `NUM_EXPERTS=32` \u540e\u5df2\u63a5\u8fd1\u6536\u76ca\u9971\u548c\uff1b\u4f46\u65e0\u8bba\u6b63\u8d1f\uff0c\u672c\u8f6e\u90fd\u80fd\u6e05\u695a\u56de\u7b54\u4f4e\u6210\u672c\u5e26\u662f\u5426\u8fd8\u503c\u5f97\u7ee7\u7eed\u5411 true sparse-capacity MoE-like \u6269\u5bb9\u6295\u5165\u9884\u7b97\u3002",
+research/history/round_summaries/round_0073.json:64:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r69 \u53ea\u6539 `NUM_EXPERTS`\u3002\u8fd9\u4e0d\u662f plain selector \u7684\u91cd\u590d\u626b\u70b9\uff0c\u4e5f\u4e0d\u662f\u65e7 family \u7684 K \u8f74\u5fae\u8c03\uff0c\u800c\u662f\u5f53\u524d\u4f18\u5148\u7ea7\u6700\u9ad8\u7684 true MoE-like \u5bb9\u91cf\u6269\u5bb9\u9a8c\u8bc1\u3002\u76f8\u6bd4\u7ee7\u7eed\u8ffd `factorized_expert_topk` \u7684\u5c40\u90e8\u5bbd\u5ea6\uff0c\u5148\u5728\u5df2\u9a8c\u8bc1\u53ef\u8fd0\u884c\u3001\u4e14\u76f4\u63a5\u517c\u5bb9\u7684 routed-only family \u4e0a\u56de\u7b54\u201c\u5bb9\u91cf\u662f\u5426\u4ecd\u6709\u6536\u76ca\u201d\u66f4\u7b26\u5408 Round 73 \u7684\u4f4e\u5f00\u9500\u63a2\u7d22\u76ee\u6807\u3002\u4e3b\u8981\u98ce\u9669\u662f routed-only \u65b9\u5411\u5728 `NUM_EXPERTS=32` \u540e\u5df2\u63a5\u8fd1\u6536\u76ca\u9971\u548c\uff1b\u4f46\u65e0\u8bba\u6b63\u8d1f\uff0c\u672c\u8f6e\u90fd\u80fd\u6e05\u695a\u56de\u7b54\u4f4e\u6210\u672c\u5e26\u662f\u5426\u8fd8\u503c\u5f97\u7ee7\u7eed\u5411 true sparse-capacity MoE-like \u6269\u5bb9\u6295\u5165\u9884\u7b97\u3002",
+research/history/round_summaries/round_0106.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:20:    "summary": "Round 106 \u4e0d\u56de\u5230\u65e7 family \u7684 K \u8f74\uff0c\u4e5f\u4e0d\u518d\u91cd\u590d `NUM_EXPERTS` \u5bb9\u91cf\u5916\u63a8\u3002\u4ee5 r105 \u4e3a reference\uff0c\u53ea\u6539 `ACTIVE_EXPERTS=2`\uff0c\u76f4\u63a5\u56de\u7b54 `shared_routed_expert_topk` \u5728\u5df2\u9a8c\u8bc1\u751f\u6548\u7684\u7a84 expert \u5bbd\u5ea6\u4e0b\uff0c\u589e\u52a0\u5c11\u91cf routed experts \u662f\u5426\u80fd\u5f62\u6210\u66f4\u6709\u4ef7\u503c\u7684\u4f4e\u5230\u4e2d\u6210\u672c\u7ed3\u6784\u6bb5\u3002",
+research/history/round_summaries/round_0106.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:25:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r105 \u53ea\u6539 `ACTIVE_EXPERTS`\u3002`LATENTS_PER_EXPERT` \u7684 allowlist\u3001runner\u3001\u811a\u672c\u900f\u4f20\u3001runtime config \u4e0e checkpoint config \u5df2\u5728 r105 \u88ab\u771f\u5b9e\u9a8c\u8bc1\uff0c\u56e0\u6b64\u672c\u8f6e\u4e0d\u518d\u9700\u8981 edit_sae_code\u3002\u9009\u62e9\u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u800c\u4e0d\u662f\u56de\u5230 `lowrank_expert_topk` \u7684 `TRUNK_RANK/K` \u5fae\u8c03\uff0c\u662f\u56e0\u4e3a\u5f53\u524d\u9636\u6bb5\u66f4\u9700\u8981\u56de\u7b54\u9ad8\u4f18\u5148\u7ea7\u672a\u5145\u5206\u9a8c\u8bc1\u7684 shared+routed MoE-like \u7ed3\u6784\u662f\u5426\u6210\u7acb\uff1b\u800c r105 \u5df2\u7ecf\u628a\u201c\u66f4\u7a84 per-expert width\u201d\u8fd9\u4e2a\u524d\u63d0\u94fa\u597d\u3002\u4e3b\u8981\u98ce\u9669\u662f total_cost \u4f1a\u4ece\u7ea6 0.39x \u62ac\u5230\u7ea6 0.52x\uff0c\u82e5 FVU \u6539\u5584\u4e0d\u8db3\uff0c\u8fd9\u6761\u8def\u7ebf\u5c31\u4e0d\u5e94\u7ee7\u7eed\u5360\u7528\u4f4e\u5f00\u9500\u9884\u7b97\u3002",
+research/history/round_summaries/round_0106.json:35:      "r105 \u5df2\u7ecf\u7ed9\u51fa\u771f\u5b9e\u53c2\u6570\u751f\u6548\u8bc1\u636e\uff1a`shared_routed_expert_topk` \u7684 runtime_config_json \u4e0e checkpoint config \u4e2d\u90fd\u5305\u542b `latents_per_expert=512`\uff0c\u5e76\u5b8c\u6210\u4e86\u6709\u6548\u8bad\u7ec3\uff0cval_fvu=0.13637857139110565\u3002",
+research/history/round_summaries/round_0106.json:36:      "\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c`shared_routed_expert_topk K=128 EF=1 NUM_EXPERTS=64 LATENTS_PER_EXPERT=512 ACTIVE_EXPERTS=2` \u7684 selection\u22480.39x\u3001deployment\u22480.12x\u3001total\u22480.52x\uff0c\u4ecd\u660e\u663e\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002",
+research/history/round_summaries/round_0106.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:62:    "description": "Round 106 \u4e0d\u56de\u5230\u65e7 family \u7684 K \u8f74\uff0c\u4e5f\u4e0d\u518d\u91cd\u590d `NUM_EXPERTS` \u5bb9\u91cf\u5916\u63a8\u3002\u4ee5 r105 \u4e3a reference\uff0c\u53ea\u6539 `ACTIVE_EXPERTS=2`\uff0c\u76f4\u63a5\u56de\u7b54 `shared_routed_expert_topk` \u5728\u5df2\u9a8c\u8bc1\u751f\u6548\u7684\u7a84 expert \u5bbd\u5ea6\u4e0b\uff0c\u589e\u52a0\u5c11\u91cf routed experts \u662f\u5426\u80fd\u5f62\u6210\u66f4\u6709\u4ef7\u503c\u7684\u4f4e\u5230\u4e2d\u6210\u672c\u7ed3\u6784\u6bb5\u3002",
+research/history/round_summaries/round_0106.json:63:    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r105 \u53ea\u6539 `ACTIVE_EXPERTS`\u3002`LATENTS_PER_EXPERT` \u7684 allowlist\u3001runner\u3001\u811a\u672c\u900f\u4f20\u3001runtime config \u4e0e checkpoint config \u5df2\u5728 r105 \u88ab\u771f\u5b9e\u9a8c\u8bc1\uff0c\u56e0\u6b64\u672c\u8f6e\u4e0d\u518d\u9700\u8981 edit_sae_code\u3002\u9009\u62e9\u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u800c\u4e0d\u662f\u56de\u5230 `lowrank_expert_topk` \u7684 `TRUNK_RANK/K` \u5fae\u8c03\uff0c\u662f\u56e0\u4e3a\u5f53\u524d\u9636\u6bb5\u66f4\u9700\u8981\u56de\u7b54\u9ad8\u4f18\u5148\u7ea7\u672a\u5145\u5206\u9a8c\u8bc1\u7684 shared+routed MoE-like \u7ed3\u6784\u662f\u5426\u6210\u7acb\uff1b\u800c r105 \u5df2\u7ecf\u628a\u201c\u66f4\u7a84 per-expert width\u201d\u8fd9\u4e2a\u524d\u63d0\u94fa\u597d\u3002\u4e3b\u8981\u98ce\u9669\u662f total_cost \u4f1a\u4ece\u7ea6 0.39x \u62ac\u5230\u7ea6 0.52x\uff0c\u82e5 FVU \u6539\u5584\u4e0d\u8db3\uff0c\u8fd9\u6761\u8def\u7ebf\u5c31\u4e0d\u5e94\u7ee7\u7eed\u5360\u7528\u4f4e\u5f00\u9500\u9884\u7b97\u3002",
+research/history/round_summaries/round_0106.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:99:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:124:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:136:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0106.json:159:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u4ecd\u662f\u201cshared \u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\u201d\uff0c\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u4ecd\u662f\u4e0d\u517c\u5bb9\uff0c\u53ea\u4fdd\u7559\u5386\u53f2\u53c2\u8003\u3001\u4e0d\u5f97\u9a71\u52a8\u5f53\u524d frontier\u3002\u5f53\u524d `<0.25x` \u4e3b\u6218\u573a\u91cc\uff0cr159\u2192r162 \u5df2\u8bc1\u660e `LATENTS_PER_EXPERT=160` \u8fd9\u6761\u66f4\u8f7b shared+routed \u5b50\u7ebf\u5728 `K=64\u219280\u219296\u2192112` \u4e0a\u6301\u7eed\u6539\u5584\u5e76\u628a FVU \u538b\u5230 0.1369\uff0c\u8bf4\u660e\u5b83\u5df2\u5177\u5907\u53ef\u7528\u8d28\u91cf\uff1b\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r162 \u53ea\u628a `LATENTS_PER_EXPERT` \u4ece 160 \u964d\u5230 144\uff0c\u4fdd\u6301 `ARCHITECTURE=shared_routed_expert_topk`\u3001`K=112`\u3001`ACTIVE_EXPERTS=2`\u3001`NUM_EXPERTS=64`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0d\u53d8\uff0c\u6d4b\u8bd5 r162 \u8fd9\u4e2a 0.24x \u70b9\u662f\u5426\u5df2\u7ecf\u7565\u5fae width-overprovisioned\u3002\u82e5\u662f\uff0c\u5219\u8be5\u70b9\u5e94\u80fd\u5728\u603b\u6210\u672c\u7ea6 0.23x \u4e0b\u4fdd\u4f4f\u5927\u90e8\u5206\u8d28\u91cf\uff0c\u5e76\u4e89\u53d6\u51fb\u8d25\u5f53\u524d 0.23x frontier \u951a\u70b9 FVU=0.1421\u3002",
+research/history/round_summaries/round_0163.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:35:      "\u672c\u5730\u6210\u672c\u81ea\u68c0\uff1a\u76f8\u5bf9 r162 \u4ec5\u6539 `LATENTS_PER_EXPERT=144` \u540e\uff0c`shared_routed_expert_topk` \u7684 selection ratio \u7ea6 0.12x\u3001deployment ratio \u7ea6 0.11x\u3001combined ratio \u7ea6 0.23x\uff0c\u4ecd\u5904\u4e8e\u5f53\u524d `<0.25x` \u4e3b\u6218\u573a\u5185\u3002",
+research/history/round_summaries/round_0163.json:36:      "`shared_routed_expert_topk` \u4ecd\u662f\u5f53\u524d\u517c\u5bb9 low-cost frontier holder\uff1b`LATENTS_PER_EXPERT`\u3001`K`\u3001`ACTIVE_EXPERTS`\u3001`NUM_EXPERTS` \u7684 wiring \u5df2\u5728\u5386\u53f2\u8f6e\u6b21\u4e2d\u7a33\u5b9a\u751f\u6548\uff0c\u672c\u8f6e\u4e0d\u9700\u8981\u4ee3\u7801\u6539\u52a8\u3002",
+research/history/round_summaries/round_0163.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0163.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:20:    "summary": "\u4ee5 r115 \u4e3a reference\uff0c\u4fdd\u6301 `shared_routed_expert_topk`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`NUM_EXPERTS=64` \u4e0d\u53d8\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=192`\uff0c\u7ee7\u7eed\u5b8c\u6210\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u5b50\u7ebf\u7684 width knee \u5b9a\u4f4d\uff0c\u5e76\u6d4b\u8bd5\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u7ed3\u6784\u80fd\u5426\u8fdb\u4e00\u6b65\u5de6\u79fb\u5230\u7ea6 0.22x\u3002",
+research/history/round_summaries/round_0116.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:35:      "r115 \u5df2\u5f62\u6210\u65b0\u7684\u66f4\u9760\u5de6\u975e\u652f\u914d\u70b9\uff1a`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=224` \u5728\u7ea6 0.24x total_cost \u4e0b\u8fbe\u5230 FVU 0.1397\u3002",
+research/history/round_summaries/round_0116.json:36:      "\u672c\u5730 cost \u81ea\u68c0\u663e\u793a\uff1a`shared_routed_expert_topk K=64 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` \u7684 selection ratio \u7ea6 0.16x\u3001deployment ratio \u7ea6 0.06x\u3001combined ratio \u7ea6 0.22x\uff0c\u4ecd\u660e\u663e\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002",
+research/history/round_summaries/round_0116.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:62:    "description": "\u4ee5 r115 \u4e3a reference\uff0c\u4fdd\u6301 `shared_routed_expert_topk`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`NUM_EXPERTS=64` \u4e0d\u53d8\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=192`\uff0c\u7ee7\u7eed\u5b8c\u6210\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u5b50\u7ebf\u7684 width knee \u5b9a\u4f4d\uff0c\u5e76\u6d4b\u8bd5\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u7ed3\u6784\u80fd\u5426\u8fdb\u4e00\u6b65\u5de6\u79fb\u5230\u7ea6 0.22x\u3002",
+research/history/round_summaries/round_0116.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u53ea\u505a\u8f7b\u91cf router \u9009\u62e9\u5c11\u91cf routed experts\uff0c\u7136\u540e\u6267\u884c shared \u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled \u7ed3\u6784\u4ecd\u660e\u786e\u6392\u9664\u3002\u5f53\u524d\u5b9e\u9645\u5386\u53f2\u5df2\u5728 r107-r112 \u4e0a\u5f62\u6210 `shared_routed_expert_topk` \u7684\u517c\u5bb9\u4f4e\u6210\u672c\u524d\u6cbf\uff0c\u5176\u4e2d r111 \u4e3a 0.30x / FVU 0.1228\uff0cr112 \u4e3a 0.28x / FVU 0.1282\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1a\u5728 `LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2, NUM_EXPERTS=64` \u5df2\u7a33\u5b9a\u6210\u7acb\u7684\u524d\u63d0\u4e0b\uff0c\u7ee7\u7eed\u628a deployment \u9884\u7b97\u4ece `K=80` \u538b\u5230 `K=64`\uff0c\u6709\u673a\u4f1a\u628a total_cost \u4ece\u7ea6 0.28x \u8fdb\u4e00\u6b65\u5de6\u79fb\u5230\u7ea6 0.27x\uff08selection\u22480.20x, deployment\u22480.06x\uff09\uff0c\u540c\u65f6\u4ecd\u628a FVU \u63a7\u5236\u5728\u7ea6 0.13 \u5de6\u53f3\uff0c\u4ece\u800c\u628a shared+routed \u8fd9\u6761\u65b0\u7ed3\u6784\u6bb5\u7ee7\u7eed\u63a8\u8fdb\u5230\u66f4\u9760\u5de6\u7684\u53ef\u90e8\u7f72 Pareto \u70b9\u3002",
+research/history/round_summaries/round_0113.json:20:    "summary": "\u4ee5 r112 \u4e3a reference\uff0c\u7ee7\u7eed\u6cbf\u5df2\u9a8c\u8bc1\u7684 `shared_routed_expert_topk` \u4f4e\u6210\u672c\u524d\u6cbf\u505a\u4e00\u6b21\u5355\u53d8\u91cf deployment-side left shift\uff1a\u53ea\u6539 `K=64`\uff0c\u6d4b\u8bd5\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u7684 shared+routed \u7ed3\u6784\u80fd\u5426\u628a Pareto \u6bb5\u4ece\u7ea6 0.28x \u518d\u63a8\u8fdb\u5230\u7ea6 0.27x\uff0c\u540c\u65f6\u7ef4\u6301\u7ea6 0.13 \u91cf\u7ea7\u7684 FVU\u3002",
+research/history/round_summaries/round_0113.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:35:      "\u622a\u81f3 round 112\uff0c\u5f53\u524d\u5de5\u4f5c\u533a\u771f\u5b9e frontier \u5df2\u5305\u542b\u517c\u5bb9\u7684 `shared_routed_expert_topk` \u6bb5\uff1ar107 0.42x/0.1010\uff0cr108 0.38x/0.1072\uff0cr109 0.34x/0.1147\uff0cr110 0.32x/0.1191\uff0cr111 0.30x/0.1228\uff0cr112 0.28x/0.1282\u3002",
+research/history/round_summaries/round_0113.json:37:      "\u672c\u8f6e\u4e0d\u9700\u8981\u4ee3\u7801\u4fee\u6539\uff1b\u73b0\u6709 `shared_routed_expert_topk`\u3001`ACTIVE_EXPERTS`\u3001`LATENTS_PER_EXPERT` \u63a5\u7ebf\u5df2\u5728\u5386\u53f2\u8f6e\u6b21\u4e2d\u5b8c\u6210\u5e76\u7a33\u5b9a\u751f\u6548\u3002"
+research/history/round_summaries/round_0113.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:62:    "description": "\u4ee5 r112 \u4e3a reference\uff0c\u7ee7\u7eed\u6cbf\u5df2\u9a8c\u8bc1\u7684 `shared_routed_expert_topk` \u4f4e\u6210\u672c\u524d\u6cbf\u505a\u4e00\u6b21\u5355\u53d8\u91cf deployment-side left shift\uff1a\u53ea\u6539 `K=64`\uff0c\u6d4b\u8bd5\u8fd9\u6761\u76f4\u63a5\u517c\u5bb9\u7684 shared+routed \u7ed3\u6784\u80fd\u5426\u628a Pareto \u6bb5\u4ece\u7ea6 0.28x \u518d\u63a8\u8fdb\u5230\u7ea6 0.27x\uff0c\u540c\u65f6\u7ef4\u6301\u7ea6 0.13 \u91cf\u7ea7\u7684 FVU\u3002",
+research/history/round_summaries/round_0113.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0113.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0078.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_e \u03a3_{i\u2208S_e(x)} \u03b1_{e,i}(x) b_{e,i}\uff0c\u5176\u4e2d e(x) \u662f\u8f7b\u91cf router \u9009\u51fa\u7684\u5355\u4e2a expert\uff0c{B_e} \u662f\u9759\u6001 expert \u5b50\u5e93\u3002\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u5728\u7ebf\u94fe\u8def\u4ecd\u662f\u201crouter \u9009\u5355\u4e2a\u9759\u6001\u5b50\u5e93 + \u5b50\u5e93\u5185 local top-k + \u67e5\u8868\u52a0\u6743\u6c42\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `expert_topk` \u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9\u3002\u517c\u5bb9\u6027\u5148\u7b5b\u6e05\u695a\uff1a`expert_topk` \u76f4\u63a5\u517c\u5bb9\uff1b`factorized_expert_topk`\u3001`lowrank_expert_topk`\u3001`lowrank_expert_residual`\u3001`two_stage_residual_expert` \u5c5e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8 frontier\u3002r77 \u5df2\u7ecf\u7ed9\u51fa\u6e05\u6670\u8d1f\u4fe1\u53f7\uff1a`factorized_expert_topk` \u5728\u4e0e r74 \u8fd1\u540c\u6210\u672c\u7684 matched probe \u4e0b FVU=0.2482\uff0c\u8bf4\u660e\u5f53\u524d `expert-internal low-rank / shared-basis` \u539f\u578b\u4e0d\u503c\u5f97\u7ee7\u7eed\u4f5c\u4e3a\u4f4e\u6210\u672c\u4e3b\u7ebf\u3002\u76f8\u5bf9 r74 \u4ec5\u628a `K` \u4ece 160 \u63d0\u5230 192\uff0c\u5728\u4fdd\u6301 `ARCHITECTURE=expert_topk`\u3001`NUM_EXPERTS=128`\u3001`EXPANSION_FACTOR=1`\u3001`OPTIMIZER=adam`\u3001`LR=8e-4` \u548c\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\u65f6\uff0c\u76f4\u63a5\u56de\u7b54 routed-only MoE-like \u4f4e\u6210\u672c\u524d\u6cbf\u7684\u4e0b\u4e00\u5173\u952e\u95ee\u9898\uff1a\u5982\u679c r73\u2192r74 \u7684\u8fde\u7eed\u6539\u5584\u8bf4\u660e\u5f53\u524d\u4f4e\u6210\u672c\u5e26\u7684\u4e3b\u74f6\u9888\u4ecd\u6709\u4e00\u90e8\u5206\u6765\u81ea\u6bcf token \u7684\u5c40\u90e8 lookup budget \u4e0d\u8db3\uff0c\u800c\u4e0d\u53ea\u662f\u603b\u5bb9\u91cf\uff0c\u90a3\u4e48\u5728\u4fdd\u6301\u540c\u4e00\u5bb9\u91cf\u4e0e\u77ed active path \u7684\u524d\u63d0\u4e0b\uff0c\u9002\u5ea6\u589e\u52a0 `K` \u5e94\u80fd\u5728\u4ecd\u4f4e\u4e8e 0.5x total_cost \u7684\u8303\u56f4\u5185\u7ee7\u7eed\u538b\u4f4e FVU\uff0c\u5e76\u5224\u65ad routed-only \u4f4e\u6210\u672c\u7ebf\u6b64\u523b\u66f4\u7f3a\u5bb9\u91cf\u8fd8\u662f\u66f4\u7f3a lookup budget\u3002",
+research/history/round_summaries/round_0078.json:20:    "summary": "Round 78 \u4e0d\u7ee7\u7eed\u8ffd r77 \u5df2\u660e\u663e\u5931\u6548\u7684 `factorized_expert_topk`\uff0c\u4e5f\u4e0d\u56de\u5230\u65e7 family \u7684\u5c40\u90e8\u5fae\u8c03\uff1b\u800c\u662f\u5728\u5f53\u524d\u6700\u5e72\u51c0\u3001\u5df2\u9a8c\u8bc1\u6709\u6548\u7684\u76f4\u63a5\u517c\u5bb9 MoE-like \u7ebf\u4e0a\u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf matched probe\u3002\u4ee5 r74 \u4e3a reference\uff0c\u53ea\u628a `K` \u4ece 160 \u63d0\u5230 192\uff0c\u76f4\u63a5\u533a\u5206\u5f53\u524d routed-only `expert_topk` \u4f4e\u6210\u672c\u524d\u6cbf\u7684\u4e3b\u8981\u74f6\u9888\u7a76\u7adf\u8fd8\u662f\u603b\u5bb9\u91cf\uff0c\u8fd8\u662f\u5df2\u7ecf\u8f6c\u5230\u5355 token \u7684 lookup budget\u3002",
+research/history/round_summaries/round_0078.json:36:      "r77 \u7684 matched `factorized_expert_topk` \u63a2\u9488\u5728\u8fd1\u540c\u6210\u672c\u4e0b\u660e\u663e\u5f31\u4e8e r74\uff0c\u8bf4\u660e\u5f53\u524d `expert-internal low-rank / shared-basis` \u539f\u578b\u4e0d\u503c\u5f97\u7ee7\u7eed\u4e3b\u7ebf\u63a8\u8fdb\u3002",
+research/history/round_summaries/round_0078.json:63:    "description": "Round 78 \u4e0d\u7ee7\u7eed\u8ffd r77 \u5df2\u660e\u663e\u5931\u6548\u7684 `factorized_expert_topk`\uff0c\u4e5f\u4e0d\u56de\u5230\u65e7 family \u7684\u5c40\u90e8\u5fae\u8c03\uff1b\u800c\u662f\u5728\u5f53\u524d\u6700\u5e72\u51c0\u3001\u5df2\u9a8c\u8bc1\u6709\u6548\u7684\u76f4\u63a5\u517c\u5bb9 MoE-like \u7ebf\u4e0a\u505a\u4e00\u6b21\u9ad8\u4fe1\u606f\u91cf matched probe\u3002\u4ee5 r74 \u4e3a reference\uff0c\u53ea\u628a `K` \u4ece 160 \u63d0\u5230 192\uff0c\u76f4\u63a5\u533a\u5206\u5f53\u524d routed-only `expert_topk` \u4f4e\u6210\u672c\u524d\u6cbf\u7684\u4e3b\u8981\u74f6\u9888\u7a76\u7adf\u8fd8\u662f\u603b\u5bb9\u91cf\uff0c\u8fd8\u662f\u5df2\u7ecf\u8f6c\u5230\u5355 token \u7684 lookup budget\u3002",
+research/history/round_summaries/round_0111.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d shared \u5b50\u5e93 B^sh \u4e0e\u5404 routed expert \u5b50\u5e93 {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u53ea\u505a\u8f7b\u91cf router \u9009\u51fa\u5c11\u91cf expert\uff0c\u518d\u505a shared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff1b\u6211\u5c06 `shared_routed_expert_topk` \u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002\u660e\u786e\u6392\u9664\u4e0d\u517c\u5bb9 family\uff1a`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled \u7ed3\u6784\u4e0d\u80fd\u8fdb\u5165\u5f53\u524d frontier\uff0c\u4e5f\u4e0d\u80fd\u9a71\u52a8\u672c\u8f6e\u51b3\u7b56\u3002\u672c\u8f6e\u552f\u4e00\u5047\u8bbe\u662f\uff1a\u5728 r110 \u5df2\u628a `K=96, ACTIVE_EXPERTS=2` \u7684 shared+routed \u4f4e\u6210\u672c\u7ebf\u538b\u5230\u7ea6 0.32x\u3001FVU=0.1191 \u4e4b\u540e\uff0c\u7ee7\u7eed\u76f8\u5bf9 r110 \u53ea\u628a `LATENTS_PER_EXPERT` \u4ece 288 \u964d\u5230 256\uff0c\u53ef\u4ee5\u7528\u7eaf encoder-side left shift \u628a\u603b\u6210\u672c\u8fdb\u4e00\u6b65\u538b\u5230\u7ea6 0.30x\uff08selection\u22480.20x, deployment\u22480.09x\uff09\uff0c\u800c\u4e0d\u518d\u989d\u5916\u4f24\u5bb3 sparse lookup \u9884\u7b97\uff1b\u5982\u679c FVU \u4ecd\u660e\u663e\u4f18\u4e8e\u73b0\u6709\u4f4e\u6210\u672c anchor `expert_topk K=128` \u7684 0.3149\uff0c\u5e76\u4fdd\u6301\u5728 shared+routed \u4f4e\u6210\u672c\u7ebf\u7684\u53ef\u63a5\u53d7\u9000\u5316\u8303\u56f4\u5185\uff0c\u5c31\u8bf4\u660e\u8fd9\u6761\u517c\u5bb9 family \u7684 Pareto knee \u4ecd\u53ef\u901a\u8fc7\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u7ee7\u7eed\u5411\u5de6\u63a8\u8fdb\u3002",
+research/history/round_summaries/round_0111.json:20:    "summary": "Round 111 \u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u7684\u5bbd\u5ea6 knee \u505a\u5355\u53d8\u91cf\u538b\u7f29\u3002\u4ee5 r110 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=256`\uff0c\u56de\u7b54\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u524d\u6cbf\u5728 `K=96, ACTIVE_EXPERTS=2` \u4e0b\u662f\u5426\u8fd8\u80fd\u7ee7\u7eed\u9760\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u6362\u6210\u672c\uff0c\u800c\u4e0d\u5fc5\u5148\u56de\u5230 `K` \u8f74\u3002",
+research/history/round_summaries/round_0111.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:36:      "\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c`shared_routed_expert_topk K=96 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=256` \u7684 selection\u22480.20x\u3001deployment\u22480.09x\u3001total\u22480.30x\uff0c\u663e\u8457\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002",
+research/history/round_summaries/round_0111.json:37:      "\u5f53\u524d <0.5x \u533a\u57df\u6700\u6709\u4fe1\u606f\u91cf\u7684\u517c\u5bb9\u4e3b\u7ebf\u5df2\u7ecf\u4ece\u65e7 `expert_topk` anchor \u8f6c\u5230 `shared_routed_expert_topk`\uff1b\u672c\u8f6e\u7ee7\u7eed\u8865\u5b83\u7684 encoder-width knee\uff0c\u800c\u4e0d\u662f\u56de\u5230 old-family \u5c40\u90e8\u626b\u70b9\u3002"
+research/history/round_summaries/round_0111.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:62:    "description": "Round 111 \u7ee7\u7eed\u6cbf `shared_routed_expert_topk` \u7684\u5bbd\u5ea6 knee \u505a\u5355\u53d8\u91cf\u538b\u7f29\u3002\u4ee5 r110 \u4e3a reference\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=256`\uff0c\u56de\u7b54\u5f53\u524d shared+routed \u4f4e\u6210\u672c\u524d\u6cbf\u5728 `K=96, ACTIVE_EXPERTS=2` \u4e0b\u662f\u5426\u8fd8\u80fd\u7ee7\u7eed\u9760\u7f29\u7a84\u6bcf-expert \u5bbd\u5ea6\u6362\u6210\u672c\uff0c\u800c\u4e0d\u5fc5\u5148\u56de\u5230 `K` \u8f74\u3002",
+research/history/round_summaries/round_0111.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:36:      "\u6309\u5f53\u524d 1024x4096 cost proxy \u4f30\u7b97\uff0c`shared_routed_expert_topk K=128 EF=1 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=384` \u7684 selection\u22480.30x\u3001deployment\u22480.12x\u3001total\u22480.42x\uff0c\u4ecd\u8fdc\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002",
+research/history/round_summaries/round_0107.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:79:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:100:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:125:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:137:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0107.json:160:    "ARCHITECTURE": "shared_routed_expert_topk",
+
+codex
+r163 已把 `LATENTS_PER_EXPERT=144` 明确打成负点，说明这条 width 压缩线至少在 `K=112` 上不再值得继续下压。接下来我补一轮成本自检，判断是做轻量容量 probe，还是切回一个仍落在 low-cost 带内的新结构对照。
+exec
+/bin/bash -lc "rg -n '\"family_name\": \"shared_routed_factorized_expert_topk\"|\"family_name\": \"shared_lowrank_routed_expert_topk\"|\"val_fvu\"|\"combined_ratio\"' research/history/round_summaries/round_0128.json research/history/round_summaries/round_0129.json research/history/round_summaries/round_0141.json research/history/round_summaries/round_0142.json research/history/round_summaries/round_0143.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0143.json:50:    "val_fvu": "0.1273151934146881",
+research/history/round_summaries/round_0141.json:7:  "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:23:    "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0141.json:50:    "val_fvu": "0.14034616947174072",
+research/history/round_summaries/round_0141.json:137:    "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0142.json:7:  "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0142.json:23:    "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0142.json:50:    "val_fvu": "0.25618457794189453",
+research/history/round_summaries/round_0142.json:137:    "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0128.json:7:  "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0128.json:23:    "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0128.json:51:    "val_fvu": "0.22480779886245728",
+research/history/round_summaries/round_0128.json:138:    "family_name": "shared_routed_factorized_expert_topk",
+research/history/round_summaries/round_0129.json:7:  "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0129.json:23:    "family_name": "shared_lowrank_routed_expert_topk",
+research/history/round_summaries/round_0129.json:53:    "val_fvu": "0.1219072937965393",
+research/history/round_summaries/round_0129.json:139:    "family_name": "shared_lowrank_routed_expert_topk",
+
+exec
+/bin/bash -lc "python - <<'PY'
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import _get_sae_class
+
+def est(arch='shared_routed_expert_topk', **kw):
+    args = dict(
+        architecture=arch,
+        expansion_factor=1,
+        k=112,
+        active_experts=2,
+        factorized_hidden_dim=256,
+        latents_per_expert=160,
+        num_experts=64,
+        stage1_ratio=0.25,
+        trunk_rank=40,
+    )
+    args.update(kw)
+    cfg = SparseCoderConfig(**args)
+    m = _get_sae_class(cfg.architecture)(1024, cfg, device='cpu')
+    c = m.selection_cost_estimate(n_output=4096)
+    print(arch, kw if kw else {'baseline': True}, c['ratio'], c['deployment_ratio'], c['combined_ratio'], c['total_accesses'], c['deployment_accesses'])
+
+est()
+for ne in [80, 96]:
+    est(num_experts=ne)
+for k in [104, 120]:
+    est(k=k)
+for arch in ['shared_routed_factorized_expert_topk', 'shared_lowrank_routed_expert_topk']:
+    est(arch=arch)
+PY" in /root/sparsify-ascend
+ succeeded in 4760ms:
+Using fused decoder on CUDA.
+shared_routed_expert_topk {'baseline': True} 0.13 0.11 0.24 557056 458752
+shared_routed_expert_topk {'num_experts': 80} 0.14 0.11 0.25 573440 458752
+shared_routed_expert_topk {'num_experts': 96} 0.14 0.11 0.25 589824 458752
+shared_routed_expert_topk {'k': 104} 0.13 0.1 0.23 557056 425984
+shared_routed_expert_topk {'k': 120} 0.13 0.12 0.25 557056 491520
+shared_routed_factorized_expert_topk {'baseline': True} 0.1 0.11 0.21 401408 458752
+shared_lowrank_routed_expert_topk {'baseline': True} 0.15 0.11 0.26 647168 458752
+
+codex
+本地成本自检显示两件事。`NUM_EXPERTS` 往上推会把 r162 从 0.24x 抬到约 0.25x，而 `shared_routed_factorized_expert_topk` 在当前同配方下理论成本只有约 0.21x，但历史质量信号很差，所以我再核一眼它过去的实际代价和 FVU，决定要不要用它做一次更干净的低成本结构重验。
+exec
+/bin/bash -lc "sed -n '1,90p' research/history/round_summaries/round_0142.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 142,
+  "timestamp": 1774851648,
+  "started_at": 1774851150,
+  "ended_at": 1774851648,
+  "duration_sec": 498,
+  "family_name": "shared_routed_factorized_expert_topk",
+  "family_stage": "mainline",
+  "session_id": "019d3d3c-c93b-73c1-9af4-e0b649543818",
+  "timeline_event_ids": [
+    "evt_1774851150518318810",
+    "evt_1774851284624668649",
+    "evt_1774851648823362258"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_{i\u2208S_sh(h(x))} \u03b1_i^sh(h(x)) b_i^sh + \u03a3_{e\u2208E(h(x))} \u03a3_{j\u2208S_e(h(x))} \u03b1_{e,j}(h(x)) b_{e,j}\uff0c\u5176\u4e2d h(x)=ReLU(Bx) \u662f\u5171\u4eab\u4f4e\u79e9\u6295\u5f71\uff0c{b_i^sh} \u662f shared \u9759\u6001\u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f routed expert \u9759\u6001\u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u53ef\u5bfc\u51fa\u4e3a\u201cshared low-rank projection + shared library lookup + routed expert local top-k + \u6709\u9650\u52a0\u6743\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `shared_routed_factorized_expert_topk` \u5224\u5b9a\u4e3a\u76f4\u63a5\u517c\u5bb9\uff0c\u4e0d\u662f\u4e0d\u517c\u5bb9 family\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1a\u76f8\u5bf9 r123 \u4ec5\u628a `ARCHITECTURE` \u4ece `shared_routed_expert_topk` \u5207\u5230 `shared_routed_factorized_expert_topk`\uff0c\u4fdd\u6301 `K=112`\u3001`EXPANSION_FACTOR=1`\u3001`ACTIVE_EXPERTS=2`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`LATENTS_PER_EXPERT=224`\u3001`NUM_EXPERTS=64` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u201cshared+routed \u5f02\u6784 MoE \u4e2d\u628a expert \u5185\u90e8 scorer \u4e5f\u505a\u4f4e\u79e9\u5316\u201d\u662f\u5426\u80fd\u5728\u7ea6 0.22x total_cost \u4e0b\u5f62\u6210\u65b0\u7684\u4f4e\u6210\u672c\u7ed3\u6784\u6bb5\u3002",
+    "summary": "\u5efa\u8bae\u4ee5 r123 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_routed_factorized_expert_topk`\u3002\u8fd9\u662f\u4e00\u8f6e\u4f4e\u6210\u672c\u5f02\u6784 MoE \u7ed3\u6784\u91cd\u9a8c\uff1a\u76f4\u63a5\u6d4b\u8bd5\u201cshared+routed + expert \u5185\u90e8\u4f4e\u79e9 scorer\u201d\u80fd\u5426\u5728\u7ea6 0.22x total_cost \u4e0b\u63d0\u4f9b\u6bd4\u5f53\u524d low-cost frontier \u66f4\u6709\u4ef7\u503c\u7684\u65b0\u6bb5\u3002",
+    "change_type": "param_only",
+    "expected_win": "explore_unknown",
+    "family_name": "shared_routed_factorized_expert_topk",
+    "family_stage": "mainline",
+    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r123 \u53ea\u6539 `ARCHITECTURE`\u3002\u5728 `shared_lowrank_routed_expert_residual` \u8fde\u7eed\u4e24\u8f6e\u975e\u652f\u914d\u5931\u8d25\u3001`shared_lowrank_routed_expert_topk` \u4e5f\u5df2\u7ed9\u51fa\u65b0\u7684\u8d1f\u4fe1\u53f7\u540e\uff0c\u7ee7\u7eed\u6cbf\u540c\u4e00 family \u505a\u5c40\u90e8\u538b\u7f29\u4fe1\u606f\u589e\u91cf\u504f\u4f4e\uff1b\u5207\u5230 `shared_routed_factorized_expert_topk` \u66f4\u7b26\u5408\u5f53\u524d\u5bf9\u5f02\u6784 MoE \u4e0e expert-internal low-rank \u7684\u4f18\u5148\u7ea7\uff0c\u4e5f\u80fd\u5728\u66f4\u4f4e\u7684 0.22x \u6210\u672c\u5e26\u8865\u4e00\u6bb5\u6b64\u524d\u4ecd\u6b20\u6e05\u6670\u7684\u7ed3\u6784\u8bc1\u636e\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u5728\u65e7\u8f6e\u6b21\u5df2\u6709\u5f31\u8d1f\u4fe1\u53f7\uff0c\u4f46\u5f53\u524d\u8fd9\u6b21\u662f\u4e0e r123 \u4e25\u683c matched-cost \u7684 fresh validation\uff0c\u7ed3\u8bba\u66f4\u6709\u89e3\u91ca\u529b\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "shared_routed_factorized_expert_topk"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "r141 \u5df2\u8bf4\u660e `shared_lowrank_routed_expert_topk` \u5728\u7ea6 0.30x total_cost \u4e0b\u4ecd\u88ab\u5f53\u524d low-cost frontier \u538b\u5236\uff0c\u56e0\u6b64\u201cshared low-rank basis + full expert head\u201d\u8fd9\u6761\u65e0 residual \u7ebf\u53ef\u6682\u65f6\u964d\u7ea7\u3002",
+      "\u672c\u8f6e\u6539\u505a\u53e6\u4e00\u6761 hetero MoE \u7ed3\u6784\u5bf9\u7167\uff1a\u76f8\u5bf9 r123 \u53ea\u5207 `ARCHITECTURE=shared_routed_factorized_expert_topk`\uff0c\u7528\u540c\u4e00\u4f4e\u6210\u672c anchor \u76f4\u63a5\u6d4b\u8bd5 expert \u5185\u90e8\u4f4e\u79e9 scorer \u662f\u5426\u503c\u5f97\u7ee7\u7eed\u3002",
+      "\u672c\u5730\u6210\u672c\u81ea\u68c0\uff1a\u5728 r123 \u914d\u65b9\u4e0b\u5207\u5230 `shared_routed_factorized_expert_topk` \u540e\uff0cselection_accesses=450560\u3001deployment_accesses=458752\u3001combined_accesses=909312\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 combined_ratio\u22480.22\uff0c\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c\u8be5\u70b9\u5728\u7ea6 0.22x \u4e0b\u660e\u663e\u4f18\u4e8e\u73b0\u6709 0.22x-0.25x frontier\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301\u8be5 family \u4e0d\u53d8\uff0c\u53ea\u6539 `FACTORIZED_HIDDEN_DIM` \u6216 `LATENTS_PER_EXPERT`\uff0c\u7ee7\u7eed\u538b\u7f29 hetero MoE \u7684\u4f4e\u79e9\u8def\u7531\u94fe\u8def\u3002",
+      "\u5982\u679c\u8be5\u70b9\u4ecd\u660e\u663e\u843d\u540e\u4e8e\u5f53\u524d low-cost frontier\uff0c\u5219\u53ef\u4ee5\u66f4\u6709\u628a\u63e1\u5730\u4e0b\u8c03\u201cfully factorized hetero MoE\u201d\u4f18\u5148\u7ea7\uff0c\u628a\u540e\u7eed\u9884\u7b97\u8f6c\u5411\u5176\u4ed6\u7ed3\u6784\u69fd\u4f4d\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728 shared+routed \u4f4e\u79e9\u53d8\u4f53\u4e0a\u53cd\u590d\u8bd5\u9519\u3002",
+      "\u5982\u679c\u7ed3\u679c\u53ea\u5c0f\u5e45\u4f18\u4e8e `expert_topk` \u4f46\u4ecd\u88ab `shared_routed_expert_topk` \u652f\u914d\uff0c\u5219\u8bf4\u660e shared branch \u6709\u4ef7\u503c\uff0c\u4f46 routed experts \u8fc7\u5ea6\u4f4e\u79e9\u5316\u4f1a\u4f24\u5bb3\u8d28\u91cf\uff1b\u540e\u7eed\u5e94\u4f18\u5148\u4fdd\u7559 expert-specific full heads \u6216\u5207\u5411\u522b\u7684 staged/residual \u7ed3\u6784\u3002"
+    ],
+    "reference_round": 123
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774851648",
+    "val_fvu": "0.25618457794189453",
+    "observed_fvu": "0.256185",
+    "k": "112",
+    "architecture": "shared_routed_factorized_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111050.117874",
+    "baseline_ratio": "0.999992",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0142/round0142_standard_1774851284_dp2_bs1_ga8_ef1_k112_20260330_141451",
+    "experiment_id": "r142_1774851648",
+    "head_commit": "22c62c1f3dc7430d6808298ccaaa37bbbea1b967",
+    "description": "\u5efa\u8bae\u4ee5 r123 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_routed_factorized_expert_topk`\u3002\u8fd9\u662f\u4e00\u8f6e\u4f4e\u6210\u672c\u5f02\u6784 MoE \u7ed3\u6784\u91cd\u9a8c\uff1a\u76f4\u63a5\u6d4b\u8bd5\u201cshared+routed + expert \u5185\u90e8\u4f4e\u79e9 scorer\u201d\u80fd\u5426\u5728\u7ea6 0.22x total_cost \u4e0b\u63d0\u4f9b\u6bd4\u5f53\u524d low-cost frontier \u66f4\u6709\u4ef7\u503c\u7684\u65b0\u6bb5\u3002",
+    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r123 \u53ea\u6539 `ARCHITECTURE`\u3002\u5728 `shared_lowrank_routed_expert_residual` \u8fde\u7eed\u4e24\u8f6e\u975e\u652f\u914d\u5931\u8d25\u3001`shared_lowrank_routed_expert_topk` \u4e5f\u5df2\u7ed9\u51fa\u65b0\u7684\u8d1f\u4fe1\u53f7\u540e\uff0c\u7ee7\u7eed\u6cbf\u540c\u4e00 family \u505a\u5c40\u90e8\u538b\u7f29\u4fe1\u606f\u589e\u91cf\u504f\u4f4e\uff1b\u5207\u5230 `shared_routed_factorized_expert_topk` \u66f4\u7b26\u5408\u5f53\u524d\u5bf9\u5f02\u6784 MoE \u4e0e expert-internal low-rank \u7684\u4f18\u5148\u7ea7\uff0c\u4e5f\u80fd\u5728\u66f4\u4f4e\u7684 0.22x \u6210\u672c\u5e26\u8865\u4e00\u6bb5\u6b64\u524d\u4ecd\u6b20\u6e05\u6670\u7684\u7ed3\u6784\u8bc1\u636e\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u5728\u65e7\u8f6e\u6b21\u5df2\u6709\u5f31\u8d1f\u4fe1\u53f7\uff0c\u4f46\u5f53\u524d\u8fd9\u6b21\u662f\u4e0e r123 \u4e25\u683c matched-cost \u7684 fresh validation\uff0c\u7ed3\u8bba\u66f4\u6709\u89e3\u91ca\u529b\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0142_standard_1774851284.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0142/round0142_standard_1774851284_dp2_bs1_ga8_ef1_k112_20260330_141451/metrics.jsonl",
+    "curve_start_fvu": "0.328896",
+    "curve_mid_fvu": "0.278833",
+    "curve_end_fvu": "0.256185",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "112",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+
+exec
+/bin/bash -lc "sed -n '1,90p' research/history/round_summaries/round_0128.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 128,
+  "timestamp": 1774834662,
+  "started_at": 1774834205,
+  "ended_at": 1774834662,
+  "duration_sec": 457,
+  "family_name": "shared_routed_factorized_expert_topk",
+  "family_stage": "prototype",
+  "session_id": "019d3bfd-fc00-7b02-9633-d2dfa6b15b26",
+  "timeline_event_ids": [
+    "evt_1774834205687349148",
+    "evt_1774834298550412622",
+    "evt_1774834662800644436"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_{i\u2208S_shared(h(x))} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(h(x))} \u03a3_{j\u2208S_e(h(x))} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d h(x)=ReLU(Bx) \u662f\u5171\u4eab\u4f4e\u79e9\u6295\u5f71\uff0cshared \u5b50\u5e93\u4e0e\u5404 routed expert \u5b50\u5e93\u90fd\u662f\u771f\u6b63\u9759\u6001\u5411\u91cf\u5e93\uff0c\u56e0\u6b64\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared low-rank projection + shared \u5b50\u5e93\u67e5\u8868 + routed \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c\u201d\u6d41\u6c34\u7ebf\uff1b\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u4ecd\u662f\u4e0d\u517c\u5bb9\uff0c\u53ea\u80fd\u4f5c\u5386\u53f2\u53c2\u8003\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d frontier\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u5f53\u524d\u989d\u5916\u63d0\u793a\u5df2\u660e\u786e\u8981\u6c42\u505c\u6b62\u628a\u4e3b\u8981\u9884\u7b97\u7ee7\u7eed\u6295\u5165\u73b0\u6709 `lowrank_expert_*` \u6216 `shared_routed_expert_topk` \u7684\u5c40\u90e8\u626b\u53c2\uff0c\u800c\u4f18\u5148\u9a8c\u8bc1\u65b0\u7684\u5f02\u6784 MoE \u7ed3\u6784\u4fe1\u606f\uff1b\u56e0\u6b64\u5e94\u5148\u5bf9\u521a\u5b8c\u6210\u96c6\u6210\u7684\u65b0 family \u505a\u4e00\u6b21\u6700\u5e72\u51c0\u7684 matched-cost \u9996\u8f6e\u9a8c\u8bc1\u3002\u76f8\u5bf9 r108 \u4ec5\u628a `ARCHITECTURE` \u4ece `shared_routed_expert_topk` \u5207\u5230 `shared_routed_factorized_expert_topk`\uff0c\u4fdd\u6301 `K=128`\u3001`NUM_EXPERTS=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=320`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`EF=1`\u3001`adam`\u3001`8e-4` \u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u201cshared+routed experts + shared low-rank basis + expert-local top-k\u201d\u662f\u5426\u80fd\u5728\u76f8\u8fd1\u6216\u66f4\u4f4e total_cost \u4e0b\u4f18\u4e8e\u73b0\u6709 shared+routed \u7ebf\u3002\u6309\u5f53\u524d\u6210\u672c\u6a21\u578b\uff0c\u8fd9\u4e2a\u7ed3\u6784\u5e94\u4e3b\u8981\u538b\u4f4e encoder selection \u6210\u672c\uff0c\u800c deployment \u6210\u672c\u4e0e r108 \u540c\u91cf\u7ea7\uff0c\u56e0\u6b64\u6709\u673a\u4f1a\u5728 <0.5x \u5e26\u5f62\u6210\u65b0\u7684\u7ed3\u6784\u6027\u524d\u6cbf\u3002",
+    "summary": "\u5148\u4e0d\u7ed9\u65b0 family\u505a\u5c40\u90e8\u626b\u53c2\uff0c\u76f4\u63a5\u505a\u9996\u8f6e matched architecture swap\u3002\u4ee5 r108 \u4e3a reference\uff0c\u53ea\u628a `ARCHITECTURE` \u5207\u5230\u521a\u96c6\u6210\u5e76\u5df2 smoke \u901a\u8fc7\u7684 `shared_routed_factorized_expert_topk`\uff0c\u9a8c\u8bc1\u8fd9\u6761\u5f02\u6784 MoE + shared low-rank basis \u65b0\u7ed3\u6784\u662f\u5426\u503c\u5f97\u7ee7\u7eed\u3002",
+    "change_type": "param_only",
+    "expected_win": "explore_unknown",
+    "family_name": "shared_routed_factorized_expert_topk",
+    "family_stage": "prototype",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r108 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u8f6e\u4e0d\u518d\u7ee7\u7eed\u6cbf `lowrank_expert_residual` \u6216 `shared_routed_expert_topk` \u505a\u5c40\u90e8\u90bb\u57df\u5ef6\u957f\uff0c\u7b26\u5408\u5f53\u524d\u8fd0\u884c\u65f6\u4f18\u5148\u7ea7\uff1b\u4e5f\u4e0d\u65b0\u589e env key\uff0c\u56e0\u6b64\u65e0\u9700\u6539 `research/AutoResearch/` \u6216 `scripts/`\u3002\u9009\u62e9 r108 \u800c\u4e0d\u662f\u66f4\u8fd1\u7684 r121-r123\uff0c\u662f\u56e0\u4e3a r108 \u63d0\u4f9b\u4e86\u5f53\u524d\u65b0 family \u6700\u5e72\u51c0\u7684 matched shared+routed recipe\uff0c\u4e14 `LATENTS_PER_EXPERT=320, K=128, ACTIVE_EXPERTS=2` \u5df2\u88ab\u8bc1\u660e\u662f\u53ef\u884c\u7684\u5f3a\u57fa\u7ebf\u3002\u4e3b\u8981\u98ce\u9669\u662f `FACTORIZED_HIDDEN_DIM=256` \u7684 shared basis \u53ef\u80fd\u635f\u5931\u8fc7\u591a\u8868\u8fbe\u80fd\u529b\uff1b\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u6700\u9700\u8981\u7684\u65b0\u7ed3\u6784\u8bc1\u636e\u3002",
+    "needs_sanity": true,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "shared_routed_factorized_expert_topk"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "`shared_routed_factorized_expert_topk` \u5df2\u5728 `sparsify/config.py` \u548c `sparsify/sparse_coder.py` \u5b9e\u9645\u843d\u76d8\uff0c\u5e76\u5b8c\u6210 instantiate/forward/backward \u672c\u5730 smoke\u3002",
+      "\u65b0 family \u590d\u7528\u5df2\u6709 tunables `NUM_EXPERTS`\u3001`ACTIVE_EXPERTS`\u3001`LATENTS_PER_EXPERT`\u3001`FACTORIZED_HIDDEN_DIM`\uff0c\u6ca1\u6709\u65b0\u589e env key\u3002",
+      "\u672c\u8f6e\u662f\u5bf9\u65b0\u589e family \u7684\u9996\u4e2a matched validation\uff0c\u4e0d\u5e94\u5728\u9996\u8f6e\u540c\u65f6\u6539 `K`\u3001`LATENTS_PER_EXPERT` \u6216 `FACTORIZED_HIDDEN_DIM`\uff0c\u5426\u5219\u65e0\u6cd5\u6e05\u6670\u5f52\u56e0\u3002",
+      "\u5982\u679c\u9996\u8f6e\u7ed3\u679c\u5f02\u5e38\uff0c\u5e94\u5148\u533a\u5206\u662f\u8bad\u7ec3\u7a33\u5b9a\u6027\u95ee\u9898\u8fd8\u662f\u7ed3\u6784\u8d1f\u4fe1\u53f7\uff0c\u800c\u4e0d\u8981\u91cd\u65b0\u5f52\u56e0\u4e3a\u6ce8\u518c\u94fe\u95ee\u9898\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c\u65b0 family \u5728\u76f8\u8fd1\u6216\u66f4\u4f4e total_cost \u4e0b\u660e\u663e\u4f18\u4e8e r108\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `K=96`\uff0c\u6d4b\u8bd5\u8fd9\u6761\u65b0\u7ed3\u6784\u80fd\u5426\u7ee7\u7eed\u5411\u66f4\u4f4e deployment \u6210\u672c\u5de6\u79fb\u3002",
+      "\u5982\u679c\u65b0 family\u6709\u6b63\u4fe1\u53f7\u4f46\u4ecd\u5f31\u4e8e\u9884\u671f\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `FACTORIZED_HIDDEN_DIM`\uff0c\u533a\u5206\u74f6\u9888\u662f\u5728 shared basis \u5bbd\u5ea6\u8fd8\u662f\u5728 expert capacity\u3002",
+      "\u5982\u679c\u65b0 family\u660e\u663e\u4e0d\u5982 matched `shared_routed_expert_topk`\uff0c\u5219\u53ef\u8f83\u6e05\u6670\u5224\u5b9a\u5f53\u524d target \u4e0a\u8fd9\u7c7b\u5f02\u6784 MoE \u7684 low-rank scorer \u8fd8\u4e0d\u8db3\u4ee5\u62b5\u6d88\u8868\u793a\u635f\u5931\uff0c\u540e\u7eed\u5e94\u5207\u56de\u522b\u7684\u672a\u5145\u5206\u9a8c\u8bc1\u7ed3\u6784\u69fd\u4f4d\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u7ec6\u626b\u8be5 family\u3002"
+    ],
+    "reference_round": 108
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774834662",
+    "val_fvu": "0.22480779886245728",
+    "observed_fvu": "0.224808",
+    "k": "128",
+    "architecture": "shared_routed_factorized_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111050.997444",
+    "baseline_ratio": "1.000007",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0128/round0128_standard_1774834298_dp2_bs1_ga8_ef1_k128_20260330_093144",
+    "experiment_id": "r128_1774834662",
+    "head_commit": "ccbcc6eb92b69bc663b8407be38c57c97e11db41",
+    "description": "\u5148\u4e0d\u7ed9\u65b0 family\u505a\u5c40\u90e8\u626b\u53c2\uff0c\u76f4\u63a5\u505a\u9996\u8f6e matched architecture swap\u3002\u4ee5 r108 \u4e3a reference\uff0c\u53ea\u628a `ARCHITECTURE` \u5207\u5230\u521a\u96c6\u6210\u5e76\u5df2 smoke \u901a\u8fc7\u7684 `shared_routed_factorized_expert_topk`\uff0c\u9a8c\u8bc1\u8fd9\u6761\u5f02\u6784 MoE + shared low-rank basis \u65b0\u7ed3\u6784\u662f\u5426\u503c\u5f97\u7ee7\u7eed\u3002",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u76f8\u5bf9 r108 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u8f6e\u4e0d\u518d\u7ee7\u7eed\u6cbf `lowrank_expert_residual` \u6216 `shared_routed_expert_topk` \u505a\u5c40\u90e8\u90bb\u57df\u5ef6\u957f\uff0c\u7b26\u5408\u5f53\u524d\u8fd0\u884c\u65f6\u4f18\u5148\u7ea7\uff1b\u4e5f\u4e0d\u65b0\u589e env key\uff0c\u56e0\u6b64\u65e0\u9700\u6539 `research/AutoResearch/` \u6216 `scripts/`\u3002\u9009\u62e9 r108 \u800c\u4e0d\u662f\u66f4\u8fd1\u7684 r121-r123\uff0c\u662f\u56e0\u4e3a r108 \u63d0\u4f9b\u4e86\u5f53\u524d\u65b0 family \u6700\u5e72\u51c0\u7684 matched shared+routed recipe\uff0c\u4e14 `LATENTS_PER_EXPERT=320, K=128, ACTIVE_EXPERTS=2` \u5df2\u88ab\u8bc1\u660e\u662f\u53ef\u884c\u7684\u5f3a\u57fa\u7ebf\u3002\u4e3b\u8981\u98ce\u9669\u662f `FACTORIZED_HIDDEN_DIM=256` \u7684 shared basis \u53ef\u80fd\u635f\u5931\u8fc7\u591a\u8868\u8fbe\u80fd\u529b\uff1b\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u6700\u9700\u8981\u7684\u65b0\u7ed3\u6784\u8bc1\u636e\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0128_standard_1774834298.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0128/round0128_standard_1774834298_dp2_bs1_ga8_ef1_k128_20260330_093144/metrics.jsonl",
+    "curve_start_fvu": "0.300354",
+    "curve_mid_fvu": "0.243836",
+    "curve_end_fvu": "0.224808",
+    "curve_late_slope": "-0.000000",
+    "curve_still_improving": "true",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "shared_routed_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "128",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+
+exec
+/bin/bash -lc "sed -n '1,90p' research/history/round_summaries/round_0129.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 129,
+  "timestamp": 1774836122,
+  "started_at": 1774835025,
+  "ended_at": 1774836122,
+  "duration_sec": 1097,
+  "family_name": "shared_lowrank_routed_expert_topk",
+  "family_stage": "prototype",
+  "session_id": "019d3c69-de0c-72f2-8016-e0b6decb3b58",
+  "timeline_event_ids": [
+    "evt_1774835025307326652",
+    "evt_1774835337834014818",
+    "evt_1774836122379061705"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a x_hat = \u03a3_{i\u2208S_sh(h(x))} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(h(x))} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d h(x)=Bx \u662f\u5171\u4eab\u4f4e\u79e9\u6295\u5f71\uff0cU={u_i} \u662f\u9759\u6001 shared library\uff0c{B_e} \u662f\u9759\u6001 routed expert \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u53ef\u5bfc\u51fa\u4e3a\u201cshared low-rank projection + shared library lookup + routed expert local top-k + \u6709\u9650\u52a0\u6743\u548c\u201d\uff0c\u9759\u6001\u5e93\u4e0d\u968f\u6837\u672c\u52a8\u6001\u751f\u6210\uff0c\u56e0\u6b64 `shared_lowrank_routed_expert_topk` \u5224\u5b9a\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u4ecd\u662f\u4e0d\u517c\u5bb9 family\uff0c\u4e0d\u80fd\u9a71\u52a8 frontier\u3002\u552f\u4e00\u4e3b\u5047\u8bbe\uff1a\u76f8\u5bf9 r128 \u4ec5\u628a `ARCHITECTURE` \u4ece `shared_routed_factorized_expert_topk` \u5207\u5230\u5df2\u5b9e\u9645\u843d\u76d8\u7684\u65b0 `shared_lowrank_routed_expert_topk`\uff0c\u4fdd\u6301 `K=128`\u3001`EXPANSION_FACTOR=1`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`NUM_EXPERTS=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=320` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54 r127-r128 \u7684\u8d1f\u4fe1\u53f7\u662f\u5426\u4e3b\u8981\u6765\u81ea\u201crouted experts \u4e5f\u88ab\u4e00\u5e76 factorize\u201d\u8fd9\u4e00\u7ed3\u6784\u9650\u5236\uff1b\u5982\u679c\u662f\uff0c\u5219\u65b0 family \u5e94\u5728 fresh cost \u7ea6 selection=0.24x\u3001deployment=0.12x\u3001total=0.37x \u7684\u4f4e\u6210\u672c\u5e26\u663e\u8457\u4f18\u4e8e 0.2248\uff0c\u5e76\u51b3\u5b9a\u8fd9\u6761 shared-lowrank + full-routed-head \u7ed3\u6784\u662f\u5426\u503c\u5f97\u7ee7\u7eed\u6269\u5c55\u3002",
+    "summary": "\u5df2\u5b9e\u9645\u843d\u76d8\u65b0 family `shared_lowrank_routed_expert_topk`\uff1ashared \u5206\u652f\u4fdd\u7559\u4f4e\u79e9 scorer\uff0crouted experts \u6539\u56de full-dim local heads\uff0c\u7528\u6765\u505a\u5bf9 r127-r128 \u7684\u6700\u5c0f\u7ed3\u6784\u4fee\u6b63\u3002\u5efa\u8bae\u672c\u8f6e\u4ee5 r128 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\uff0c\u7528\u540c\u914d\u65b9\u76f4\u63a5\u5224\u65ad\u5f53\u524d shared+routed \u8d1f\u4fe1\u53f7\u662f\u5426\u4e3b\u8981\u6765\u81ea\u8fc7\u5ea6 factorize routed experts\u3002",
+    "change_type": "edit_sae_code",
+    "expected_win": "explore_unknown",
+    "family_name": "shared_lowrank_routed_expert_topk",
+    "family_stage": "prototype",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u8ba1\u5212\u8fd0\u884c\u65f6\u76f8\u5bf9 r128 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u8f6e\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u5c40\u90e8\u626b\u53c2\uff0c\u800c\u662f\u843d\u4e00\u4e2a\u6700\u5c0f\u65b0\u539f\u578b\uff0c\u76f4\u63a5\u9694\u79bb\u201cshared+routed \u5931\u8d25\u662f\u5426\u6765\u81ea\u628a routed heads \u4e5f factorize\u201d\u8fd9\u4e2a\u9ad8\u4fe1\u606f\u91cf\u7ed3\u6784\u95ee\u9898\u3002\u6309 `sae-architecture-integration` \u68c0\u67e5\uff0cwhitelist\u3001factory dispatch\u3001\u5177\u4f53\u7c7b\u5b9e\u73b0\u548c exact architecture smoke \u90fd\u5df2\u5b8c\u6210\uff1b\u4e3b\u8981\u98ce\u9669\u662f routed full heads \u4f1a\u628a\u884c\u4e3a\u62c9\u56de\u63a5\u8fd1 `shared_routed_expert_topk` \u800c\u7f3a\u4e4f\u65b0\u7684 Pareto \u4ef7\u503c\uff0c\u4f46\u8fd9\u672c\u8eab\u4e5f\u662f\u6e05\u6670\u7ed3\u8bba\u3002",
+    "needs_sanity": true,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "shared_lowrank_routed_expert_topk"
+      }
+    ],
+    "touched_files": [
+      "sparsify/config.py",
+      "sparsify/sparse_coder.py"
+    ],
+    "notes_to_memory": [
+      "\u5df2\u5b9e\u9645\u65b0\u589e\u5e76\u6ce8\u518c `shared_lowrank_routed_expert_topk`\uff0c\u771f\u5b9e\u6539\u52a8\u4ec5\u843d\u5728 `sparsify/config.py` \u4e0e `sparsify/sparse_coder.py`\u3002",
+      "\u672c\u5730 exact architecture smoke \u5df2\u901a\u8fc7\uff1a`ARCHITECTURE=shared_lowrank_routed_expert_topk, K=128, EF=1, FACTORIZED_HIDDEN_DIM=256, NUM_EXPERTS=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=320` \u53ef instantiate/forward/backward\u3002",
+      "fresh cost \u81ea\u68c0\uff1aselection_accesses=1015808\u3001deployment_accesses=524288\u3001combined_accesses=1540096\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 combined_ratio\u22480.37\uff0c\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u7ea6\u675f\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c\u8be5\u70b9\u5728\u7ea6 0.37x \u4e0b\u628a FVU \u660e\u663e\u62c9\u56de\u5230\u63a5\u8fd1 `shared_routed_expert_topk` \u4f4e\u6210\u672c\u524d\u6cbf\uff0c\u5219\u4e0b\u4e00\u8f6e\u4fdd\u6301\u65b0 family \u4e0d\u53d8\uff0c\u53ea\u6539 `LATENTS_PER_EXPERT=384` \u6216 `K=112`\uff0c\u5b9a\u4f4d\u8fd9\u6761\u65b0\u7ebf\u7684 low-cost knee\u3002",
+      "\u5982\u679c\u7ed3\u679c\u53ea\u5c0f\u5e45\u4f18\u4e8e r128 \u4f46\u4ecd\u660e\u663e\u5dee\u4e8e\u73b0\u6709 `<0.5x` frontier\uff0c\u5219\u53ef\u521d\u6b65\u5224\u5b9a\u95ee\u9898\u4e0d\u53ea\u5728 routed factorization\uff0c\u672c\u65b9\u5411\u4f18\u5148\u7ea7\u5e94\u4e0b\u8c03\uff0c\u540e\u7eed\u8f6c\u56de `two_stage_residual_expert` \u6216\u522b\u7684\u672a\u5145\u5206\u9a8c\u8bc1\u7ed3\u6784\u3002",
+      "\u5982\u679c\u8bad\u7ec3\u524d\u6216 sanity \u9636\u6bb5\u51fa\u73b0\u65b0\u95ee\u9898\uff0c\u5148\u6309\u65b0 family registration/forward \u95ee\u9898\u5904\u7406\uff0c\u4e0d\u8981\u628a\u5931\u8d25\u8bef\u5224\u4e3a\u7ed3\u6784\u8d28\u91cf\u7ed3\u8bba\u3002"
+    ],
+    "reference_round": 128
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774836122",
+    "val_fvu": "0.1219072937965393",
+    "observed_fvu": "0.121907",
+    "k": "128",
+    "architecture": "shared_lowrank_routed_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "55527.497544",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0129/round0129_standard_1774835337_dp2_bs1_ga8_ef1_k128_20260330_094904",
+    "experiment_id": "r129_1774836122",
+    "head_commit": "b609c5eb168a0ba6564bb95c94eb59d7f0eaae9b",
+    "description": "\u5df2\u5b9e\u9645\u843d\u76d8\u65b0 family `shared_lowrank_routed_expert_topk`\uff1ashared \u5206\u652f\u4fdd\u7559\u4f4e\u79e9 scorer\uff0crouted experts \u6539\u56de full-dim local heads\uff0c\u7528\u6765\u505a\u5bf9 r127-r128 \u7684\u6700\u5c0f\u7ed3\u6784\u4fee\u6b63\u3002\u5efa\u8bae\u672c\u8f6e\u4ee5 r128 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\uff0c\u7528\u540c\u914d\u65b9\u76f4\u63a5\u5224\u65ad\u5f53\u524d shared+routed \u8d1f\u4fe1\u53f7\u662f\u5426\u4e3b\u8981\u6765\u81ea\u8fc7\u5ea6 factorize routed experts\u3002",
+    "self_review": "\u6ee1\u8db3\u5355\u8f6e\u5355\u53d8\u91cf\u7ea6\u675f\uff1a\u8ba1\u5212\u8fd0\u884c\u65f6\u76f8\u5bf9 r128 \u53ea\u6539 `ARCHITECTURE`\u3002\u8fd9\u8f6e\u4e0d\u662f\u56de\u5230\u65e7 family \u7684\u5c40\u90e8\u626b\u53c2\uff0c\u800c\u662f\u843d\u4e00\u4e2a\u6700\u5c0f\u65b0\u539f\u578b\uff0c\u76f4\u63a5\u9694\u79bb\u201cshared+routed \u5931\u8d25\u662f\u5426\u6765\u81ea\u628a routed heads \u4e5f factorize\u201d\u8fd9\u4e2a\u9ad8\u4fe1\u606f\u91cf\u7ed3\u6784\u95ee\u9898\u3002\u6309 `sae-architecture-integration` \u68c0\u67e5\uff0cwhitelist\u3001factory dispatch\u3001\u5177\u4f53\u7c7b\u5b9e\u73b0\u548c exact architecture smoke \u90fd\u5df2\u5b8c\u6210\uff1b\u4e3b\u8981\u98ce\u9669\u662f routed full heads \u4f1a\u628a\u884c\u4e3a\u62c9\u56de\u63a5\u8fd1 `shared_routed_expert_topk` \u800c\u7f3a\u4e4f\u65b0\u7684 Pareto \u4ef7\u503c\uff0c\u4f46\u8fd9\u672c\u8eab\u4e5f\u662f\u6e05\u6670\u7ed3\u8bba\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0129_standard_1774835337.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0129/round0129_standard_1774835337_dp2_bs1_ga8_ef1_k128_20260330_094904/metrics.jsonl",
+    "curve_start_fvu": "0.167879",
+    "curve_mid_fvu": "0.135983",
+    "curve_end_fvu": "0.121907",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "shared_routed_factorized_expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "128",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+
+codex
+{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"104"}],"expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"stabilize","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧仍可直接导出为 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”推理链路，因此兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，只能保留为历史参考、不得驱动当前 frontier。r163 已给出清晰负信号：相对 r162 把 `LATENTS_PER_EXPERT` 从 160 压到 144 会使 FVU 从 0.1369 回退到 0.1437，说明当前 low-cost 主线在 `K=112` 下已接近 width floor，继续压 per-expert width 不是更优方向。本轮唯一主假设是：相对 r162 只把 `K` 从 112 降到 104，保持 `ARCHITECTURE=shared_routed_expert_topk`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 不变，测试当前最强 low-cost 点是否存在轻微 deployment overprovision。如果是，则该点应能把 total_cost 从约 0.24x 左移到约 0.23x，同时尽量保住接近 r162 的质量，并争取击败当前 0.23x anchor 的 FVU=0.1421。","summary":"建议以 r162 为 reference，只改 `K=104`。这是一次严格留在 `<0.25x` 主战场内的 matched-cost deployment compression probe：r163 已排除了继续压 `LATENTS_PER_EXPERT` 的方向，现在更有信息量的问题是 r162 的 `K=112` 是否略高于真正需要的 lookup budget。","self_review":"相对 r162 只改一个 env 参数 `K`，满足单变量原则。当前阶段的高优先级仍是回答 `<0.25x` 区域谁能在相近或更低成本下打败现有 low-cost anchor；在 r163 已证伪更小 `LATENTS_PER_EXPERT` 后，继续在同 family 内做一次更低 deployment 成本的 matched probe，比切去一个大概率落到 `0.26x+` 的新 family 更符合当前主战场。选择 `K=104` 而不是回到 `K=96`，是因为 r161→r162 的改进说明这条 width=160 子线对 lookup budget 仍有响应，而 104 是定位 knee 的最小中间点。主要风险是改善幅度可能不足以超越 r161 的 0.23x/0.1421；但无论正负，这一轮都会更清楚回答当前最强 low-cost recipe 是否已经在 `K=112` 吃满 deployment 预算。","needs_sanity":false,"env_overrides":[{"key":"K","value":"104"}],"touched_files":[],"notes_to_memory":["r163 已确认：在 `shared_routed_expert_topk K=112 ACTIVE_EXPERTS=2 NUM_EXPERTS=64` 上把 `LATENTS_PER_EXPERT` 从 160 降到 144 会明显退化，说明当前 low-cost 主线更像已到 width floor，而不是仍有可继续压缩的 per-expert width。","本地成本自检：相对 r162 仅改 `K=104` 后，selection ratio 仍约 0.13x，deployment ratio 约 0.10x，combined ratio 约 0.23x，仍明确处于 `<0.25x` 主战场内。","`shared_routed_factorized_expert_topk` 虽然理论成本可更低，但历史在当前 target 上已给出强负信号（r128 FVU≈0.2248，r142 FVU≈0.2562），本轮不应再让该不强结构占用主战场预算。"],"next_hypotheses":["如果 `K=104` 在约 0.23x 下把 FVU 压到 0.1421 以下，则下一轮保持 family 不变，只改 `K=108` 或直接回到 `K=112` 作更细 deployment knee 定位，判断 104-112 哪个才是当前 width=160 子线的最佳可部署点。","如果 `K=104` 明显接近 r162 的 0.1369，则说明当前最强 low-cost 点确有轻微 deployment overprovision，后续应优先围绕更低 lookup 预算继续细化，而不是再压 `LATENTS_PER_EXPERT`。","如果 `K=104` 明显退化并接近或差于 r161，则说明 r162 的 `K=112` 基本已是这条子线的 deployment knee；下一轮应转向新的 matched-cost 轻量结构对照，而不是继续在线性 K 轴上细扫。"],"reference_round":162}
+tokens used
+300,679
