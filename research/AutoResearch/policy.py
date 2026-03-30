@@ -22,6 +22,7 @@ from typing import Any
 
 from .compatibility import compute_selection_cost, is_compatible_label
 from .config_resolution import (
+    frontier_entry_to_env_config,
     structured_config_from_round_summary,
     render_env_config,
     resolve_action_configs,
@@ -206,14 +207,23 @@ def build_policy_guidance(
     policy_state: dict[str, Any],
 ) -> str:
     """把当前策略模式渲染成 prompt 中直接可读的中文说明。"""
-    mainline = resolve_mainline_snapshot(state)
+    mode = policy_state["mode"]
+    mainline = _resolve_policy_anchor(state, mode)
     recipe_line = _format_recipe_line(mainline["config"])
     recipe_block = render_env_config(mainline["config"])
-    mode = policy_state["mode"]
     reason = policy_state["reason"]
-    role_label = "当前参考 family" if mainline["source"] == "target_profile_baseline" else "当前主线 family"
-    recipe_label = "当前参考配方" if mainline["source"] == "target_profile_baseline" else "当前主线参考配方"
-    config_label = "当前参考完整配置" if mainline["source"] == "target_profile_baseline" else "当前主线完整配置"
+    if mainline["source"] == "target_profile_baseline":
+        role_label = "当前参考 family"
+        recipe_label = "当前参考配方"
+        config_label = "当前参考完整配置"
+    elif mainline["source"] == "low_cost_frontier_best":
+        role_label = "当前低成本参考 family"
+        recipe_label = "当前低成本参考配方"
+        config_label = "当前低成本完整配置"
+    else:
+        role_label = "当前主线 family"
+        recipe_label = "当前主线参考配方"
+        config_label = "当前主线完整配置"
 
     if mode == "engineering_repair":
         return "\n".join([
@@ -241,8 +251,7 @@ def build_policy_guidance(
             "3. 选 K 时需权衡 FVU 改善与部署查表开销（K×n），K 过大会推高 total_cost。",
             "4. 参考成本速查表选择可行的 (架构, EF) 组合。",
             "5. 可以尝试不同架构；不要因为旧位置结论预先排斥简单结构、低秩结构或更复杂结构。",
-            "6. 如果需要新的结构信息，优先考虑 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert` 这些方向。",
-            "7. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
+            "6. 允许同时切换 family + 调整 EF，因为当前没有可行点可做 baseline。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -257,11 +266,8 @@ def build_policy_guidance(
             "本轮要求：",
             "1. 当前阶段重点不是继续刷新全局最低 FVU，也不是继续细扫旧 family 的 K 轴，而是在低到中成本带建立新的结构性前沿。",
             "2. 允许新开 family；不要求继续围绕当前主线 family 做 clean baseline 或邻域微调。",
-            "3. plain `EF=1` selector 结果现在主要作为 cost anchor；除 matched baseline 外，不应继续占用大部分搜索预算。",
-            "4. 当前优先方向是 `expert_topk / MoE-like`、`lowrank + expert`、`lowrank + expert + residual`、`two-stage residual expert`。",
-            "5. 不要因为旧位置结论预先判定“复杂一定更强”或“简单一定更弱”；新位置需要重新验证。",
-            "6. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
-            "7. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。",
+            "3. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。",
+            "4. >0.5x 区域可以保留少量质量锚点或解释性对照，但不要让 old-family 局部打磨重新主导搜索注意力。",
             "",
             "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
         ])
@@ -363,6 +369,76 @@ def _low_cost_frontier_status(
         "needs_expansion": needs_expansion,
         "reason": reason,
     }
+
+
+def _resolve_policy_anchor(state: Any, mode: str) -> dict[str, Any]:
+    """Choose the most relevant anchor config for the current policy mode."""
+    if mode == "low_cost_exploration":
+        low_cost = _best_low_cost_frontier_entry(
+            state.frontier,
+            state.load_compatibility_registry(),
+            threshold_ratio=0.5,
+        )
+        if low_cost is not None:
+            config = frontier_entry_to_env_config(low_cost)
+            family_name = str(
+                low_cost.get("config", {}).get("family_name")
+                or low_cost.get("architecture")
+                or config.get("ARCHITECTURE", "topk")
+            ).lower()
+            return {
+                "family_name": family_name,
+                "config": config,
+                "source": "low_cost_frontier_best",
+            }
+    return resolve_mainline_snapshot(state)
+
+
+def _best_low_cost_frontier_entry(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    threshold_ratio: float = 0.5,
+) -> dict[str, Any] | None:
+    """Return the best-FVU compatible frontier point inside the low-cost band."""
+    current_profile = default_target_profile()
+    best: dict[str, Any] | None = None
+    best_fvu = float("inf")
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = dict(entry.get("config", {}) or {})
+        if entry.get("target_profile") is not None and "target_profile" not in cfg:
+            cfg["target_profile"] = entry["target_profile"]
+        if not profile_matches(cfg, current_profile):
+            continue
+        family_name = str(
+            cfg.get("family_name")
+            or entry.get("architecture")
+            or ""
+        ).lower()
+        if registry and not is_compatible_label(registry.get(family_name)):
+            continue
+        total_cost = entry.get("total_cost")
+        if total_cost is None:
+            sel = entry.get("selection_cost")
+            deploy = entry.get("deployment_accesses", 0) or 0
+            total_cost = float(sel) + float(deploy) if sel is not None else None
+        if total_cost is None:
+            continue
+        original = resolve_target_profile(cfg).original_matmul_accesses
+        ratio = float(total_cost) / original if original > 0 else float("inf")
+        if ratio >= threshold_ratio:
+            continue
+        try:
+            fvu = float(entry.get("fvu", float("inf")))
+        except (TypeError, ValueError):
+            continue
+        if fvu < best_fvu:
+            best_fvu = fvu
+            best = entry
+
+    return best
 
 
 # ---------------------------------------------------------------------------
