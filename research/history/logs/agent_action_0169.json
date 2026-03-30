@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧仍可直接导出到 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”推理链路，因此 `shared_routed_expert_topk` 兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，只能作为历史参考，不能驱动当前 frontier。r166-r167 已把 `K=110/111` 补到接近饱和，而 r168 又确认把 `LATENTS_PER_EXPERT` 从 160 压到 152 会明显退化到 FVU=0.1410711109638214，说明当前 `<0.25x` 主线的 width floor 比预期更硬，继续压 per-expert width 不是优先方向。本轮唯一主假设是：相对当前最强 low-cost baseline r162 只把 `NUM_EXPERTS` 从 64 降到 48，在保持 `ARCHITECTURE=shared_routed_expert_topk`、`K=112`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 不变时，能否用更轻的 router 与更小的总静态 expert 容量，把 total_cost 从约 0.242x 左移到约 0.238x，同时尽量维持接近现有 low-cost best 的 FVU，从而直接回答“更轻 shared+routed 变体能否在相近或更低成本下打败现有 anchor”。",
+  "summary": "建议以 r162 为 reference，只改 `NUM_EXPERTS=48`。`K` 轴和 width 轴最近都已给出饱和或负信号，这一轮转去更高信息量的轻 router / 轻总 expert 容量 probe，更符合当前 `<0.25x` 主战场目标。",
+  "change_type": "param_only",
+  "experiment_tier": "full",
+  "expected_win": "lower_cost",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "stabilize",
+  "self_review": "相对 r162 只改一个 env 参数 `NUM_EXPERTS`，满足 param_only 单变量规则。选择 `NUM_EXPERTS` 而不是继续扫 `K`，是因为 r166-r167 已显示 108-112 这段 lookup 增量只有递减收益；选择 `NUM_EXPERTS` 而不是继续压 `LATENTS_PER_EXPERT`，是因为 r168 已明确给出 `152` 的负信号，说明 width floor 已经很近。选择 48 而不是一步降到 32，是因为早期高成本 shared+routed 线上 `NUM_EXPERTS=32 -> 64` 曾有明显质量提升，说明总 expert 容量确实重要；因此先做中等幅度压缩，比直接砍半更有机会在略低成本下保住质量。主要风险是质量仍会明显退化，导致该点被现有 `K=104/108/112` anchors 支配；但如果它能在约 0.238x 下维持到接近 0.138 级别，就会成为比继续细扫 K 更有价值的新 matched-cost 低成本证据。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "48"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r168 已确认：相对 r162 把 `LATENTS_PER_EXPERT` 从 160 压到 152 会退化到 FVU=0.1410711109638214，说明当前 `<0.25x` 主线的 width floor 比预期更硬，后续不应再优先沿更小 width 方向推进。",
+    "r166-r167 已把 `K=110/111` 补齐到接近 `K=112`，FVU 仅从 0.13737481832504272 改善到 0.13721886277198792，仍未超过 r162 的 0.13694503903388977，说明当前 width=160 子线的 lookup knee 已基本定位完成。",
+    "本地成本自检：相对 r162 仅改 `NUM_EXPERTS=48` 后，selection_accesses=540672，deployment_accesses=458752，combined_accesses=999424，对当前 1024x4096 proxy 的 total_cost 约 0.238x，低于 r162 的约 0.242x，也远低于 1.5×h×n 硬约束。",
+    "在当前 `shared_routed_expert_topk` cost estimator 下，`FACTORIZED_HIDDEN_DIM` 与 `TRUNK_RANK` 不改变 selection/deployment 访问量；当前更高信息量的轻量化轴仍是 `NUM_EXPERTS`、`ACTIVE_EXPERTS`、`LATENTS_PER_EXPERT` 与 `K`。"
+  ],
+  "next_hypotheses": [
+    "如果 `NUM_EXPERTS=48` 在约 0.238x 下仍能达到接近或优于 `K=108` 那个 0.13799256086349487 的水平，则下一轮继续保持 family 与 `K=112` 不变，只把 `NUM_EXPERTS` 再压到 40，继续定位轻 router / 轻总 expert 容量的极限。",
+    "如果 `NUM_EXPERTS=48` 已明显弱于现有 `K=108/112` anchors，则说明当前 low-cost 主线更受总 expert 容量约束而非 router 开销约束，后续应停止继续压 `NUM_EXPERTS`，转向新的 matched-cost family 对照。",
+    "如果 `NUM_EXPERTS=48` 形成新的低成本非支配点，则后续应把它作为新的轻量 shared+routed baseline，再决定是否沿 `K` 或 `NUM_EXPERTS` 继续做小步精化。"
+  ],
+  "reference_round": 162
+}
