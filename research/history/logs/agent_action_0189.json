@@ -1,0 +1,29 @@
+{
+  "command": "run",
+  "hypothesis": "候选 family 设为 `shared_lowrank_routed_expert_topk`。最终重构公式为 `x_hat = Σ_r β_r(x) u_r + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}`，其中 `{u_r}` 是静态 shared low-rank coarse/trunk library，`{b_{e,j}}` 是静态 routed expert 子库，`E(x)` 只选很少量 active experts。在线侧可直接导出为 “shared low-rank trunk 查表/加权和 + 轻量 router 选少量 expert 子库 + expert 子库查表/加权和” 的 LUTurbo/Lottable 推理链路，最终仍是静态向量库上的有限加权和，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍属 `不兼容`，不能驱动当前 frontier。当前 round 189 的核心问题不是继续补 `lowrank_expert_topk` 的 width 插值，而是回到 architecture-level probe，测试“shared bottleneck + expert-specific head”这条仍被当前策略明确列为高优先级的结构槽位，是否能在 small-`K` recipe 下比 plain single-library 更稳住质量。相对 r181 仅把 `ARCHITECTURE` 从 `topk` 切到 `shared_lowrank_routed_expert_topk`，保持 `K=96, TRUNK_RANK=16, LATENTS_PER_EXPERT=160, ACTIVE_EXPERTS=2, NUM_EXPERTS=64, EF=1, adam, LR=8e-4` 与其余训练配方不变，可以最干净地回答：让 cheap shared low-rank branch 吃掉平滑主干、再把小 `K` 留给 expert-specific local heads，是否比 `topk@K96` 更接近当前 `<0.25x` anchors。本地成本自检显示该点 selection_accesses=527360 (`0.13x`)，deployment_accesses=393216 (`0.09x`)，combined_accesses=920576（combined_ratio 约 `0.22x`），明确落在当前 `<0.25x` 主战场内，且显著低于 1.5×h×n 硬约束。",
+  "summary": "以 r181 为 reference，只改 `ARCHITECTURE=shared_lowrank_routed_expert_topk`，做一轮新的 `<0.25x` matched-cost architecture probe。目标是直接验证当前高优先级方向“shared bottleneck + expert-specific head”在 `K=96` small-`K` recipe 下能否比 plain top-k 更有效地稳住低成本质量。",
+  "change_type": "param_only",
+  "expected_win": "explore_unknown",
+  "family_name": "shared_lowrank_routed_expert_topk",
+  "family_stage": "probe",
+  "self_review": "这轮严格遵守 param_only 单变量约束：相对 r181 只改 `ARCHITECTURE`。选择 r181 而不是沿 r187 继续改 `LATENTS_PER_EXPERT` 或 `K`，是因为最近几轮已经连续在同一 family 上补局部轴且没有形成新的 frontier 扩展，按当前策略应优先回到 architecture-level probe。选择 `shared_lowrank_routed_expert_topk` 而不是 `shared_routed_factorized_expert_topk`，是因为两者都能落在 low-cost 带内，但前者更直接对应当前高优先级方向“shared bottleneck + expert-specific head”，且历史负信号相对没那么强。选择它而不是 `group_topk/jumprelu`，是因为 recent 直接兼容单库 family 已再次给出较弱证据，而当前更需要回答的是小 `K` 下 shared/coarse + routed specialists 的结构分工是否有价值。主要风险是该 family 在更高 `K`、更重 trunk recipe 下已有负信号；但当前 small-`K`、`TRUNK_RANK=16` 的 matched recipe 仍是一个新的、与当前 round 189 主问题更对齐的 fresh validation。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "shared_lowrank_routed_expert_topk"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`shared_lowrank_routed_expert_topk` 的 LUTurbo 导出形式是静态 shared low-rank trunk library 与静态 routed expert 子库上的有限加权和，应继续按 `扩展兼容` 处理。",
+    "这轮是 small-`K` matched architecture probe：相对 r181 `topk@K96` 只改 `ARCHITECTURE`，直接隔离“shared bottleneck + expert-specific head”本身的价值，不混入额外的 `K/TRUNK_RANK/LATENTS_PER_EXPERT` 变化。",
+    "本地成本自检：`shared_lowrank_routed_expert_topk K=96 TRUNK_RANK=16 ACTIVE_EXPERTS=2 NUM_EXPERTS=64 LATENTS_PER_EXPERT=160` 的 selection_accesses=527360、deployment_accesses=393216、combined_accesses=920576，对当前 1024x4096 proxy 的 total_cost 约 `0.22x`。",
+    "r186-r188 已连续给出 `lowrank_factorized_residual`、`lowrank_expert_topk`、`jumprelu` 的负信号；当前不应继续让同一 family 的局部微调或 direct-compatible 单库 family 主导 low-cost 预算。"
+  ],
+  "next_hypotheses": [
+    "如果该点在约 `0.22x` 下明显优于 `topk@K96`，并接近当前 `shared_routed_expert_topk` 的 `0.22x-0.23x` anchors，则下一轮保持 family 不变，只改 `K`，确认它的 deployment knee 是否优于现有 baseline。",
+    "如果该点仍明显弱于同带 anchors，则可更明确下调当前 shared-bottleneck routed-head 方向在本 target 的 low-cost 优先级，转向新的 architecture 槽位。"
+  ],
+  "reference_round": 181
+}
