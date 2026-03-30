@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_r β_r(x) u_r + Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}。其中 U={u_r} 是静态 low-rank trunk 向量库，{B_e} 是静态 expert 子库，|E(x)|=ACTIVE_EXPERTS 很小；在线侧可直接导出为 LUTurbo/Lottable 的“trunk 查表/加权和 + 少量 routed expert 子库查表 + 有限加权和”推理链路，因此 `lowrank_expert_topk` 属于扩展兼容。`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，只能作为历史参考，不能驱动当前 frontier。r166-r169 已基本回答当前 `shared_routed_expert_topk` 主线的几条最自然轻量轴：`K=110/111` 只有递减收益，`LATENTS_PER_EXPERT=152` 会明显退化，`NUM_EXPERTS=48` 也明显退化，因此继续在同一 family 上做局部细扫的信息增量已经很低。本轮唯一主假设是：相对 r152 只把 `ARCHITECTURE` 从 `lowrank_expert_residual` 切到 `lowrank_expert_topk`，保持 `K=96`、`TRUNK_RANK=16`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=224`、`NUM_EXPERTS=64`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 不变，直接测试“轻 low-rank trunk + 双 expert routed 子库、但去掉 residual cleanup”能否在约 0.24x total_cost 下形成比当前 `<0.25x` shared+routed anchor 更强的新兼容 Pareto 点。",
+  "summary": "建议以 r152 为 reference，只改 `ARCHITECTURE=lowrank_expert_topk`。这是一轮严格 matched-cost 的新 family 对照：利用 r152 已验证的轻 trunk 配方，把成本压回 `<0.25x` 主战场，直接回答 `lowrank + expert` 是否能在相近成本下打败当前 low-cost anchor。",
+  "change_type": "param_only",
+  "experiment_tier": "full",
+  "expected_win": "explore_unknown",
+  "family_name": "lowrank_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "相对 r152 只改一个 env 参数 `ARCHITECTURE`，满足 param_only 单变量规则。选择 r152 而不是 r165/r164，是因为 r152 提供了当前已知最合适的轻 low-rank trunk 配方：`TRUNK_RANK=16, K=96, ACTIVE_EXPERTS=2, NUM_EXPERTS=64`，切到 `lowrank_expert_topk` 后能自然落回 `<0.25x` 带内；而从 r165 直接切 architecture 会继承更重的 trunk/K 组合，信息价值反而更低。选择 `lowrank_expert_topk` 而不是 `shared_routed_factorized_expert_topk` 或 `shared_lowrank_routed_expert_topk`，是因为后两者在当前 target 上已经给出较强低成本负信号；而 `lowrank_expert_topk` 最近一次 matched 对照 r143 虽在约 0.29x 才拿到 FVU=0.1273，但说明这条 family 至少有真实质量潜力。本轮主要风险是去掉 residual cleanup 后质量会回升到被现有 anchors 支配；但若它在约 0.24x 下仍能接近或优于 0.137 级别，就会直接给出当前主战场最有价值的新结构证据。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "lowrank_expert_topk"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r166-r169 已基本给出当前 `shared_routed_expert_topk` 主线的负面边际信号：`K=110/111` 仅有递减收益，`LATENTS_PER_EXPERT=152` 与 `NUM_EXPERTS=48` 都明显退化，说明继续在同 family 上细扫的增量已经较低。",
+    "`lowrank_expert_topk` 的导出形式在 `ACTIVE_EXPERTS=2` 下可写为静态 trunk 库 + 少量静态 expert 子库上的有限加权和，兼容性应判为扩展兼容，而非不兼容。",
+    "本地成本自检：用 r152 的其余配置切到 `lowrank_expert_topk` 后，selection_accesses=557056，deployment_accesses=458752，combined_accesses=1015808，对当前 1024x4096 proxy 的 combined_ratio 约 0.242x，仍在 `<0.25x` 主战场内，也远低于 1.5×h×n 硬约束。",
+    "历史上 `shared_routed_factorized_expert_topk` 与 `shared_lowrank_routed_expert_topk` 已在当前 target 给出较强低成本负信号，当前若要切新 family，更值得先补 `lowrank_expert_topk` 这种仍有质量潜力、且成本路径明确落在低成本带的方向。"
+  ],
+  "next_hypotheses": [
+    "如果该点在约 0.24x 下把 FVU 压到接近或优于当前 `shared_routed_expert_topk K=112` 的 0.1369，则下一轮保持 `lowrank_expert_topk` 不变，只改 `K` 或 `LATENTS_PER_EXPERT`，继续定位它的低成本 knee。",
+    "如果该点明显优于当前 0.23x-0.24x anchors，则说明在当前 target 上，轻 low-rank trunk + expert 子库比 shared+routed shared-branch 更值得继续主导低成本预算。",
+    "如果该点仍明显弱于当前 low-cost frontier，则可更明确地下调当前 target 上 `lowrank_expert_topk` 无 residual 路线的优先级，后续应转向别的轻量兼容 family，而不是继续在这条线上细扫。"
+  ],
+  "reference_round": 152
+}
