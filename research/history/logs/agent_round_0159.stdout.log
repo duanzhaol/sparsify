@@ -1,0 +1,792 @@
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍明确不兼容，不能驱动 frontier。当前 `<0.25x` 主战场里，r115→r116 已证明 `shared_routed_expert_topk` 在保持 `ACTIVE_EXPERTS=2` 的前提下沿 width 轴左移仍有结构信号，而 r114 又给出清晰负信号：把 `ACTIVE_EXPERTS` 压到 1 虽能到约 0.20x，但 FVU 会退化到 0.2038。唯一主假设是：相对 r116 仅把 `LATENTS_PER_EXPERT` 从 192 再压到 160，保持 `ARCHITECTURE=shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 与其余训练配方不变，可以把 total_cost 从约 0.22x 再左移到约 0.20x，而避免重蹈 `ACTIVE_EXPERTS=1` 的质量崩塌；若 FVU 仍明显优于 r114 并尽量接近 r116，则说明在当前 target 上，进一步压每-expert 宽度比压 active experts 更值得作为 `<0.25x` 主线继续推进。","summary":"以 r116 为 reference，保持当前最强 low-cost baseline `shared_routed_expert_topk` 的 `K=64, ACTIVE_EXPERTS=2, NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=160`。这是一轮严格落在 `<0.25x` 主战场的 matched-cost 轻量化 probe，直接回答在约 0.20x total_cost 下，shared+routed 结构是否能通过更窄 expert 子库打败现有同成本 anchors，而不必退回到 `ACTIVE_EXPERTS=1`。","change_type":"param_only","expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"stabilize","self_review":"相对 r116 只改一个 env 参数 `LATENTS_PER_EXPERT`，满足单变量原则。当前策略已经明确把主战场收缩到 `<0.25x`，因此不应再让 0.5x 左右结构主导预算；沿 `shared_routed_expert_topk` 这条现有最强 low-cost baseline 做 matched light variant，比再开一个天然落到中成本区的新 family 更符合本轮目标。之所以选 `LATENTS_PER_EXPERT=160` 而不是继续降 `ACTIVE_EXPERTS` 或直接降 `K`，是因为 r114 已证明 active-path 再压会明显伤害质量，而本地成本自检显示 160 宽度能把 combined ratio 压到约 0.20x，正好回答当前最有信息量的问题：shared+routed 的 `<0.25x` 质量主要依赖双 routed experts，还是仍可继续靠更小 expert 子库左移。","needs_sanity":false,"env_overrides":[{"key":"LATENTS_PER_EXPERT","value":"160"}],"touched_files":[],"notes_to_memory":["r114 已给出负锚点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=256` 在约 0.20x total_cost 下退化到 FVU 0.2038，说明当前 low-cost 质量不适合继续压 `ACTIVE_EXPERTS`。","r116 已给出当前最直接的宽度锚点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 在约 0.22x total_cost 下达到 FVU 0.1464，因此相对它继续把 `LATENTS_PER_EXPERT` 压到 160 是当前 `<0.25x` 带内最干净的单变量后续问题。","本地成本自检显示：`shared_routed_expert_topk K=64 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 的 selection ratio 约 0.13x、deployment ratio 约 0.06x、combined ratio 约 0.20x，低于当前 0.24x anchor，也远低于 1.5×h×n 硬约束。","本轮不需要代码修改；`LATENTS_PER_EXPERT`、`ACTIVE_EXPERTS` 与 `shared_routed_expert_topk` 的 wiring 已在历史轮次中稳定生效。"],"next_hypotheses":["如果 `LATENTS_PER_EXPERT=160` 仍把 FVU 控制在明显优于 r114 的区间并接近 r116，则下一轮应以本轮为 reference，只改 `K=48`，测试 shared+routed 主线能否在保持结构优势的同时进一步把 deployment 压到约 0.19x。","如果 `LATENTS_PER_EXPERT=160` 只温和退化且形成新的更左非支配点，则可以判定当前 `<0.25x` 主线更该继续沿 expert width 轴而不是 active-expert 轴推进。","如果 `LATENTS_PER_EXPERT=160` 明显劣化到接近 r114，则说明当前 `K=64, ACTIVE_EXPERTS=2` 已接近 width floor；下一轮应停止继续压 width，转去做 low-cost matched architecture probe，例如直接对照 `shared_routed_factorized_expert_topk` 是否能在同成本带提供更优质量。"],"reference_round":116}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d3df5-1743-76f0-9195-1b12edbbaa35
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 159。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。Frontier 基于 (total_cost, FVU) 2D Pareto front，total_cost = encoder + deployment；最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。
+4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+
+策略引导：
+Round 159 策略模式：低开销探索
+原因：当前 <0.25x 区域最佳 FVU=0.1397，明显落后于当前最佳可行点 FVU=0.0424，需要定向补低开销前沿。
+当前低成本参考 family：shared_routed_expert_topk
+当前低成本参考配方：ARCHITECTURE=shared_routed_expert_topk K=64 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+当前低成本完整配置（source=low_cost_frontier_best）：
+  ARCHITECTURE=shared_routed_expert_topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+本轮要求：
+1. 当前阶段重点是 `<0.25x total_cost` 主战场；`0.25x-0.35x` 只作辅助对照，`>0.4x` 不应继续主导预算。
+2. 当前低成本 baseline 主要是 `shared_routed_expert_topk` 一线；本轮应优先回答“谁能在相近或更低成本下打败它”。
+3. 允许新开 family，但只有在其成本路径明确落在 `<0.25x` 或至少不明显超过 `0.35x` 时才值得优先尝试。
+4. MoE-like 方向只有在 router 足够轻、expert 更小、总激活路径仍短、且最终仍能导出为静态子库有限加权和时才值得尝试。
+5. 不要让 `0.5x` 左右的成功点重新把注意力拉回中成本区；它们只保留作少量质量锚点。
+
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 11 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=158, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=4
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：`<0.25x` 低成本区优先。
+  当前要回答的是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”，而不是“哪个 0.5x 左右结构最好”。
+  `0.25x-0.35x` 只作辅助对照带；`>0.4x` 只保留少量质量锚点，不应继续主导预算。
+
+当前 low-cost 参考线：
+  1. `shared_routed_expert_topk` 是当前 `<0.25x` 区域最强兼容 baseline；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。
+  2. `expert_topk` 只作为更极左侧成本 anchor；若质量明显落后，不应继续主导预算。
+
+当前高优先级方向：
+  1. `shared_routed_expert_topk` 的 matched-cost 轻量变体。
+     优先尝试更小 K、更小 `LATENTS_PER_EXPERT`、更轻 scorer / router，前提是总成本仍落在 `<0.25x` 或尽量接近它。
+  2. 更轻的 shared+routed / hetero-MoE 变体。
+     只有在 shared 分支不会把成本自然抬到 `>0.35x` 时才值得继续。
+  3. 极小 K 与更轻 expert 子库。
+     目标是在不显著牺牲 FVU 的前提下继续压 deployment 与 active-path 成本。
+  4. very-light residual / factorized 变体。
+     仅当它们能保持在 low-cost 带内时才值得尝试；不要默认引入会自然抬高到中成本区的 trunk / residual 负担。
+
+当前应下调优先级的方向：
+  1. 天然落在 `0.45x-0.55x` 左右的 `lowrank_expert_residual` 式结构，除非只作少量质量对照。
+  2. 已经多轮失败的 shared-lowrank two-stage / hetero residual 变体。
+  3. 任何只是把成本抬到 `>0.4x` 却不能直接回答 `<0.25x` 问题的结构探针。
+
+训练代理 frontier（2D Pareto: total_cost vs FVU）：
+  total=0.13x (sel=0.06x + deploy=0.06x)  fvu=0.36355817317962646  arch=expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.19x (sel=0.06x + deploy=0.12x)  fvu=0.3148818016052246  arch=expert_topk  K=128 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.2x (sel=0.14x + deploy=0.06x)  fvu=0.20378820598125458  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.22x (sel=0.16x + deploy=0.06x)  fvu=0.14638903737068176  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.24x (sel=0.18x + deploy=0.06x)  fvu=0.13971704244613647  arch=shared_routed_expert_topk  K=64 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.25x (sel=0.16x + deploy=0.09x)  fvu=0.13472524285316467  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.28x (sel=0.2x + deploy=0.08x)  fvu=0.12815344333648682  arch=shared_routed_expert_topk  K=80 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  total=0.3x (sel=0.2x + deploy=0.09x)  fvu=0.12280605733394623  arch=shared_routed_expert_topk  K=96 EF=1  lr=8e-4 opt=adam [FEASIBLE]
+  参考：`0.25x-0.35x` 辅助带当前有 5 个 frontier 点。
+
+成本状态：
+  当前最佳 <0.25x 点 → shared_routed_expert_topk (K=64, EF=1) [FEASIBLE]:
+    总成本: 0.24x | 预算比率: 0.16x | encoder: 0.18x | 部署: 0.06x | FVU: 0.13971704244613647
+  当前最佳 0.25x-0.5x 点 → lowrank_expert_residual (K=96, EF=1) [FEASIBLE]:
+    总成本: 0.49x | 预算比率: 0.33x | encoder: 0.38x | 部署: 0.11x | FVU: 0.09837484359741211
+  最优可行点 → lowrank_expert_residual (K=192, EF=1) [FEASIBLE]:
+    总成本: 1.06x | 预算比率: 0.71x | encoder: 0.5x | 部署: 0.56x | FVU: 0.04238538444042206
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。
+
+最近几轮（兼容架构，1）：
+  r158 lowrank_expert_residual param_only -> discard fvu=0.13982398808002472 523s | 最终重构公式仍为 x_hat = Σ_r β_r(x) u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i}(x) b_{e,i} + Σ_j ...
+
+最近可用 reference_round 的完整配置：
+  r152 lowrank_expert_residual (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r143 lowrank_expert_topk (decision=archive, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+  r154 lowrank_factorized_residual (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_factorized_residual
+  EXPANSION_FACTOR=1
+  K=96
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r148 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=112
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=224
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=40
+
+操作提示：
+  1. 当前主战场是 `total_cost < 0.25x`。`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点，不应继续主导预算。
+  2. 当前 `<0.25x` 最强低成本线是 `shared_routed_expert_topk`；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。后续实验应优先回答谁能在相近或更低成本下打败它。
+  3. 在 `<0.25x` 区域，优先尝试更轻 shared+routed / 极小 K / 更小 `LATENTS_PER_EXPERT` / 更轻 scorer 或 router。只有在仍能保持 low-cost 带时，very-light residual 或 factorized 变体才值得尝试；若新 family 连续 1-2 轮明显劣于同成本 anchors，就切走，不要长时间停留。
+
+当前背景文档（弱先验，不是结论）：
+# Prior Research History: Target-Restart Brief
+
+## 1. 文档用途
+
+这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+
+应当这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的候选方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+
+## 1.1 当前 target 的弱先验更新
+
+下面这些只算当前 target 的弱先验，不是结论：
+
+- 当前主战场应放在 `<0.25x total_cost` 区域；`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点
+- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline，而不是被直接视为“旧 family”
+- `expert_topk` 仍有极低成本 anchor 价值，但在 `<0.25x` 的质量明显弱于当前 shared+routed 主线
+- `lowrank_expert_residual` 在 `0.49x-0.54x` 一带给出了当前更强的质量锚点，但这不意味着后续应让中成本结构继续主导搜索预算
+
+一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，而是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”。
+
+## 2. LUTurbo/Lottable 兼容性约束
+
+硬约束：
+
+1. 最终重构必须能写成一个或多个静态向量库上的有限加权和。
+2. 在线侧允许选择、路由、低秩系数、分阶段 residual，但静态库本身不能依赖当前样本动态生成。
+3. 如果一个方案依赖 batch 级联动、跨样本共享预算、或输入依赖的动态生成字典，则不能进入主线。
+
+当前 run 的成本定义：
+
+- `selection_cost`: encoder 端为选出在线原子所需的访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `total_cost = selection_cost + deployment_cost`
+- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
+
+兼容性注册表：
+
+| family | final form | search note | structural note | compatibility |
+|---|---|---|---|---|
+| `topk` | `x_hat = Σ_i α_i b_i` | candidate | 单库稀疏和，最直接的可导出形式 | 直接兼容 |
+| `factorized_topk` | `x_hat = Σ_i α_i b_i` | candidate | factorized scorer 只改变在线打分链路 | 直接兼容 |
+| `jumprelu` | `x_hat = Σ_i α_i b_i` | candidate | threshold 只改变支持形成方式 | 直接兼容 |
+| `group_topk` | `x_hat = Σ_i α_i b_i` | candidate | 组内竞争不改变 decoder 形式 | 直接兼容 |
+| `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
+| `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
+| `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+| `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+| `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+| `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+| `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+| `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+| `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+| `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+| `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+| `lowrank_gated_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | residual selector head 改为 gated | 扩展
+[truncated]
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+本轮策略已经切到 `<0.25x` 主战场，我不继续推进刚才那个 0.52x 新原型；我先把本轮候选锚到现有 `shared_routed_expert_topk` 低成本线，确认哪个单变量 probe 最符合当前 cost band。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+hits=[]
+for p in Path('research/history/round_summaries').glob('round_*.json'):
+    try:
+        d=json.loads(p.read_text())
+    except Exception:
+        continue
+    cfg=d.get('resolved_candidate_env_config',{}) or {}
+    if cfg.get('ARCHITECTURE')=='shared_routed_expert_topk':
+        rid=int(p.stem.split('_')[-1])
+        hits.append((rid,d.get('result',{}).get('decision'),d.get('result',{}).get('val_fvu'),cfg))
+for rid,dec,fvu,cfg in sorted(hits):
+    print('ROUND',rid,'decision',dec,'fvu',fvu)
+    keys=['ARCHITECTURE','K','EXPANSION_FACTOR','OPTIMIZER','LR','NUM_EXPERTS','ACTIVE_EXPERTS','LATENTS_PER_EXPERT','STAGE1_RATIO','FACTORIZED_HIDDEN_DIM']
+    print({k:cfg.get(k) for k in keys})
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+ROUND 101 decision crash fvu None
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': '1', 'LATENTS_PER_EXPERT': None, 'STAGE1_RATIO': None, 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 102 decision crash fvu None
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': '1', 'LATENTS_PER_EXPERT': None, 'STAGE1_RATIO': None, 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 103 decision archive fvu 0.11881859600543976
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 104 decision keep fvu 0.11065306514501572
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 105 decision discard fvu 0.13637857139110565
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': '512', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 106 decision discard fvu 0.09808561205863953
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '512', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 107 decision keep fvu 0.10104858130216599
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '384', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 108 decision keep fvu 0.10720480978488922
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '128', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 109 decision keep fvu 0.11468100547790527
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '96', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 110 decision keep fvu 0.1190691888332367
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '96', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '288', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 111 decision keep fvu 0.12280605733394623
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '96', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '256', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 112 decision keep fvu 0.12815344333648682
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '80', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '256', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 113 decision keep fvu 0.13499650359153748
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '256', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 114 decision keep fvu 0.20378820598125458
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '1', 'LATENTS_PER_EXPERT': '256', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 115 decision keep fvu 0.13971704244613647
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 116 decision keep fvu 0.14638903737068176
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '192', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 117 decision discard fvu 0.14396542310714722
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '3', 'LATENTS_PER_EXPERT': '192', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 118 decision archive fvu 0.13995033502578735
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '80', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '192', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 121 decision keep fvu 0.13472524285316467
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '96', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '192', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 122 decision archive fvu 0.1280120611190796
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '96', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 123 decision archive fvu 0.12312756478786469
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '112', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+ROUND 126 decision discard fvu 0.15051814913749695
+{'ARCHITECTURE': 'shared_routed_expert_topk', 'K': '64', 'EXPANSION_FACTOR': '1', 'OPTIMIZER': 'adam', 'LR': '8e-4', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '3', 'LATENTS_PER_EXPERT': '160', 'STAGE1_RATIO': '0.25', 'FACTORIZED_HIDDEN_DIM': '256'}
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+p=Path('research/history/frontier.json')
+if p.exists():
+    d=json.loads(p.read_text())
+    for k,v in d.items():
+        if isinstance(v,dict):
+            cfg=v.get('config',{}) or {}
+            arch=str(v.get('architecture') or cfg.get('architecture') or cfg.get('ARCHITECTURE') or '').lower()
+            if arch=='shared_routed_expert_topk':
+                print(k, json.dumps({
+                    'round': v.get('round'),
+                    'fvu': v.get('fvu') or v.get('val_fvu'),
+                    'selection_ratio': v.get('selection_ratio'),
+                    'deployment_ratio': v.get('deployment_ratio'),
+                    'total_cost_ratio': (v.get('total_cost')/4194304) if v.get('total_cost') else None,
+                    'config': {kk: cfg.get(kk) for kk in ['ARCHITECTURE','K','EXPANSION_FACTOR','LR','OPTIMIZER','NUM_EXPERTS','ACTIVE_EXPERTS','LATENTS_PER_EXPERT','STAGE1_RATIO','FACTORIZED_HIDDEN_DIM']}
+                }, ensure_ascii=False))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+r107 {"round": null, "fvu": 0.10104858130216599, "selection_ratio": null, "deployment_ratio": 0.12, "total_cost_ratio": 0.421875, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r108 {"round": null, "fvu": 0.10720480978488922, "selection_ratio": null, "deployment_ratio": 0.12, "total_cost_ratio": 0.375, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r109 {"round": null, "fvu": 0.11468100547790527, "selection_ratio": null, "deployment_ratio": 0.09, "total_cost_ratio": 0.34375, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r110 {"round": null, "fvu": 0.1190691888332367, "selection_ratio": null, "deployment_ratio": 0.09, "total_cost_ratio": 0.3203125, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r111 {"round": null, "fvu": 0.12280605733394623, "selection_ratio": null, "deployment_ratio": 0.09, "total_cost_ratio": 0.296875, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r112 {"round": null, "fvu": 0.12815344333648682, "selection_ratio": null, "deployment_ratio": 0.08, "total_cost_ratio": 0.28125, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r114 {"round": null, "fvu": 0.20378820598125458, "selection_ratio": null, "deployment_ratio": 0.06, "total_cost_ratio": 0.203125, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r115 {"round": null, "fvu": 0.13971704244613647, "selection_ratio": null, "deployment_ratio": 0.06, "total_cost_ratio": 0.2421875, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r116 {"round": null, "fvu": 0.14638903737068176, "selection_ratio": null, "deployment_ratio": 0.06, "total_cost_ratio": 0.21875, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+r121 {"round": null, "fvu": 0.13472524285316467, "selection_ratio": null, "deployment_ratio": 0.09, "total_cost_ratio": 0.25, "config": {"ARCHITECTURE": null, "K": null, "EXPANSION_FACTOR": null, "LR": null, "OPTIMIZER": null, "NUM_EXPERTS": null, "ACTIVE_EXPERTS": null, "LATENTS_PER_EXPERT": null, "STAGE1_RATIO": null, "FACTORIZED_HIDDEN_DIM": null}}
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys, json
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+cands=[
+    ('shared_routed_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224}),
+    ('shared_routed_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':192}),
+    ('shared_routed_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':160}),
+    ('shared_routed_expert_topk',{'k':48,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224}),
+    ('shared_routed_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':1,'latents_per_expert':224}),
+]
+for arch,p in cands:
+    cost=compute_selection_cost(arch,k=p['k'],ef=p['ef'],d_in=1024,n_output=4096,extra_config={k:v for k,v in p.items() if k not in {'k','ef'}})
+    print(arch,p,json.dumps({'ratio':cost.get('ratio'),'deployment_ratio':cost.get('deployment_ratio'),'combined_ratio':cost.get('combined_ratio'),'err':cost.get('error')},ensure_ascii=False))
+PY" in /root/sparsify-ascend
+codex
+历史里已经能看出 `<0.25x` 最强点是 `r115: K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=224`；我正在做几个紧邻的成本自检，优先看还能不能靠更小 `LATENTS_PER_EXPERT` 或更小 `K` 在同带内拿到更好的 matched probe。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+for rid in [115,116,113,114,121,122]:
+    p=Path(f'research/history/round_summaries/round_{rid:04d}.json')
+    if not p.exists():
+        continue
+    d=json.loads(p.read_text())
+    print('ROUND', rid)
+    print(json.dumps(d.get('action',{}), ensure_ascii=False, indent=2)[:3500])
+    print('---')
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+ROUND 115
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 继续明确排除。r113 已在 `K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=256, NUM_EXPERTS=64` 下形成约 0.27x / FVU 0.1350 的低成本前沿点，而 r114 证明把 `ACTIVE_EXPERTS` 降到 1 会明显伤害质量，说明当前 shared+routed 的收益确实依赖双 routed experts。唯一主假设：在保持 `ACTIVE_EXPERTS=2` 与 `K=64` 不变的前提下，把 `LATENTS_PER_EXPERT` 从 256 缩到 224，可以把 selection cost 从约 0.20x 压到约 0.18x、total_cost 从约 0.27x 左移到约 0.24x，同时仍显著优于旧低成本 anchor `expert_topk K=128` 的 FVU 0.3149，从而回答当前低成本前沿的下一步更该压每-expert 宽度，而不是继续压 active experts。",
+  "summary": "以 r113 为 reference，保持 `shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=224`，测试在已知双 routed experts 必要的前提下，shared+routed 低成本前沿是否还能通过缩窄每-expert 宽度继续左移到约 0.24x。",
+  "change_type": "param_only",
+  "expected_win": "lower_cost",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "相对 r113 只改一个 env 参数 `LATENTS_PER_EXPERT`，满足单变量原则。之所以不以 r114 为 reference 去改回 `ACTIVE_EXPERTS=2`，是因为那会把本轮语义变成‘撤销上轮失败’，信息量较低；更合理的是把 r114 作为证据，确认 active-path 不该再压，然后回到 r113 这个有效前沿点上沿 width 轴继续探索。该点仍远低于 1.5×h×n 硬约束。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "LATENTS_PER_EXPERT",
+      "value": "224"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r114 已明确给出负信号：`ACTIVE_EXPERTS=1` 在约 0.20x total_cost 下退化到 FVU 0.2038，说明当前 shared+routed 前沿的质量确实依赖双 routed experts。",
+    "本地 cost 自检显示：`shared_routed_expert_topk K=64 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=224` 的 selection ratio 约 0.18x、deployment ratio 约 0.06x、combined ratio 约 0.24x；相对 r113 的约 0.27x 有明确左移空间。",
+    "本轮不需要代码修改；`LATENTS_PER_EXPERT`、`ACTIVE_EXPERTS` 与 `shared_routed_expert_topk` 的 wiring 已在历史轮次中稳定生效。"
+  ],
+  "next_hypotheses": [
+    "如果 `LATENTS_PER_EXPERT=224` 仍把 FVU 控制在约 0.16 或更低，则下一轮可继续以本轮为 reference，只改 `LATENTS_PER_EXPERT=192`，完成 `K=64, ACTIVE_EXPERTS=2` 这条 shared+routed 子线的 width knee 定位。",
+    "如果 `LATENTS_PER_EXPERT=224` 相比 r113 只温和退化但成本明显更低，则 shared+routed 低成本前沿仍可继续沿 width 轴左移，后续不必回到 `ACTIVE_EXPERTS=1`。",
+    "如果 `LATENTS_PER_EXPERT=224` 明显劣化接近 r114，则说明当前 `K=64, ACTIVE_EXPERTS=2` 已接近 width floor；下一轮应换轴或切回 matched `lowrank_expert_residual` 对照，而不是继续压 width。"
+  ],
+  "reference_round": 113
+}
+---
+ROUND 116
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 继续明确排除。r115 已在 `K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=224, NUM_EXPERTS=64` 下形成新的更靠左非支配点，约 0.24x / FVU 0.1397。唯一主假设：继续把 `LATENTS_PER_EXPERT` 从 224 压到 192，在保持 `K=64, ACTIVE_EXPERTS=2, NUM_EXPERTS=64` 不变时，可把 selection cost 从约 0.18x 进一步压到约 0.16x、total_cost 从约 0.24x 左移到约 0.22x；若 FVU 仍维持在约 0.15 附近或更低，则 shared+routed 这条低成本结构线仍可继续向左扩展，并完成当前 `K=64` 子线的 width knee 定位。",
+  "summary": "以 r115 为 reference，保持 `shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=192`，继续完成当前 shared+routed 低成本子线的 width knee 定位，并测试这条直接兼容结构能否进一步左移到约 0.22x。",
+  "change_type": "param_only",
+  "expected_win": "lower_cost",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "相对 r115 只改一个 env 参数 `LATENTS_PER_EXPERT`，满足单变量原则。r115 已经形成新非支配点，因此继续沿同一 width 轴完成 knee 定位是合规且高信息量的；这不是无效重复。选择 192 而不是回到 `ACTIVE_EXPERTS` 或继续降 `K`，是因为 r114 已经证明 active-path 不该再压，而 `K=64` 已固定出当前 lookup 预算背景，最值得回答的是 width floor 在哪里。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "LATENTS_PER_EXPERT",
+      "value": "192"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r115 已形成新的更靠左非支配点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=224` 在约 0.24x total_cost 下达到 FVU 0.1397。",
+    "本地 cost 自检显示：`shared_routed_expert_topk K=64 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection ratio 约 0.16x、deployment ratio 约 0.06x、combined ratio 约 0.22x，仍明显低于 1.5×h×n 硬约束。",
+    "r114 的负信号仍成立：`ACTIVE_EXPERTS=1` 会显著伤害质量，因此当前 shared+routed 低成本主线应继续保持 `ACTIVE_EXPERTS=2`。"
+  ],
+  "next_hypotheses": [
+    "如果 `LATENTS_PER_EXPERT=192` 仍把 FVU 控制在约 0.15 或更低，则下一轮应换轴而不是继续线性压宽度，例如保持本轮为 reference 只改 `K` 或做 matched `lowrank_expert_residual` 对照。",
+    "如果 `LATENTS_PER_EXPERT=192` 相比 r115 只小幅退化但成本进一步明显下降，则可判定 shared+routed 在当前 target 上存在稳定的 <0.25x 结构性 Pareto 段。",
+    "如果 `LATENTS_PER_EXPERT=192` 明显劣化到接近 r114 的水平，则说明当前 `K=64, ACTIVE_EXPERTS=2` 已接近 width floor，后续不应继续压 `LATENTS_PER_EXPERT`。"
+  ],
+  "reference_round": 115
+}
+---
+ROUND 113
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled 结构仍明确排除。当前实际历史已在 r107-r112 上形成 `shared_routed_expert_topk` 的兼容低成本前沿，其中 r111 为 0.30x / FVU 0.1228，r112 为 0.28x / FVU 0.1282。唯一主假设：在 `LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2, NUM_EXPERTS=64` 已稳定成立的前提下，继续把 deployment 预算从 `K=80` 压到 `K=64`，有机会把 total_cost 从约 0.28x 进一步左移到约 0.27x（selection≈0.20x, deployment≈0.06x），同时仍把 FVU 控制在约 0.13 左右，从而把 shared+routed 这条新结构段继续推进到更靠左的可部署 Pareto 点。",
+  "summary": "以 r112 为 reference，继续沿已验证的 `shared_routed_expert_topk` 低成本前沿做一次单变量 deployment-side left shift：只改 `K=64`，测试这条直接兼容的 shared+routed 结构能否把 Pareto 段从约 0.28x 再推进到约 0.27x，同时维持约 0.13 量级的 FVU。",
+  "change_type": "param_only",
+  "expected_win": "lower_cost",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "相对 r112 只改一个 env 参数 `K`，满足单变量原则。继续沿 shared+routed 主线而不是回到提示里较旧的 `lowrank_expert_topk` 摘要，是因为当前工作区的 `frontier.json` 与 round summaries 已明确显示 r107-r112 形成了更新、更强的兼容低成本 Pareto 段；基于真实最新历史，`K=64` 是对 deployment knee 的最直接下一问。如果本轮不能形成新非支配点，下一轮就应换轴或换 family。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "K",
+      "value": "64"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "截至 round 112，当前工作区真实 frontier 已包含兼容的 `shared_routed_expert_topk` 段：r107 0.42x/0.1010，r108 0.38x/0.1072，r109 0.34x/0.1147，r110 0.32x/0.1191，r111 0.30x/0.1228，r112 0.28x/0.1282。",
+    "r111→r112 已证明在 `LATENTS_PER_EXPERT=256, ACTIVE_EXPERTS=2` 下继续压 deployment 预算仍能形成新的更靠左非支配点，因此再做一档 `K=64` 有明确的信息增量。",
+    "本轮不需要代码修改；现有 `shared_routed_expert_topk`、`ACTIVE_EXPERTS`、`LATENTS_PER_EXPERT` 接线已在历史轮次中完成并稳定生效。"
+  ],
+  "next_hypotheses": [
+    "如果 `K=64` 仍把 FVU 控制在约 0.135 或更低，则下一轮应继续以本轮为 reference，只改 `LATENTS_PER_EXPERT` 或 `ACTIVE_EXPERTS` 之一，定位这条 shared+routed 低成本线的下一处 knee，而不是回到旧 family。",
+    "如果 `K=64` 相比 r112 明显劣化并失去非支配性，则说明当前 shared+routed 线已接近 deployment knee；下一轮不应继续降 K，而应改做 matched `ACTIVE_EXPERTS=1/3` 或切回 `lowrank_expert_residual` 做对照。",
+    "如果 `K=64` 结果与 r112 接近但只带来很小成本收益，则可判定 64-80 已是当前 target 的 lookup-budget 平坦区，后续应换轴而不是继续沿 K 线性外推。"
+  ],
+  "reference_round": 112
+}
+---
+ROUND 114
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 继续明确排除。r107-r113 已经证明 `shared_routed_expert_topk` 在 `ACTIVE_EXPERTS=2` 下形成了真实低成本 Pareto 段，并在 r113 达到约 0.27x / FVU 0.1350。唯一主假设：在 `K=64, LATENTS_PER_EXPERT=256, NUM_EXPERTS=64` 固定时，把 `ACTIVE_EXPERTS` 从 2 降到 1，会把 selection cost 从约 0.20x 降到约 0.14x、total_cost 从约 0.27x 左移到约 0.20x，同时若 FVU 仍明显优于当前直接兼容 cost anchor `expert_topk K=128` 的 0.3149，则可以回答“shared+routed 的低成本收益是否真的需要双 routed experts”，并在更低成本带建立新的结构性 anchor。",
+  "summary": "以 r113 为 reference，保持 `shared_routed_expert_topk`、`K=64`、`LATENTS_PER_EXPERT=256`、`NUM_EXPERTS=64` 不变，只改 `ACTIVE_EXPERTS=1`，测试 shared+routed 在约 0.20x total_cost 下是否仍能显著优于旧 `expert_topk` 低成本锚点，并回答当前低成本收益是否真的依赖双 routed experts。",
+  "change_type": "param_only",
+  "expected_win": "lower_cost",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "相对 r113 只改一个 env 参数 `ACTIVE_EXPERTS`，满足单变量原则。之所以不继续沿 `K` 轴外推，是因为 r112→r113 已经连续两轮回答 deployment knee，并且都形成了新非支配点；当前更高信息量的是切换到 active-path 轴，直接比较当前 low-cost shared+routed 前沿对双 routed experts 的依赖程度。该点仍远低于 1.5×h×n 硬约束。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ACTIVE_EXPERTS",
+      "value": "1"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "本地 selection cost 自检显示：`shared_routed_expert_topk K=64 NUM_EXPERTS=64 LATENTS_PER_EXPERT=256 ACTIVE_EXPERTS=1` 的 selection ratio 约 0.14x、deployment ratio 约 0.06x、combined ratio 约 0.20x；对应 r113 baseline (`ACTIVE_EXPERTS=2`) 为约 0.27x。",
+    "r107-r113 已经把 `ACTIVE_EXPERTS=2` 的 shared+routed 低成本线推到 0.42x→0.27x；当前最有信息量的问题不再是继续线性降 K，而是这条线在更低 encoder 成本下是否仍成立。",
+    "本轮不需要代码修改；`ACTIVE_EXPERTS`、`LATENTS_PER_EXPERT` 与 `shared_routed_expert_topk` 的 wiring 已在历史轮次中稳定生效。"
+  ],
+  "next_hypotheses": [
+    "如果 `ACTIVE_EXPERTS=1` 在约 0.20x total_cost 下仍把 FVU 压到约 0.20 或更低，则下一轮应以本轮为 reference，只改 `LATENTS_PER_EXPERT` 或 `K`，继续细化这条更便宜的 shared+routed 子线。",
+    "如果 `ACTIVE_EXPERTS=1` 明显退化而劣于 r113 太多，则说明当前 shared+routed 前沿的质量确实依赖双 routed experts；下一轮不应继续压 active path，而应回到 `ACTIVE_EXPERTS=2` 主线换轴。",
+    "如果 `ACTIVE_EXPERTS=1` 与 r113 接近但成本显著更低，则可判定当前 target 上 shared+routed 的主要收益来自 shared+routed 分解本身，而不完全来自多 routed experts。"
+  ],
+  "reference_round": 113
+}
+---
+ROUND 121
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 库与各 routed expert 子库都是真正静态向量库，在线导出仍是 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”流水线，因此该 family 属于直接兼容。基于当前真实 frontier，`shared_routed_expert_topk` 已经形成最强的 <0.5x 兼容低成本段，而 r119-r120 说明 `two_stage_residual_expert` 在当前 `K=96` recipe 上连续两轮没有形成新非支配点；下一轮应按规则切 family/切假设，而不是继续重复 staged residual。相对 r118 仅把 `K` 从 80 提到 96，保持 `ARCHITECTURE=shared_routed_expert_topk`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`EF=1`、`adam`、`8e-4` 不变，直接回答当前最有信息量的问题：这条更窄 per-expert width 的 shared+routed 子线到底是 width-limited，还是仍然主要受 deployment lookup budget 限制。按当前 1024x4096 cost proxy，selection 维持约 0.156x，deployment 从 0.078x 升到 0.094x，total 约 0.25x，远低于 1.5×h×n 硬约束。若 FVU 能明显优于 r118 的 0.13995，并逼近或优于 r113 的 0.13499，则可在 0.25x 左右补出一段新的低成本 Pareto 锚点。",
+  "summary": "切回当前真实最强的低成本兼容主线 `shared_routed_expert_topk`。以 r118 为 reference，只把 `K` 从 80 提到 96，测试 `ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192` 这条窄宽度 shared+routed 分支是否主要受 lookup budget 限制，并争取在约 0.25x total_cost 处补出新的低成本 Pareto 锚点。",
+  "change_type": "param_only",
+  "expected_win": "lower_fvu",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "stabilize",
+  "self_review": "满足单轮单变量约束：相对 r118 只改 `K`。这不是回到旧 family 的盲目 K 轴细扫，因为当前真正持有低成本兼容前沿的是 `shared_routed_expert_topk`，而且本轮专门回答的是 `LATENTS_PER_EXPERT=192` 这条更窄 expert 子线是否 deployment-limited。选择 r118 而不是 r119/r120 作 reference，是为了避免把两轮已接近的 staged residual 负结果继续延长；选择 `K=96` 而不是更高，是为了把实验留在约 0.25x 的低成本带内，优先补最欠覆盖的区域。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "K",
+      "value": "96"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "当前工作区真实 frontier 已被 `shared_routed_expert_topk` 重写：r107-r116 形成了从约 0.42x 到 0.22x 的连续兼容低成本 Pareto 段，优先级高于用户提示里较旧的 `<0.5x` 摘要。",
+    "`LATENTS_PER_EXPERT`、`NUM_EXPERTS`、`ACTIVE_EXPERTS` 的 wiring 已在 r105 之后被 round config 与 checkpoint config 反复验证，本轮不需要任何代码改动或参数接线自检。",
+    "r116 (`K=64, LATENTS_PER_EXPERT=192`) 到 r118 (`K=80, LATENTS_PER_EXPERT=192`) 已显示增加少量 lookup budget 能改善 FVU，因此 `K=96` 是当前最干净的单变量后续问题。",
+    "r119-r120 对 `two_stage_residual_expert` 的连续负结果说明 staged residual 在当前 `K=96` recipe 上暂未形成新段；按运行规则，下一轮不应继续重复这一 family。"
+  ],
+  "next_hypotheses": [
+    "如果 `K=96` 把 `LATENTS_PER_EXPERT=192` 子线明显压到约 0.135 FVU 或更好，下一轮继续以该点为 reference，只改 `K=112`，完成这条窄宽度 shared+routed 分支的 deployment knee 定位。",
+    "如果 `K=96` 改善很小，则说明当前 `LATENTS_PER_EXPERT=192` 更像 width-limited 而非 lookup-limited；下一轮应回到同 family，只改 `LATENTS_PER_EXPERT=208` 或 `224`，而不是继续堆 `K`。",
+    "如果 `K=96` 仍不能使这条分支接近现有 shared+routed 前沿，则可下调 `LATENTS_PER_EXPERT=192` 子线优先级，后续把中成本结构预算转回 `lowrank_expert_residual` 的 matched 对照，而不是继续重复 `two_stage_residual_expert`。"
+  ],
+  "reference_round": 118
+}
+---
+ROUND 122
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 库与 routed expert 子库都是真正静态向量库，在线侧可直接导出到 LUTurbo/Lottable 的“shared 查表 + routed 子库查表 + 有限加权求和”推理链路，因此 `shared_routed_expert_topk` 属于直接兼容。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍是不兼容，只能作历史参考，不能驱动当前 frontier。本轮唯一主假设是：r121 已证明在 `LATENTS_PER_EXPERT=192, ACTIVE_EXPERTS=2` 下把 `K` 从 80 提到 96 只能带来有限改善（0.13995 -> 0.13473），说明这条更窄 shared+routed 子线开始更像 width-limited 而非继续缺 lookup budget；因此相对 r121 只把 `LATENTS_PER_EXPERT` 从 192 提回 224，在保持 `ARCHITECTURE=shared_routed_expert_topk`、`K=96`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`EF=1`、`adam`、`8e-4` 不变时，直接测试“同样低成本带内，补一点每-expert 宽度”是否比继续堆 `K` 更有效。按当前 1024x4096 cost proxy，selection 约从 0.156x 升到 0.180x，deployment 保持 0.094x，total 约 0.273x，明显低于 1.5×h×n 硬约束，也仍处于当前最需要补强的 <0.5x 区域。若 FVU 能压到约 0.128-0.130 或更好，则这条更窄 shared+routed 分支有机会在 0.27x 左右形成新的结构性 Pareto 段。",
+  "summary": "沿当前真实最强的低成本兼容主线 `shared_routed_expert_topk` 换轴，不继续堆 `K`。以 r121 为 reference，只把 `LATENTS_PER_EXPERT` 从 192 提到 224，测试这条 `K=96, ACTIVE_EXPERTS=2` 的窄宽度 shared+routed 子线是否主要受每-expert 宽度限制，并争取在约 0.27x total_cost 处补出新的低成本 Pareto 锚点。",
+  "change_type": "param_only",
+  "expected_win": "lower_fvu",
+  "family_name": "shared_routed_expert_topk",
+  "family_stage": "stabilize",
+  "self_review": "满足单轮单变量约束：相对 r121 只改 `LATENTS_PER_EXPERT`。这一步遵循 r121 已给出的真实信号，而不是重复 r119-r120 的 staged residual 负结果，也不是继续在同一 `K` 轴上做低信息量延长。选择 224 而不是直接回到 256，是因为 224 已在同 family 的更低 `K` 下验证可运行，且能更干净地回答当前问题：`K=96` 下最小有效宽度究竟落在 192 和 256 之间的哪里。主要风险是改善幅度仍不足以超越现有 0.28x 附近的 shared+routed 点；但这同样有价值，因为它会直接说明这条更窄子线应停止继续打磨，后续该回到更宽 recipe 或切回别的兼容 family。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "LATENTS_PER_EXPERT",
+      "value": "224"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "当前工作区的真实 low-cost frontier 仍由 `shared_routed_expert_topk` 持有，优先级高于提示里较旧的 `lowrank_expert_topk` 摘要。",
+    "r121 在 `LATENTS_PER_EXPERT=192` 子线上把 `K=80 -> 96` 的改善仅为 0.0052 FVU，说明继续加 lookup budget 的边际收益开始变弱，下一步更应测试 width bottleneck。",
+    "`LATENTS_PER_EXPERT` 的 allowlist、runner wiring、round config 与 checkpoint config 持久化已在 r105 之后多轮真实验证，本轮不需要任何代码修改。",
+    "本轮保持 `ACTIVE_EXPERTS=2` 不变，避免重复 `ACTIVE_EXPERTS=3` 的负信号；也避免继续沿 `two_stage_residual_expert` 做第三轮近似重复试验。"
+  ],
+  "next_hypotheses": [
+    "如果 `LATENTS_PER_EXPERT=224` 在约 0.273x 下把 FVU 压到约 0.128-0.130 或更好，下一轮继续以该点为 reference，只改 `K=112`，完成这条 shared+routed 子线的 matched deployment knee 定位。",
+    "如果 `LATENTS_PER_EXPERT=224` 只带来很小改善，则可较清晰判定 `LATENTS_PER_EXPERT=192` 子线已不值得继续；下一轮应切回更宽的已验证 shared+routed recipe 或转向 matched `lowrank_expert_residual` 对照，而不是继续细扫这一子线。",
+    "如果 `LATENTS_PER_EXPERT=224` 明显优于 r121 但仍不够进入新前沿，则下一轮保持 family 不变，只改 `LATENTS_PER_EXPERT=240` 或 `256`，更精确锁定 `K=96, ACTIVE_EXPERTS=2` 下的宽度 knee。"
+  ],
+  "reference_round": 121
+}
+---
+
+ succeeded in 21435ms:
+shared_routed_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224} {"ratio": 0.18, "deployment_ratio": 0.06, "combined_ratio": 0.24, "err": null}
+shared_routed_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 192} {"ratio": 0.16, "deployment_ratio": 0.06, "combined_ratio": 0.22, "err": null}
+shared_routed_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 160} {"ratio": 0.13, "deployment_ratio": 0.06, "combined_ratio": 0.2, "err": null}
+shared_routed_expert_topk {'k': 48, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224} {"ratio": 0.18, "deployment_ratio": 0.05, "combined_ratio": 0.23, "err": null}
+shared_routed_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 1, 'latents_per_expert': 224} {"ratio": 0.12, "deployment_ratio": 0.06, "combined_ratio": 0.19, "err": null}
+
+codex
+`shared_routed_expert_topk` 的旧 low-cost 子线基本已经把 `K=64 / width` 摸过一遍了；我再看一个更高信息量的 matched-cost 备选：低成本下的 factorized shared+routed 头，是否能在 `<0.25x` 直接挑战当前 anchor。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+for arch in ['shared_routed_factorized_expert_topk','factorized_expert_topk','expert_topk','shared_lowrank_routed_expert_topk']:
+    print('ARCH',arch)
+    hits=[]
+    for p in Path('research/history/round_summaries').glob('round_*.json'):
+        try:
+            d=json.loads(p.read_text())
+        except Exception:
+            continue
+        cfg=d.get('resolved_candidate_env_config',{}) or {}
+        if cfg.get('ARCHITECTURE')==arch:
+            rid=int(p.stem.split('_')[-1])
+            hits.append((rid,d.get('result',{}).get('decision'),d.get('result',{}).get('val_fvu'),{k:cfg.get(k) for k in ['K','EXPANSION_FACTOR','NUM_EXPERTS','ACTIVE_EXPERTS','LATENTS_PER_EXPERT','FACTORIZED_HIDDEN_DIM','STAGE1_RATIO','TRUNK_RANK']}))
+    for item in sorted(hits):
+        print(item)
+    print()
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+ARCH shared_routed_factorized_expert_topk
+(127, 'discard', '0.22480779886245728', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(128, 'discard', '0.22480779886245728', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(142, 'discard', '0.25618457794189453', {'K': '112', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+
+ARCH factorized_expert_topk
+(71, 'discard', '0.2566685676574707', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(72, 'discard', '0.2684502601623535', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': '1024', 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(77, 'discard', '0.2482101321220398', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(87, 'discard', '0.20521047711372375', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(88, 'discard', '0.20573464035987854', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(89, 'discard', '0.20658627152442932', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(90, 'keep', '0.21575365960597992', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '16', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '64'})
+(91, 'archive', '0.21575365960597992', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '16', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '64'})
+(92, 'archive', '0.21575365960597992', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '16', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '64'})
+(133, 'discard', '0.2984656095504761', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '1', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(149, 'discard', '0.24498677253723145', {'K': '112', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+
+ARCH expert_topk
+(23, 'keep', '0.36355817317962646', {'K': '64', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': None, 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(24, 'archive', '0.36355817317962646', {'K': '64', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': None, 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(25, 'keep', '0.3148818016052246', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': None, 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(26, 'keep', '0.29111021757125854', {'K': '192', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': None, 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(27, 'archive', '0.29111021757125854', {'K': '192', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': None, 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(51, 'keep', '0.1273030936717987', {'K': '192', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '16', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(52, 'discard', '0.14567476511001587', {'K': '224', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '16', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(68, 'keep', '0.12482442706823349', {'K': '192', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(69, 'keep', '0.13341990113258362', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '32', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(73, 'keep', '0.12601399421691895', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(74, 'keep', '0.12429413199424744', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(75, 'crash', '0.16780081391334534', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '256', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(78, 'discard', '0.1345272958278656', {'K': '192', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(93, 'discard', '0.20399117469787598', {'K': '160', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(136, 'discard', '0.2147471308708191', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': None, 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+(137, 'discard', '0.16879674792289734', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '128', 'ACTIVE_EXPERTS': None, 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': None, 'STAGE1_RATIO': None, 'TRUNK_RANK': None})
+
+ARCH shared_lowrank_routed_expert_topk
+(129, 'discard', '0.1219072937965393', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(130, 'discard', '0.2266390025615692', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '1', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(134, 'discard', '0.12481768429279327', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '192', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(135, 'discard', '0.13039079308509827', {'K': '128', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '320', 'FACTORIZED_HIDDEN_DIM': '128', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(141, 'discard', '0.14034616947174072', {'K': '112', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '40'})
+(155, 'discard', '0.14630839228630066', {'K': '96', 'EXPANSION_FACTOR': '1', 'NUM_EXPERTS': '64', 'ACTIVE_EXPERTS': '2', 'LATENTS_PER_EXPERT': '224', 'FACTORIZED_HIDDEN_DIM': '256', 'STAGE1_RATIO': '0.25', 'TRUNK_RANK': '16'})
+
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys, json
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+cands=[
+ ('shared_routed_factorized_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224,'factorized_hidden_dim':128}),
+ ('shared_routed_factorized_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224,'factorized_hidden_dim':192}),
+ ('shared_routed_factorized_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':192,'factorized_hidden_dim':128}),
+ ('factorized_expert_topk',{'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224,'factorized_hidden_dim':128}),
+]
+for arch,p in cands:
+    cost=compute_selection_cost(arch,k=p['k'],ef=p['ef'],d_in=1024,n_output=4096,extra_config={k:v for k,v in p.items() if k not in {'k','ef'}})
+    print(arch,p,json.dumps({'ratio':cost.get('ratio'),'deployment_ratio':cost.get('deployment_ratio'),'combined_ratio':cost.get('combined_ratio'),'err':cost.get('error')},ensure_ascii=False))
+PY" in /root/sparsify-ascend
+codex
+历史信号说明 factorized shared+routed 在更高成本点上偏弱，但它的低成本版本还没做过 matched probe；我只看它是否真能落进 `<0.25x`，落不进就不选。
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/state.json
+ M research/history/timeline.jsonl
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+p=Path('research/history/round_summaries/round_0142.json')
+if p.exists():
+    d=json.loads(p.read_text())
+    print(json.dumps(d.get('action',{}), ensure_ascii=False, indent=2)[:4000])
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "command": "run",
+  "hypothesis": "最终重构公式为 x_hat = Σ_{i∈S_sh(h(x))} α_i^sh(h(x)) b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j}(h(x)) b_{e,j}，其中 h(x)=ReLU(Bx) 是共享低秩投影，{b_i^sh} 是 shared 静态向量库，{b_{e,j}} 是 routed expert 静态子库。在线侧可导出为“shared low-rank projection + shared library lookup + routed expert local top-k + 有限加权和”，静态库不随样本动态生成，因此 `shared_routed_factorized_expert_topk` 判定为直接兼容，不是不兼容 family。唯一主假设：相对 r123 仅把 `ARCHITECTURE` 从 `shared_routed_expert_topk` 切到 `shared_routed_factorized_expert_topk`，保持 `K=112`、`EXPANSION_FACTOR=1`、`ACTIVE_EXPERTS=2`、`FACTORIZED_HIDDEN_DIM=256`、`LATENTS_PER_EXPERT=224`、`NUM_EXPERTS=64` 与其余训练配方不变，直接回答“shared+routed 异构 MoE 中把 expert 内部 scorer 也做低秩化”是否能在约 0.22x total_cost 下形成新的低成本结构段。",
+  "summary": "建议以 r123 为 reference，只改 `ARCHITECTURE=shared_routed_factorized_expert_topk`。这是一轮低成本异构 MoE 结构重验：直接测试“shared+routed + expert 内部低秩 scorer”能否在约 0.22x total_cost 下提供比当前 low-cost frontier 更有价值的新段。",
+  "change_type": "param_only",
+  "expected_win": "explore_unknown",
+  "family_name": "shared_routed_factorized_expert_topk",
+  "family_stage": "mainline",
+  "self_review": "这轮满足单轮单变量约束：相对 r123 只改 `ARCHITECTURE`。在 `shared_lowrank_routed_expert_residual` 连续两轮非支配失败、`shared_lowrank_routed_expert_topk` 也已给出新的负信号后，继续沿同一 family 做局部压缩信息增量偏低；切到 `shared_routed_factorized_expert_topk` 更符合当前对异构 MoE 与 expert-internal low-rank 的优先级，也能在更低的 0.22x 成本带补一段此前仍欠清晰的结构证据。主要风险是该 family 在旧轮次已有弱负信号，但当前这次是与 r123 严格 matched-cost 的 fresh validation，结论更有解释力。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "shared_routed_factorized_expert_topk"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r141 已说明 `shared_lowrank_routed_expert_topk` 在约 0.30x total_cost 下仍被当前 low-cost frontier 压制，因此“shared low-rank basis + full expert head”这条无 residual 线可暂时降级。",
+    "本轮改做另一条 hetero MoE 结构对照：相对 r123 只切 `ARCHITECTURE=shared_routed_factorized_expert_topk`，用同一低成本 anchor 直接测试 expert 内部低秩 scorer 是否值得继续。",
+    "本地成本自检：在 r123 配方下切到 `shared_routed_factorized_expert_topk` 后，selection_accesses=450560、deployment_accesses=458752、combined_accesses=909312，对当前 1024x4096 proxy 的 combined_ratio≈0.22，低于 1.5×h×n 硬约束。"
+  ],
+  "next_hypotheses": [
+    "如果该点在约 0.22x 下明显优于现有 0.22x-0.25x frontier，则下一轮保持该 family 不变，只改 `FACTORIZED_HIDDEN_DIM` 或 `LATENTS_PER_EXPERT`，继续压缩 hetero MoE 的低秩路由链路。",
+    "如果该点仍明显落后于当前 low-cost frontier，则可以更有把握地下调“fully factorized hetero MoE”优先级，把后续预算转向其他结构槽位，而不是继续在 shared+routed 低秩变体上反复试错。",
+    "如果结果只小幅优于 `expert_topk` 但仍被 `shared_routed_expert_topk` 支配，则说明 shared branch 有价值，但 routed experts 过度低秩化会伤害质量；后续应优先保留 expert-specific full heads 或切向别的 staged/residual 结构。"
+  ],
+  "reference_round": 123
+}
+
+ succeeded in 16936ms:
+shared_routed_factorized_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224, 'factorized_hidden_dim': 128} {"ratio": 0.05, "deployment_ratio": 0.06, "combined_ratio": 0.12, "err": null}
+shared_routed_factorized_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224, 'factorized_hidden_dim': 192} {"ratio": 0.08, "deployment_ratio": 0.06, "combined_ratio": 0.14, "err": null}
+shared_routed_factorized_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 192, 'factorized_hidden_dim': 128} {"ratio": 0.05, "deployment_ratio": 0.06, "combined_ratio": 0.11, "err": null}
+factorized_expert_topk {'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224, 'factorized_hidden_dim': 128} {"ratio": 0.05, "deployment_ratio": 0.06, "combined_ratio": 0.11, "err": null}
+
+codex
+工作区现在没有残留的 `sparsify/` 改动，只有研究状态文件是脏的；这意味着本轮可以干净地返回 `param_only`，不需要把上一段中成本 prototype 包进 action。
+exec
+/bin/bash -lc "rg -n 'shared_routed_expert_residual' sparsify/config.py sparsify/sparse_coder.py research/AutoResearch/override_registry.py" in /root/sparsify-ascend
+ exited 1 in 0ms:
+2026-03-30T10:03:02.088005Z ERROR codex_core::tools::router: error=write_stdin failed: stdin is closed for this session; rerun exec_command with tty=true to keep stdin open
+exec
+/bin/bash -lc "python - <<'PY'
+import sys, json
+sys.path.insert(0,'.')
+from research.AutoResearch.compatibility import compute_selection_cost
+for p in [
+    {'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':160},
+    {'k':48,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224},
+    {'k':64,'ef':1,'num_experts':64,'active_experts':2,'latents_per_expert':224},
+]:
+    cost=compute_selection_cost('shared_routed_expert_topk',k=p['k'],ef=p['ef'],d_in=1024,n_output=4096,extra_config={k:v for k,v in p.items() if k not in {'k','ef'}})
+    print(p, json.dumps({'ratio':cost.get('ratio'),'deployment_ratio':cost.get('deployment_ratio'),'combined_ratio':cost.get('combined_ratio'),'error':cost.get('error')},ensure_ascii=False))
+PY" in /root/sparsify-ascend
+codex
+我只剩最后一个选择点：是沿 `LATENTS_PER_EXPERT` 再压一档，还是做 `K=48` 的更激进 deployment 左移；哪个更像“在相近或更低成本下打败当前 0.24x anchor”，就用哪个。
+ succeeded in 12790ms:
+{'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 160} {"ratio": 0.13, "deployment_ratio": 0.06, "combined_ratio": 0.2, "error": null}
+{'k': 48, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224} {"ratio": 0.18, "deployment_ratio": 0.05, "combined_ratio": 0.23, "error": null}
+{'k': 64, 'ef': 1, 'num_experts': 64, 'active_experts': 2, 'latents_per_expert': 224} {"ratio": 0.18, "deployment_ratio": 0.06, "combined_ratio": 0.24, "error": null}
+
+codex
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍明确不兼容，不能驱动 frontier。当前 `<0.25x` 主战场里，r115→r116 已证明 `shared_routed_expert_topk` 在保持 `ACTIVE_EXPERTS=2` 的前提下沿 width 轴左移仍有结构信号，而 r114 又给出清晰负信号：把 `ACTIVE_EXPERTS` 压到 1 虽能到约 0.20x，但 FVU 会退化到 0.2038。唯一主假设是：相对 r116 仅把 `LATENTS_PER_EXPERT` 从 192 再压到 160，保持 `ARCHITECTURE=shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 与其余训练配方不变，可以把 total_cost 从约 0.22x 再左移到约 0.20x，而避免重蹈 `ACTIVE_EXPERTS=1` 的质量崩塌；若 FVU 仍明显优于 r114 并尽量接近 r116，则说明在当前 target 上，进一步压每-expert 宽度比压 active experts 更值得作为 `<0.25x` 主线继续推进。","summary":"以 r116 为 reference，保持当前最强 low-cost baseline `shared_routed_expert_topk` 的 `K=64, ACTIVE_EXPERTS=2, NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=160`。这是一轮严格落在 `<0.25x` 主战场的 matched-cost 轻量化 probe，直接回答在约 0.20x total_cost 下，shared+routed 结构是否能通过更窄 expert 子库打败现有同成本 anchors，而不必退回到 `ACTIVE_EXPERTS=1`。","change_type":"param_only","expected_win":"lower_cost","family_name":"shared_routed_expert_topk","family_stage":"stabilize","self_review":"相对 r116 只改一个 env 参数 `LATENTS_PER_EXPERT`，满足单变量原则。当前策略已经明确把主战场收缩到 `<0.25x`，因此不应再让 0.5x 左右结构主导预算；沿 `shared_routed_expert_topk` 这条现有最强 low-cost baseline 做 matched light variant，比再开一个天然落到中成本区的新 family 更符合本轮目标。之所以选 `LATENTS_PER_EXPERT=160` 而不是继续降 `ACTIVE_EXPERTS` 或直接降 `K`，是因为 r114 已证明 active-path 再压会明显伤害质量，而本地成本自检显示 160 宽度能把 combined ratio 压到约 0.20x，正好回答当前最有信息量的问题：shared+routed 的 `<0.25x` 质量主要依赖双 routed experts，还是仍可继续靠更小 expert 子库左移。","needs_sanity":false,"env_overrides":[{"key":"LATENTS_PER_EXPERT","value":"160"}],"touched_files":[],"notes_to_memory":["r114 已给出负锚点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=256` 在约 0.20x total_cost 下退化到 FVU 0.2038，说明当前 low-cost 质量不适合继续压 `ACTIVE_EXPERTS`。","r116 已给出当前最直接的宽度锚点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 在约 0.22x total_cost 下达到 FVU 0.1464，因此相对它继续把 `LATENTS_PER_EXPERT` 压到 160 是当前 `<0.25x` 带内最干净的单变量后续问题。","本地成本自检显示：`shared_routed_expert_topk K=64 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 的 selection ratio 约 0.13x、deployment ratio 约 0.06x、combined ratio 约 0.20x，低于当前 0.24x anchor，也远低于 1.5×h×n 硬约束。","本轮不需要代码修改；`LATENTS_PER_EXPERT`、`ACTIVE_EXPERTS` 与 `shared_routed_expert_topk` 的 wiring 已在历史轮次中稳定生效。"],"next_hypotheses":["如果 `LATENTS_PER_EXPERT=160` 仍把 FVU 控制在明显优于 r114 的区间并接近 r116，则下一轮应以本轮为 reference，只改 `K=48`，测试 shared+routed 主线能否在保持结构优势的同时进一步把 deployment 压到约 0.19x。","如果 `LATENTS_PER_EXPERT=160` 只温和退化且形成新的更左非支配点，则可以判定当前 `<0.25x` 主线更该继续沿 expert width 轴而不是 active-expert 轴推进。","如果 `LATENTS_PER_EXPERT=160` 明显劣化到接近 r114，则说明当前 `K=64, ACTIVE_EXPERTS=2` 已接近 width floor；下一轮应停止继续压 width，转去做 low-cost matched architecture probe，例如直接对照 `shared_routed_factorized_expert_topk` 是否能在同成本带提供更优质量。"],"reference_round":116}
+tokens used
+775,860
