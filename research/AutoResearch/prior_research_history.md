@@ -22,11 +22,12 @@
 下面这些只算当前 target 的弱先验，不是结论：
 
 - 当前主战场应放在 `<0.25x total_cost` 区域；`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点
-- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline，而不是被直接视为“旧 family”
+- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline / cost anchor，而不是默认继续细扫的主线
+- 目前这条 baseline 上的 `K≈108-112` 与 `LATENTS_PER_EXPERT≈160` 已经提供了足够局部证据；继续在线性 `K/LATENTS` 轴上补点的信息增量很小
 - `expert_topk` 仍有极低成本 anchor 价值，但在 `<0.25x` 的质量明显弱于当前 shared+routed 主线
 - `lowrank_expert_residual` 在 `0.49x-0.54x` 一带给出了当前更强的质量锚点，但这不意味着后续应让中成本结构继续主导搜索预算
 
-一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，而是“谁能在 `<0.25x` 区域打败现有 low-cost anchors”。
+一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，也不是“`K=110` 和 `K=111` 谁更好”，而是“谁能在 `<0.25x` 区域用新的结构槽位打败现有 low-cost anchors”。
 
 ## 2. LUTurbo/Lottable 兼容性约束
 
@@ -137,16 +138,17 @@ Agent 应把这些当成未决问题，而不是已有答案。
 
 当前优先级最高的方向不是泛泛的“结构扩展”，而是明确围绕 `<0.25x` 主战场补点：
 
-- `shared_routed_expert_topk` 的 matched-cost 轻量变体
-- 更小 `K`
-- 更小 `LATENTS_PER_EXPERT`
+- 新的 matched-cost architecture probe，而不是继续沿同一 family 做线性插值
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
 - 更轻的 shared scorer / router
+- hetero/shared experts 与 active path 更短的 sparse MoE-like 结构
 - 只有在仍能保持 low-cost 带的前提下，才考虑 very-light residual / factorized 变体
 
 这些方向优先级高，不是因为它们已经被证明最好，而是因为：
 
 - 当前 `<0.25x` 前沿已经有可用点，但质量仍明显不够好
-- 这一区间目前的最强点仍主要来自轻量 shared+routed 路线
+- 这一区间目前的 baseline 已基本摸清局部 knee，继续在线性 `K/LATENTS` 轴上细扫的信息增量已经明显下降
 - 很多会自然把成本抬到 `>0.35x` 的结构，即使质量更高，也不直接回答当前主问题
 
 如果要实现新的 low-cost 原型，应优先满足：
@@ -167,5 +169,6 @@ Agent 应把这些当成未决问题，而不是已有答案。
 - 再根据当前 target 的 frontier 形状决定下一步往哪里扩
 - 优先选择归因清晰、接线风险低、能补充新信息的实验
 - 当 `<0.25x` 区域已经有 anchor 后，默认应优先继续改善这一区域，而不是把主要预算转回 `0.5x` 左右的结构打磨
-- 如果 low-cost family 持续不能给出满意结果，应优先尝试新的轻量 routed / shared+routed 变体，而不是直接跳回更重的 trunk/residual 结构
+- 但当最近 2-3 轮都属于同一 family、同一 low-cost 成本带、且只是 `K` 或 `LATENTS_PER_EXPERT` 微调，同时没有形成新的 frontier 扩展时，下一轮应优先换结构槽位，而不是继续补局部插值点
+- 如果 low-cost family 持续不能给出满意结果，应优先尝试新的轻量 routed / shared+routed / low-rank expert 变体，而不是直接跳回更重的 trunk/residual 结构
 - 不要让旧位置的主线故事替代当前 target 的新证据

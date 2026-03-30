@@ -64,7 +64,8 @@ PROXY_OBJECTIVE = """\
 - 当前 target 上，plain `EF=1` selector family 已经提供了一批成本锚点；它们现在主要用于对照和校准
 - 当前阶段主目标：在 `total_cost < 0.25x` 区域尽可能降低 FVU
 - `0.25x-0.35x` 只作为辅助对照带，用于判断结构趋势；`>0.4x` 只保留少量质量锚点，不应继续主导大部分预算
-- 当前 `<0.25x` 最强兼容前沿主要由 `shared_routed_expert_topk` 构成；后续实验应优先回答“谁能在相近或更低成本下打败它”
+- 当前 `<0.25x` 最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched baseline / cost anchor，而不是默认继续细扫的主线
+- 当前这条 baseline 上的 `K≈108-112` 与 `LATENTS_PER_EXPERT≈160` 已经提供了足够局部证据；继续在线性 `K/LATENTS` 轴上补点的信息增量通常很小
 - 这个 frontier 只是 LUTurbo 可用性的代理指标，不是最终系统指标
 - 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是 Pareto front 上的最优权衡
@@ -72,7 +73,8 @@ PROXY_OBJECTIVE = """\
 - 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
 - 当前主要预算应投向 `<0.25x` 带内的轻量结构，而不是继续把注意力放在 `0.4x-0.8x` 的中成本结构锚点
-- 在这个成本区间，优先考虑更轻的 routed / shared+routed 结构、极小 K、更小的 per-expert width、更轻的 scorer / router
+- 在这个成本区间，优先考虑有结构信息增量的新 low-cost probe，例如更轻的 routed / shared+routed 变体、`shared bottleneck + expert-specific head`、expert 内部 low-rank、更轻的 scorer / router、hetero/shared experts、active path 更短的 sparse MoE-like 结构
+- 局部参数微调只是辅助校准手段，不应连续多轮主导预算；若最近几轮都只是同一 family 上的 `K` 或 `LATENTS_PER_EXPERT` 微调且没有形成新的 frontier 扩展，应优先换结构槽位
 - 只有在能保持 `<0.25x` 或至少不明显超过 `0.35x` 的前提下，very-light residual / factorized 变体才值得尝试
 - 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
@@ -183,23 +185,21 @@ def section_high_priority_directions() -> str:
         "  `0.25x-0.35x` 只作辅助对照带；`>0.4x` 只保留少量质量锚点，不应继续主导预算。",
         "",
         "当前 low-cost 参考线：",
-        "  1. `shared_routed_expert_topk` 是当前 `<0.25x` 区域最强兼容 baseline；它现在应作为 matched baseline，而不是被视为“旧 family 不要再碰”。",
+        "  1. `shared_routed_expert_topk` 是当前 `<0.25x` 区域最强兼容 baseline；它现在应作为 matched baseline / cost anchor，而不是默认继续细扫的主线。",
         "  2. `expert_topk` 只作为更极左侧成本 anchor；若质量明显落后，不应继续主导预算。",
         "",
         "当前高优先级方向：",
-        "  1. `shared_routed_expert_topk` 的 matched-cost 轻量变体。",
-        "     优先尝试更小 K、更小 `LATENTS_PER_EXPERT`、更轻 scorer / router，前提是总成本仍落在 `<0.25x` 或尽量接近它。",
-        "  2. 更轻的 shared+routed / hetero-MoE 变体。",
-        "     只有在 shared 分支不会把成本自然抬到 `>0.35x` 时才值得继续。",
-        "  3. 极小 K 与更轻 expert 子库。",
-        "     目标是在不显著牺牲 FVU 的前提下继续压 deployment 与 active-path 成本。",
+        "  1. 新的 matched-cost architecture probe，而不是继续沿同一 family 做线性插值。",
+        "  2. `shared bottleneck + expert-specific head`、expert 内部 low-rank、以及更轻的 scorer / router。",
+        "  3. hetero/shared experts 与 active path 更短的 sparse MoE-like 结构。",
         "  4. very-light residual / factorized 变体。",
         "     仅当它们能保持在 low-cost 带内时才值得尝试；不要默认引入会自然抬高到中成本区的 trunk / residual 负担。",
         "",
         "当前应下调优先级的方向：",
         "  1. 天然落在 `0.45x-0.55x` 左右的 `lowrank_expert_residual` 式结构，除非只作少量质量对照。",
         "  2. 已经多轮失败的 shared-lowrank two-stage / hetero residual 变体。",
-        "  3. 任何只是把成本抬到 `>0.4x` 却不能直接回答 `<0.25x` 问题的结构探针。",
+        "  3. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` 插值点却没有形成新的 frontier 扩展的局部细扫。",
+        "  4. 任何只是把成本抬到 `>0.4x` 却不能直接回答 `<0.25x` 问题的结构探针。",
     ])
 
 
