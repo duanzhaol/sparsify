@@ -123,8 +123,8 @@ def compatibility_hard_rules() -> str:
         "LUTurbo 兼容性硬约束：",
         "1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。",
         "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
-        "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
-        "4. 当前 frontier 只代表兼容 family 的 objective leaderboard；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        "3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。",
+        "4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。",
         f"当前 target：训练 hookpoint 为 {profile.training_hookpoint}。",
         f"成本 proxy：{profile.cost_model_label}。",
         "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
@@ -198,7 +198,7 @@ _COST_TABLE_ARCHITECTURES = [
     "lowrank_residual", "lowrank_soft_codebook_residual",
     "lowrank_two_stage_soft_codebook_residual",
 ]
-_COST_TABLE_EF_VALUES = [2, 3, 4, 6, 8, 12]
+_COST_TABLE_EF_VALUES = [1, 2, 3, 4, 6, 8, 12]
 
 
 def compute_selection_cost_table(

@@ -1,6 +1,6 @@
 # SAE Auto Research Idea Bank
 
-> 目标：给自动研究 Agent 提供一组可发散的思路，用于探索 **如何在更低 total_cost 下训练出更好的可部署表示**，并服务于 **CPU 上基于查表/LUT 的推理加速**。
+> 目标：给自动研究 Agent 提供一组可发散的思路，用于探索 **如何在更低 objective_score 下训练出更好的可部署表示**，并服务于 **CPU 上基于查表/LUT 的推理加速**。
 >
 > 这不是操作手册，也不是固定 recipe，而是一个 **idea bank / search space**。  
 > Agent 可以从中抽取方向，组合成新的实验假设。
@@ -61,8 +61,8 @@
 
 当前更重要的问题是：
 
-- `expert_topk / MoE-like` 是否能在保持部署可导出的前提下形成新的低成本前沿段
-- `lowrank + expert` 是否能把平滑主干与局部子库分开处理，从而改善同成本下的 FVU
+- `expert_topk / MoE-like` 是否能在保持部署可导出的前提下形成新的更低 objective 段
+- `lowrank + expert` 是否能把平滑主干与局部子库分开处理，从而在相近 cost 下显著降低 exceed
 - `lowrank + expert + residual` 或 `two-stage residual expert` 是否能在中等成本带带来新的 objective 改善区间
 
 因此：

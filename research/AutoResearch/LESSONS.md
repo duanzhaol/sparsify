@@ -1,5 +1,9 @@
 # Auto Research 旧系统经验总结
 
+> 注意：本文件是旧系统演化过程的历史归档，包含 proxy/full、Pareto、旧 schema 等遗留术语。
+> 它不是当前单目标 AutoResearch 的运行时规范。
+> 当前有效语义以 `research/AutoResearch/` 下的现行代码、`prior_research_history.md`、`operator_guide.md` 和 prompt 组装逻辑为准。
+
 本文档记录了旧 autoresearch 系统（`research/agent_loop.py` + `research/controller.py` 等）
 在 ~100 轮实验中积累的经验教训，供新系统设计参考。
 

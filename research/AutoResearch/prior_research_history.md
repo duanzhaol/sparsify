@@ -152,12 +152,14 @@ Agent 应把这些当成未决问题，而不是已有答案。
 - `shared low-rank trunk + routed residual experts`
 - 更轻的 scorer / router
 - 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
 
 这些方向优先级高，不是因为它们已经被证明最好，而是因为：
 
 - 它们更直接回答“怎样同时控制 cost 与 exceed”
 - 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
 - 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
 
 如果要实现新的原型，应优先满足：
 
@@ -173,8 +175,10 @@ Agent 应把这些当成未决问题，而不是已有答案。
 
 - 先建立当前 target 自己的 objective anchors
 - 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
-- 优先选择归因清晰、接线风险低、能补充新信息的实验
-- 如果最近 2-3 轮都属于同一 family 且只是局部参数插值，同时 objective 没有扩展，则下一轮应优先换结构槽位
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
 - 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
 - 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
 - 不要让旧位置的主线故事替代当前 target 的新证据

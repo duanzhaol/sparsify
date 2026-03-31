@@ -355,14 +355,58 @@ def _extract_json(text: str) -> dict[str, Any]:
 def _coerce_missing_action_fields(raw: dict[str, Any]) -> dict[str, Any]:
     """Backfill a few safe defaults when the model omits schema fields.
 
-    Codex occasionally returns an otherwise-valid action JSON but drops a small
-    field like `needs_sanity`. Keep the fix minimal and only fill fields whose
-    absence is operationally safe.
+    Fresh sessions are schema-constrained, but `codex exec resume` does not
+    support `--output-schema`. In resume mode the model can occasionally omit
+    small bookkeeping fields. Fill conservative defaults so the round turns into
+    a valid action or a clean policy rejection instead of crashing the worker.
     """
     if not isinstance(raw, dict):
         return raw
     coerced = dict(raw)
-    coerced.setdefault("needs_sanity", False)
+    env_overrides = coerced.get("env_overrides")
+    if isinstance(env_overrides, dict):
+        env_overrides = [
+            {"key": str(k), "value": str(v)}
+            for k, v in env_overrides.items()
+        ]
+    elif not isinstance(env_overrides, list):
+        env_overrides = []
+    coerced["env_overrides"] = env_overrides
+
+    arch_override = None
+    for item in env_overrides:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("key") or "") == "ARCHITECTURE" and item.get("value") not in (None, ""):
+            arch_override = str(item.get("value")).lower()
+            break
+
+    if coerced.get("command") in (None, ""):
+        coerced["command"] = "run"
+    if coerced.get("change_type") in (None, ""):
+        coerced["change_type"] = "param_only"
+    if coerced.get("expected_win") in (None, ""):
+        coerced["expected_win"] = "explore_unknown"
+    if coerced.get("family_stage") in (None, ""):
+        coerced["family_stage"] = "mainline"
+    if coerced.get("family_name") in (None, ""):
+        coerced["family_name"] = arch_override or BASE_ENV_DEFAULTS["ARCHITECTURE"]
+    if coerced.get("summary") in (None, ""):
+        coerced["summary"] = str(coerced.get("hypothesis") or "Resume-session action")
+    if coerced.get("hypothesis") in (None, ""):
+        coerced["hypothesis"] = str(coerced.get("summary") or "Resume-session action")
+    if coerced.get("self_review") in (None, ""):
+        coerced["self_review"] = ""
+
+    for key in ("touched_files", "notes_to_memory", "next_hypotheses"):
+        value = coerced.get(key)
+        if not isinstance(value, list):
+            coerced[key] = []
+
+    if "needs_sanity" not in coerced or coerced.get("needs_sanity") is None:
+        coerced["needs_sanity"] = False
+    if "reference_round" not in coerced:
+        coerced["reference_round"] = None
     return coerced
 
 
@@ -416,30 +460,40 @@ def _infer_reference_round(state: Any, family_name: str) -> int | None:
 def coerce_stop_action(action: Action, state: Any, round_id: int) -> Action:
     """Convert a stop action into a runnable fallback."""
     d = action.to_dict()
-    # Find best known family
     best_family = BASE_ENV_DEFAULTS["ARCHITECTURE"]
-    best_fvu = float("inf")
-    for entry in state.frontier.values():
-        if isinstance(entry, dict):
-            fvu = entry.get("fvu")
-            if fvu is not None:
-                try:
-                    v = float(fvu)
-                    if v < best_fvu:
-                        best_fvu = v
-                        cfg = entry.get("config", {})
-                        best_family = str(cfg.get("family_name") or entry.get("architecture") or best_family)
-                except (TypeError, ValueError):
-                    pass
+    try:
+        from .config_resolution import best_frontier_entry
+
+        registry = state.load_compatibility_registry()
+        best_entry = best_frontier_entry(
+            state.frontier,
+            registry=registry,
+            prefer_feasible=True,
+        )
+        if isinstance(best_entry, dict):
+            cfg = best_entry.get("config", {}) if isinstance(best_entry.get("config"), dict) else {}
+            best_family = str(
+                cfg.get("family_name")
+                or best_entry.get("architecture")
+                or best_family
+            ).lower()
+    except Exception:
+        pass
 
     d["command"] = "run"
-    d["hypothesis"] = d.get("hypothesis") or f"Continue exploring {best_family}"
-    d["summary"] = f"Runtime override: continue search. {d.get('summary', '')}"
-    d.setdefault("change_type", "param_only")
-    d.setdefault("expected_win", "explore_unknown")
-    d.setdefault("family_name", best_family)
-    d.setdefault("family_stage", "mainline")
-    d.setdefault("self_review", "Continuing search (stop not allowed)")
+    d["hypothesis"] = d.get("hypothesis") or f"Continue from incumbent {best_family}"
+    existing_summary = d.get("summary") or ""
+    d["summary"] = f"Runtime override: continue objective search from incumbent {best_family}. {existing_summary}".strip()
+    if not d.get("change_type"):
+        d["change_type"] = "param_only"
+    if not d.get("expected_win"):
+        d["expected_win"] = "explore_unknown"
+    if not d.get("family_name"):
+        d["family_name"] = best_family
+    if not d.get("family_stage"):
+        d["family_stage"] = "mainline"
+    if not d.get("self_review"):
+        d["self_review"] = "Continuing search (stop not allowed)"
     if d.get("change_type") == "param_only" and d.get("reference_round") in (None, ""):
         inferred_reference = _infer_reference_round(state, str(d.get("family_name") or best_family))
         if inferred_reference is not None:

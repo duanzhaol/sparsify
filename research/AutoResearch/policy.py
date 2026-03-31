@@ -73,7 +73,7 @@ def validate_action(
     if compat_label == "incompatible":
         return action, (
             f"family '{family_name}' 在 prior_research_history.md 中被标记为不兼容，"
-            "不能继续推进或占据 frontier"
+            "不能继续推进或占据当前 objective leaderboard"
         )
 
     ok, msg = _check_param_only_single_variable(action, state)
@@ -170,7 +170,7 @@ def detect_stagnation(
     elif objective_status["incumbent"] is None:
         mode = "cost_exploration"
         reason = (
-            "当前 frontier 没有成本可行的点（均超过 1.5×h×n 预算）。"
+            "当前 objective leaderboard 没有成本可行的点（均超过 1.5×h×n 预算）。"
             "首要目标是找到可行配置。"
         )
     elif objective_status["dominant_term"] == "cost":
@@ -190,10 +190,10 @@ def detect_stagnation(
         if consecutive_no_improve >= 3:
             reason = (
                 f"主线已连续 {consecutive_no_improve} 轮没有改进，"
-                "但还应先把同一 family 的 recipe 与训练曲线看清。"
+                "应优先寻找更高信息增量的结构改动，而不是继续在同一 family 上细扫。"
             )
         else:
-            reason = "当前没有连续 crash，主线仍应继续推进。"
+            reason = "当前没有连续 crash；主线应继续推进单目标改进，并优先考虑结构性信息增量。"
 
     return {
         "mode": mode,
@@ -300,12 +300,12 @@ def build_policy_guidance(
         f"{recipe_label}：{recipe_line}",
         f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
         "本轮要求：",
-        "1. 当前 mainline 配方首先是 objective anchor，不等于后续必须继续围绕它做局部推进。",
-        "2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，再做少量 recipe 或结构参数调整。",
-        "3. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。",
-        "4. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
-        "5. 如果最近几轮都只是同一 family 上的局部参数插值且 objective 没有扩展，应优先换结构槽位，而不是继续细扫。",
-        "6. 当前优先的结构方向仍是 routed / shared+routed / low-rank expert / asymmetric MoE-like probe，但是否继续必须由 objective_score 决定。",
+        "1. 当前 mainline 配方首先是 objective anchor / matched baseline，不等于后续必须继续围绕它做局部推进。",
+        "2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，然后优先选择信息增量最大的改动。",
+        "3. 如果最近 2 轮没有把 objective 明显拉低，默认应切换到新的结构槽位；只有在你能明确说明当前 family 仍有高价值未验证假设时，才继续做局部调整。",
+        "4. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。",
+        "5. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
+        "6. 当前优先的结构方向仍是 routed / shared+routed / low-rank expert / asymmetric MoE-like probe；相比同 family 补插值点，应更偏向新的结构性 probe。",
         "",
         "单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",

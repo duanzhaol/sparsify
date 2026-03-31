@@ -357,7 +357,7 @@ def resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
         return {
             "family_name": family_name,
             "config": config,
-            "source": "frontier_best",
+            "source": "leaderboard_best",
         }
 
     config = dict(BASE_ENV_DEFAULTS)
@@ -424,7 +424,7 @@ def resolve_reference_env_config(
         prefer_feasible=True,
     )
     if family_best is not None:
-        return frontier_entry_to_env_config(family_best), f"family_frontier:{action_family}"
+        return frontier_entry_to_env_config(family_best), f"family_leaderboard:{action_family}"
 
     return dict(mainline["config"]), f"mainline:{mainline['source']}"
 

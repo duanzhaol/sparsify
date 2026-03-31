@@ -73,7 +73,7 @@ PROXY_OBJECTIVE = """\
 EXECUTION_LAYER = """\
 执行层是固定的：
 - 训练：scripts/autoresearch_test.sh
-- 结果：research/controller.py
+- 结果：research/AutoResearch/controller.py
 - 记忆：research/history/
 - 当前执行沙盒：sparsify-ascend 是面向 LUTurbo 搜索的训练与评估环境
 - 如果新增可调参数，不仅要在 sparsify/ 中实现，还必须同步接通 research/AutoResearch/ 下的 override/config-resolution/runner 持久化链路、scripts/autoresearch_test.sh 参数透传、以及必要的 resume/validation 路径；否则实验会静默回退到默认值
@@ -92,7 +92,8 @@ EDIT_RULES = """\
 - 如果新增了 env key / tunable 参数，返回前至少完成本地接线自检：新 key 已进入 `override_registry` allowlist、`config_resolution` / `runner` / 必要的持久化路径已识别、`scripts/autoresearch_test.sh` 已透传；至少做一次本地校验，确认该 key 不会在训练启动前被判为 `Disallowed env override keys`
 - 新增 tunable 参数后的第一轮，必须先验证该参数真的进入了训练配置：至少检查 round*.config.json 和 checkpoint config.json 中该字段存在且取值正确
 - 不要返回 command="stop"
-- 最终必须返回一个符合 action schema 的 JSON 对象"""
+- 最终必须返回一个符合 action schema 的 JSON 对象
+- 无论 fresh session 还是 resume session，都要显式返回全部 schema 字段；即使某项为空，也要返回 `[]` / `null` / `false`，不要省略字段"""
 
 SINGLE_VARIABLE_PRINCIPLE = (
     "单变量原则：每一轮只改变一个 env 参数。"
@@ -106,7 +107,9 @@ HARD_CONSTRAINT_REMINDER = (
     "默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。"
     "如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。"
     "如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。"
-    "当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。最终返回 JSON。"
+    "当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。"
+    "当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。"
+    "必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。"
 )
 
 ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
@@ -174,20 +177,24 @@ def section_high_priority_directions() -> str:
     return "\n".join([
         "当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。",
         "  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。",
+        "  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。",
+        "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
         "",
         "当前高优先级方向：",
-        "  1. 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值。",
-        "  2. `shared bottleneck + expert-specific head`、expert 内部 low-rank、以及更轻的 scorer / router。",
+        "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
+        "  2. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
         "  3. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
         "  4. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
         "  5. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        "  6. 宁可做中等风险但高信息增量的新结构原型，也不要把预算继续花在低信息的 incumbent 邻域细扫上。",
         "",
         "当前应下调优先级的方向：",
         "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
-        "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` 插值点，但 objective 没有扩展的细扫。",
+        "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。",
         "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
         "  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。",
-        "  5. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
+        "  5. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
+        "  6. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
     ])
 
 
@@ -393,7 +400,7 @@ def section_selection_cost_status(
 
 
 def section_cost_feasibility_table(registry: dict[str, str]) -> str:
-    """成本可行性速查表：让 agent 知道各 (架构, EF) 组合是否在预算内。"""
+    """基础 family 的 encoder 成本速查表。"""
     current_target = default_target_profile()
     table = compute_selection_cost_table(
         d_in=current_target.d_in,
@@ -434,13 +441,15 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
             f"当前成本 profile：hookpoint={current_target.training_hookpoint} | "
             f"proxy={current_target.d_in}x{current_target.n_output}"
         ),
-        "Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：",
+        "基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：",
         f"  {header}",
     ]
     for row in rows:
         parts.append(f"  {row}")
     parts.append("  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。")
     parts.append("  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。")
+    parts.append("  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。")
+    parts.append("  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。")
 
     return "\n".join(parts)
 
@@ -487,7 +496,7 @@ def section_reference_configs(
     """Show recent runnable full env configs that can serve as reference_round anchors."""
     if not round_summaries:
         return (
-            "最近可用 reference_round 的完整配置：\n"
+            "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
             "  （当前 target profile 尚无历史结果）\n"
             "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
         )
@@ -584,12 +593,15 @@ def section_reference_configs(
     if not blocks:
         if saw_other_target:
             return (
-                "最近可用 reference_round 的完整配置：\n"
+                "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
                 "  （当前 target profile 尚无可用 reference_round；旧 target 结果已隔离）\n"
                 "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
             )
         return ""
-    return "最近可用 reference_round 的完整配置：\n" + "\n\n".join(blocks)
+    return (
+        "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
+        + "\n\n".join(blocks)
+    )
 
 
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
@@ -767,9 +779,9 @@ def section_prior_research_digest(prior_text: str) -> str:
     """Inject a concise background brief as weak prior, not hard conclusion."""
     if not prior_text:
         return ""
-    digest = prior_text.strip()
-    if len(digest) > 3500:
-        digest = digest[:3480] + "\n[truncated]"
+    digest = _extract_prior_resume_digest(prior_text)
+    if len(digest) > 5200:
+        digest = digest[:5180] + "\n[truncated]"
     return f"当前背景文档（弱先验，不是结论）：\n{digest}"
 
 
@@ -861,10 +873,10 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
 
     registry = state.load_compatibility_registry()
     recent_summaries = _recent_summaries_with_latest(state, limit=20)
-    target_recent_summaries = _current_target_summaries(recent_summaries)
 
     sections.append(f"继续 LUTurbo 研究会话。当前轮次：Round {round_id}。")
     sections.append("返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。")
+    sections.append("务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。")
     sections.append(HARD_CONSTRAINT_REMINDER)
     sections.append(compatibility_hard_rules())
 
@@ -1038,3 +1050,52 @@ def _best_objective_from_history(history: list[dict[str, Any]]) -> float | None:
         if best is None or objective < best:
             best = objective
     return best
+
+
+_PRIOR_RESUME_HEADINGS: tuple[str, ...] = (
+    "## 1. 文档用途",
+    "## 1.1 当前 target 的阅读方式",
+    "## 3. 可信的继承项",
+    "## 4. 不可信的旧结论",
+    "## 5. 当前 target 上真正未知的事",
+    "## 6. 当前高优先级方向",
+    "## 7. 当前默认做法",
+)
+
+
+def _extract_prior_resume_digest(prior_text: str) -> str:
+    """Extract the sections that still matter in resume-session prompts.
+
+    Resume prompts already include runtime hard rules and compatibility counts,
+    so we skip the long compatibility table here and focus on the parts that
+    help the agent reason under the current single objective.
+    """
+    extracted = _extract_markdown_sections(prior_text, _PRIOR_RESUME_HEADINGS)
+    if not extracted:
+        return prior_text.strip()
+    return (
+        "兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。\n\n"
+        + extracted
+    ).strip()
+
+
+def _extract_markdown_sections(text: str, headings: tuple[str, ...]) -> str:
+    wanted = set(headings)
+    sections: list[str] = []
+    current: list[str] = []
+    keep = False
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if keep and current:
+                sections.append("\n".join(current).rstrip())
+            keep = line.strip() in wanted
+            current = [line] if keep else []
+            continue
+        if keep:
+            current.append(line)
+
+    if keep and current:
+        sections.append("\n".join(current).rstrip())
+
+    return "\n\n".join(section for section in sections if section.strip())

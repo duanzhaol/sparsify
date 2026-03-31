@@ -118,7 +118,7 @@ class Action:
     hypothesis: str
     summary: str
     change_type: str  # param_only | edit_sae_code | edit_perf_code | no_change
-    expected_win: str  # lower_objective | lower_fvu | lower_cost | explore_unknown
+    expected_win: str  # lower_objective | lower_cost | explore_unknown
     family_name: str
     family_stage: str  # mainline | prototype | stabilize | promote_to_mainline
     self_review: str
@@ -133,8 +133,8 @@ class Action:
     def from_dict(cls, d: dict[str, Any]) -> Action:
         """Construct from raw agent JSON. Validates required keys."""
         required = _load_schema_required()
-        # experiment_tier removed in single-tier mode
-        required = [k for k in required if k not in {"experiment_tier", "reference_round"}]
+        # reference_round may be omitted in resume mode and is safely defaulted to None
+        required = [k for k in required if k not in {"reference_round"}]
         missing = [k for k in required if k not in d]
         if missing:
             raise ValueError(f"Action missing required keys: {', '.join(missing)}")
