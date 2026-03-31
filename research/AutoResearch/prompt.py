@@ -56,6 +56,7 @@ PROXY_OBJECTIVE = """\
 - 当前主目标是最小化单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50`
 - 其中 `total_cost_ratio = (encoder 选择成本 + 部署查表成本) / original_matmul_accesses`
 - `exceed_alpha_0.50` 表示在 alpha=0.5 阈值下，超过误差阈值、需要在线补偿的比例
+- 当前阶段目标不是只比 incumbent 小幅更好，而是要把 `objective_score` 继续压向 `0.30` 以下
 - 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
 - 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
 - FVU 继续保留，但只作为诊断与 tie-break，不再是主优化轴
@@ -177,25 +178,91 @@ def section_high_priority_directions() -> str:
     return "\n".join([
         "当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。",
         "  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。",
+        "  当前阶段目标不是把 incumbent 从 0.386 再抠到 0.37x，而是推动一次能把 objective 明显拉向 0.30 的结构突破。",
         "  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。",
         "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
+        "  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。",
         "",
         "当前高优先级方向：",
         "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
-        "  2. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
-        "  3. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
-        "  4. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
-        "  5. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
-        "  6. 宁可做中等风险但高信息增量的新结构原型，也不要把预算继续花在低信息的 incumbent 邻域细扫上。",
+        "  2. 首选仍应聚焦 `total_cost_ratio≈0.18~0.22` 这一主战场；如果新结构想占用更高 cost，必须能非常明确地换回更低 exceed。",
+        "  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
+        "  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
+        "  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+        "  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        "  7. 宁可做中等风险但高信息增量的新结构原型，也不要把预算继续花在低信息的 incumbent 邻域细扫上。",
         "",
         "当前应下调优先级的方向：",
         "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
         "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。",
         "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
         "  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。",
-        "  5. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
-        "  6. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
+        "  5. 目标仍远高于 0.30 时，还继续围绕 incumbent 做保守小步扫描。",
+        "  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
+        "  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
     ])
+
+
+def section_objective_target_gap(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    target_objective: float = 0.30,
+) -> str:
+    """Show what cost/exceed tradeoffs are needed to reach the current stage target."""
+    current_target = default_target_profile()
+    best_rank: tuple[float, float, float, float] | None = None
+    incumbent_metrics: dict[str, Any] | None = None
+
+    for entry in frontier.values():
+        if not isinstance(entry, dict):
+            continue
+        cfg = _entry_config_with_target(entry)
+        if not profile_matches(cfg, current_target):
+            continue
+        family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
+        if not is_compatible_label(registry.get(family_name)):
+            continue
+        metrics = entry_objective_metrics(entry, cost_cache={})
+        if not metrics["feasible"]:
+            continue
+        rank = objective_rank_tuple(
+            metrics["objective_score"],
+            metrics["total_cost_ratio"],
+            metrics[EXCEED_FIELD],
+            metrics["fvu"],
+        )
+        if best_rank is None or rank < best_rank:
+            best_rank = rank
+            incumbent_metrics = metrics
+
+    if incumbent_metrics is None:
+        return ""
+
+    objective = incumbent_metrics["objective_score"]
+    cost = incumbent_metrics["total_cost_ratio"]
+    exceed = incumbent_metrics[EXCEED_FIELD]
+    if objective is None or cost is None or exceed is None:
+        return ""
+
+    gap = float(objective) - target_objective
+    parts = [
+        f"阶段目标：把 objective_score 压到 {target_objective:.2f} 以下。",
+        (
+            f"  当前 incumbent 约为 objective={float(objective):.6f} "
+            f"(cost={float(cost):.2f}x, exceed={float(exceed):.6f})；"
+            f"距离目标仍差 {gap:.6f}。"
+        ),
+        "  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。",
+    ]
+
+    candidate_costs = [0.16, 0.18, 0.20, 0.22]
+    parts.append("  若想达到该目标，不同 cost 档位大致需要满足：")
+    for c in candidate_costs:
+        need_exceed = target_objective - c
+        parts.append(f"    - 若 cost≈{c:.2f}x，则 exceed 需压到 ≤{need_exceed:.2f}")
+    parts.append("  因此：若新结构 cost 升到 0.22x 左右，却仍无法把 exceed 压到约 0.08~0.10，则通常不够支撑 0.30 目标。")
+    parts.append("  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。")
+    return "\n".join(parts)
 
 
 def _entry_config_with_target(entry: dict[str, Any]) -> dict[str, Any]:
@@ -838,6 +905,7 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
     sections.append(section_high_priority_directions())
     sections.append(section_frontier(state.frontier, registry))
     sections.append(section_selection_cost_status(state.frontier, registry))
+    sections.append(section_objective_target_gap(state.frontier, registry))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         recent_summaries[-8:],
@@ -893,6 +961,7 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
     sections.append(section_high_priority_directions())
     sections.append(section_frontier(state.frontier, registry, limit=8))
     sections.append(section_selection_cost_status(state.frontier, registry))
+    sections.append(section_objective_target_gap(state.frontier, registry))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         recent_summaries[-8:],
