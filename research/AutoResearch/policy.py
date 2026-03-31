@@ -219,16 +219,19 @@ def build_policy_guidance(
     mode = policy_state["mode"]
     mainline = _resolve_policy_anchor(state, mode)
     recipe_line = _format_recipe_line(mainline["config"])
-    recipe_block = render_env_config(mainline["config"])
     reason = policy_state["reason"]
     if mainline["source"] == "target_profile_baseline":
-        role_label = "当前参考 family"
-        recipe_label = "当前参考配方"
-        config_label = "当前参考完整配置"
+        role_label = "当前 objective anchor family"
+        recipe_label = "当前 anchor 摘要"
     else:
-        role_label = "当前主线 family"
-        recipe_label = "当前主线参考配方"
-        config_label = "当前主线完整配置"
+        role_label = "当前 objective anchor family"
+        recipe_label = "当前 anchor 摘要"
+
+    anchor_note = (
+        "说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。"
+        "若本轮要做新的结构 probe，不要把它当默认 continuation plan；"
+        "如需 param_only patch，完整 reference_round 配置见后文。"
+    )
 
     if mode == "engineering_repair":
         return "\n".join([
@@ -236,7 +239,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"{role_label}：{mainline['family_name']}",
             f"{recipe_label}：{recipe_line}",
-            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
+            anchor_note,
             "本轮要求：",
             "1. 优先继续修最近失败实现，不要新开 architecture family。",
             "2. 不要同时换 optimizer、lr、loss、preprocess 等训练 recipe。",
@@ -249,7 +252,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"{role_label}：{mainline['family_name']}",
             f"{recipe_label}：{recipe_line}",
-            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
+            anchor_note,
             "本轮要求：",
             "1. 首要目标是降低 total_cost_ratio，同时保持 total_cost ≤1.5×h×n 的硬预算。",
             "2. 允许为了明显更低的 objective_score 接受轻微 FVU 波动；不要把 FVU 当作唯一目标。",
@@ -267,7 +270,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"{role_label}：{mainline['family_name']}",
             f"{recipe_label}：{recipe_line}",
-            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
+            anchor_note,
             "本轮要求：",
             "1. 首要目标是降低 exceed_alpha_0.50；只要 objective_score 下降，允许适度增加 cost，但必须留在预算内。",
             "2. FVU 只作诊断：当 exceed 明显下降而 FVU 只小幅波动时，不要被旧的 FVU 直觉误导。",
@@ -285,7 +288,7 @@ def build_policy_guidance(
             f"原因：{reason}",
             f"{role_label}：{mainline['family_name']}",
             f"{recipe_label}：{recipe_line}",
-            f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
+            anchor_note,
             "本轮要求：",
             "1. 只允许做 1 个 matched architecture probe。",
             "2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。",
@@ -298,7 +301,7 @@ def build_policy_guidance(
         f"原因：{reason}",
         f"{role_label}：{mainline['family_name']}",
         f"{recipe_label}：{recipe_line}",
-        f"{config_label}（source={mainline['source']}）：\n{recipe_block}",
+        anchor_note,
         "本轮要求：",
         "1. 当前 mainline 配方首先是 objective anchor / matched baseline，不等于后续必须继续围绕它做局部推进。",
         "2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，然后优先选择信息增量最大的改动。",

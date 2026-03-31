@@ -497,6 +497,7 @@ def section_reference_configs(
     if not round_summaries:
         return (
             "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
+            "  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。\n"
             "  （当前 target profile 尚无历史结果）\n"
             "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
         )
@@ -594,12 +595,14 @@ def section_reference_configs(
         if saw_other_target:
             return (
                 "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
+                "  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。\n"
                 "  （当前 target profile 尚无可用 reference_round；旧 target 结果已隔离）\n"
                 "  冷启动阶段请显式返回 reference_round=null，并相对 target_profile_baseline 只改 1 个 env 参数。"
             )
         return ""
     return (
         "最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：\n"
+        "  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。\n"
         + "\n\n".join(blocks)
     )
 
@@ -840,13 +843,13 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         recent_summaries[-8:],
         registry,
     ))
+    sections.append(section_tactical_hints(state.get_pending_hints()))
     sections.append(section_reference_configs(
         recent_summaries,
         registry,
         state.frontier,
-        limit=4,
+        limit=2,
     ))
-    sections.append(section_tactical_hints(state.get_pending_hints()))
 
     # Layer 3
     sections.append(section_memory_brief(state.memory, state.frontier, registry, recent_summaries))
@@ -895,13 +898,13 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         recent_summaries[-8:],
         registry,
     ))
+    sections.append(section_tactical_hints(state.get_pending_hints()))
     sections.append(section_reference_configs(
         recent_summaries,
         registry,
         state.frontier,
-        limit=4,
+        limit=2,
     ))
-    sections.append(section_tactical_hints(state.get_pending_hints()))
     sections.append(section_prior_research_digest(
         state.load_prior_research(),
     ))
