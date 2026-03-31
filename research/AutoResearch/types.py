@@ -95,7 +95,11 @@ DEFAULT_MAX_REPAIR_ATTEMPTS = 5
 # Results TSV columns
 RESULTS_COLUMNS = [
     "experiment_id", "timestamp", "status", "decision",
-    "val_fvu", "k", "architecture", "expansion_factor",
+    "val_fvu", "exceed_alpha_0_50", "objective_score",
+    "total_cost", "total_cost_ratio",
+    "selection_cost", "selection_cost_ratio",
+    "deployment_accesses", "deployment_ratio",
+    "k", "architecture", "expansion_factor",
     "wall_time_sec", "peak_memory_gb", "total_tokens",
     "checkpoint", "head_commit", "head_branch", "workspace_dirty",
     "description", "self_review", "log_path",
@@ -114,7 +118,7 @@ class Action:
     hypothesis: str
     summary: str
     change_type: str  # param_only | edit_sae_code | edit_perf_code | no_change
-    expected_win: str  # lower_fvu | lower_cost | explore_unknown
+    expected_win: str  # lower_objective | lower_fvu | lower_cost | explore_unknown
     family_name: str
     family_stage: str  # mainline | prototype | stabilize | promote_to_mainline
     self_review: str
@@ -208,6 +212,14 @@ class Result:
     status: str
     timestamp: str | None = None
     val_fvu: str | None = None
+    exceed_alpha_0_50: str | None = None
+    objective_score: str | None = None
+    total_cost: str | None = None
+    total_cost_ratio: str | None = None
+    selection_cost: str | None = None
+    selection_cost_ratio: str | None = None
+    deployment_accesses: str | None = None
+    deployment_ratio: str | None = None
     observed_fvu: str | None = None
     k: str | None = None
     architecture: str | None = None

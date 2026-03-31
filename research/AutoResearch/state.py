@@ -12,9 +12,21 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .compatibility import COST_METRIC_VERSION, cost_entry_is_current, parse_compatibility_registry
+from .compatibility import (
+    COST_METRIC_VERSION,
+    cost_entry_is_current,
+    parse_compatibility_registry,
+)
 from .config_resolution import resolve_action_configs, summary_invalid_reason
-from .target_profile import default_target_profile, profile_matches, resolve_target_profile
+from .objective import (
+    EXCEED_FIELD,
+    OBJECTIVE_FIELD,
+    compute_objective_score,
+    entry_objective_metrics,
+    extract_step_exceed_alpha_0_50,
+    read_latest_step,
+)
+from .target_profile import resolve_target_profile
 from .types import (
     Action,
     BASE_ENV_DEFAULTS,
@@ -74,9 +86,9 @@ _DEFAULT_AGENT_STATE: dict[str, Any] = {
 
 _DEFAULT_MEMORY: dict[str, Any] = {
     "current_focus": (
-        "Track a Pareto frontier across total_cost and FVU. "
-        "Treat plain EF=1 selector runs as cost anchors and matched baselines, not as the default long-run search path. "
-        "Prefer experiments that add structurally new non-dominated tradeoff points, especially expert/MoE, low-rank, and residual combinations."
+        "Minimize objective_score = total_cost_ratio + exceed_alpha_0_50 under the total_cost budget. "
+        "FVU is a diagnostic and tie-break metric, not the primary runtime objective. "
+        "Prefer experiments that improve the objective with clean cost/exceed decomposition."
     ),
     "architecture_findings": [],
     "performance_findings": [],
@@ -88,9 +100,9 @@ _DEFAULT_MEMORY: dict[str, Any] = {
     "recent_sanity_failures": [],
     "recent_training_failures": [],
     "next_hypotheses": [
-        "Maintain a Pareto frontier over total_cost and FVU rather than optimizing only the single best FVU point.",
-        "Use plain EF=1 selector results as anchors and matched baselines, not as the only mainline family.",
-        "Prioritize structurally new families such as expert/MoE, low-rank + expert, and residual combinations once anchors are established.",
+        "Minimize objective_score = total_cost_ratio + exceed_alpha_0_50 instead of treating FVU as the main target.",
+        "Use FVU as a diagnostic / tie-break metric while keeping the hard total_cost budget.",
+        "Prefer structure changes that materially improve cost or exceed, not only local FVU interpolation.",
     ],
 }
 
@@ -255,129 +267,6 @@ class StateManager:
             self.agent[k] = v
         self._save_state()
 
-    # -----------------------------------------------------------------------
-    # Read-only digests (for prompt building)
-    # -----------------------------------------------------------------------
-
-    def frontier_digest(self, limit: int = 8) -> list[str]:
-        """Return frontier as compact one-liner strings, sorted by total_cost."""
-        points: list[tuple[float, str]] = []
-        current_target = default_target_profile()
-        for _key, entry in self.frontier.items():
-            if not isinstance(entry, dict):
-                continue
-            cfg = dict(entry.get("config", {}) or {})
-            if entry.get("target_profile") is not None and "target_profile" not in cfg:
-                cfg["target_profile"] = entry["target_profile"]
-            if not profile_matches(cfg, current_target):
-                continue
-            fvu = entry.get("fvu", 999)
-            k = entry.get("k", "?")
-            ef = entry.get("ef", "?")
-            arch = entry.get("architecture", "?")
-            lr = cfg.get("lr", "?")
-            opt = cfg.get("optimizer", "?")
-            commit = str(entry.get("commit", ""))[:7]
-            original = resolve_target_profile(cfg).original_matmul_accesses
-
-            # Determine total_cost for sorting
-            tc = entry.get("total_cost")
-            if tc is None or not cost_entry_is_current(entry):
-                from .controller import _estimate_total_cost_from_entry
-                tc = _estimate_total_cost_from_entry(entry)
-            if tc is None:
-                sel = entry.get("selection_cost")
-                deploy = entry.get("deployment_accesses", 0) or 0
-                tc = (float(sel) + float(deploy)) if sel is not None else None
-
-            if tc is not None:
-                ratio = round(float(tc) / original, 2) if original > 0 else "?"
-                cost_str = f"total={ratio}x"
-                sort_key = float(tc)
-            else:
-                cost_str = "total=?"
-                sort_key = float("inf")
-
-            line = f"{cost_str} fvu={fvu} arch={arch} K={k} EF={ef} lr={lr} opt={opt} @{commit}"
-            points.append((sort_key, line))
-        points.sort()
-        return [line for _, line in points[:limit]]
-
-    def memory_digest(self) -> dict[str, Any]:
-        """Compact memory snapshot for prompts.
-
-        Uses structured one-liners instead of nested dicts to maximize
-        information density per token.
-        """
-        m = self._memory
-
-        # Families: one-liner history + short issues/next
-        families_digest: dict[str, dict[str, Any]] = {}
-        for name, fam in m.get("architecture_families", {}).items():
-            best_fvu = fam.get("best_fvu")
-            # Backwards compat: check legacy field names
-            if best_fvu is None:
-                best_fvu = fam.get("best_full_fvu") or fam.get("best_proxy_fvu")
-            best_str = f" best_fvu={best_fvu}" if best_fvu is not None else ""
-
-            # Compress tested_configs into one-liners
-            history: list[str] = []
-            for tc in fam.get("tested_configs", [])[-5:]:
-                r = tc.get("round", "?")
-                stage = str(tc.get("stage", "?"))[:5]  # proto/mainl/stab/promo
-                k = tc.get("k", "?")
-                dec = tc.get("decision", "?")
-                fvu_val = tc.get("val_fvu")
-                health = tc.get("run_health", "normal")
-                fvu_part = f" fvu={fvu_val}" if fvu_val else ""
-                health_part = f" [{health}]" if health != "normal" else ""
-                history.append(f"r{r} {stage} k{k} {dec}{fvu_part}{health_part}")
-
-            # Compress known_issues: just the core message, truncated
-            issues = [_truncate(s, 80) for s in fam.get("known_issues", [])[-3:]]
-            next_steps = [_truncate(s, 60) for s in fam.get("next_steps", [])[-3:]]
-
-            families_digest[name] = {
-                "status": fam.get("status"),
-                "last_round": fam.get("last_round"),
-                "best": best_str.strip() or None,
-                "history": history,
-                "issues": issues if issues else None,
-                "next": next_steps if next_steps else None,
-            }
-            # Drop None values to save space
-            families_digest[name] = {
-                k: v for k, v in families_digest[name].items() if v is not None
-            }
-
-        # Failures: compress to one-liners
-        sanity_fails = [
-            _compact_failure_line(e) for e in m.get("recent_sanity_failures", [])[-6:]
-            if isinstance(e, dict)
-        ]
-        training_fails = [
-            _compact_failure_line(e) for e in m.get("recent_training_failures", [])[-6:]
-            if isinstance(e, dict)
-        ]
-
-        # Baseline runtime: compact
-        baselines = [
-            f"{v.get('architecture','?')} k={v.get('k','?')}: {v.get('tokens_per_sec',0):.0f} tok/s (r{v.get('round','?')})"
-            for v in list(m.get("baseline_runtime", {}).values())[-4:]
-            if isinstance(v, dict)
-        ]
-
-        return {
-            "current_focus": m.get("current_focus", ""),
-            "families": families_digest,
-            "insights": m.get("recent_insights", [])[-20:],
-            "perf_findings": m.get("performance_findings", [])[-8:],
-            "sanity_failures": sanity_fails if sanity_fails else None,
-            "training_failures": training_fails if training_fails else None,
-            "baselines": baselines if baselines else None,
-            "next_hypotheses": m.get("next_hypotheses", [])[:8],
-        }
-
     def load_results(self, limit: int | None = None) -> list[dict[str, str]]:
         results_path = self.history_dir / "results.tsv"
         if not results_path.exists():
@@ -399,24 +288,11 @@ class StateManager:
         path = self.history_dir / "round_summaries" / f"round_{round_id:04d}.json"
         return _load_json(path, {})
 
-    def recent_round_summaries_trimmed(self, limit: int = 3) -> list[str]:
-        """Compact round summaries as one-liners for prompts."""
-        lines: list[str] = []
-        for s in self.recent_round_summaries(limit=limit):
-            action = s.get("action", {})
-            result = s.get("result", {})
-            r = s.get("round", "?")
-            fam = s.get("family_name", "?")
-            ct = action.get("change_type", "?")
-            dec = result.get("decision", "?")
-            fvu = result.get("val_fvu", "")
-            health = result.get("run_health", "normal")
-            dur = s.get("duration_sec", "?")
-            hyp = _truncate(str(action.get("hypothesis", "")), 80)
-            fvu_part = f" fvu={fvu}" if fvu else ""
-            health_part = f" [{health}]" if health != "normal" else ""
-            lines.append(f"r{r} {fam} {ct} -> {dec}{fvu_part}{health_part} {dur}s | {hyp}")
-        return lines
+    def _load_frontier_round_summary(self, frontier_key: str) -> dict[str, Any]:
+        round_id = _round_id_from_frontier_key(frontier_key)
+        if round_id is None:
+            return {}
+        return self.load_round_summary(round_id)
 
     def get_operator_hints(self) -> list[dict[str, Any]]:
         return _load_json(self.history_dir / "operator_hints.json", [])
@@ -479,7 +355,7 @@ class StateManager:
         frontier = self._state.get("frontier", {})
         self._migrate_frontier_keys(frontier)
         self._backfill_frontier_target_profiles(frontier)
-        self._refresh_frontier_cost_metrics(frontier)
+        self._refresh_frontier_objective_metrics(frontier)
         from .controller import compact_frontier
         compacted_frontier = compact_frontier(frontier)
         if compacted_frontier != frontier:
@@ -601,11 +477,8 @@ class StateManager:
         1. K-only keys: "128" → "legacy_128"
         2. K_EF keys: "128_12" → "legacy_128_12"
 
-        Also computes and stores total_cost/selection_cost/deployment for entries that lack them.
+        Also computes cost fields for entries that lack them.
         """
-        from .compatibility import compute_selection_cost
-        from .controller import _extract_extra_config, _estimate_total_cost_from_entry
-
         legacy_keys = [
             k for k in frontier
             if not k.startswith("r") and not k.startswith("legacy_")
@@ -634,67 +507,60 @@ class StateManager:
             # Compute cost breakdown if missing
             if "total_cost" not in entry:
                 cfg = entry.get("config", {})
-                arch = str(entry.get("architecture") or cfg.get("architecture") or "topk").lower()
-                k_val = int(entry.get("k") or cfg.get("k") or 128)
-                ef_val = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
-                cost = compute_selection_cost(
-                    arch,
-                    k=k_val,
-                    ef=ef_val,
-                    d_in=resolve_target_profile(cfg).d_in,
-                    n_output=resolve_target_profile(cfg).n_output,
-                    extra_config=_extract_extra_config(cfg),
-                )
-                if "error" not in cost:
-                    entry.setdefault("selection_cost", float(cost["total_accesses"]))
-                    entry.setdefault("deployment_accesses", float(cost.get("deployment_accesses", 0)))
-                    entry.setdefault("deployment_ratio", cost.get("deployment_ratio"))
-                    entry["total_cost"] = float(cost.get("combined_accesses", 0))
-                    entry.setdefault("target_profile", resolve_target_profile(cfg).to_dict())
-                    entry.setdefault("cost_model_label", resolve_target_profile(cfg).cost_model_label)
-                else:
-                    entry["total_cost"] = _estimate_total_cost_from_entry(entry)
+                target_profile = resolve_target_profile(cfg)
+                metrics = entry_objective_metrics(entry)
+                entry.setdefault("selection_cost", metrics["selection_cost"])
+                entry.setdefault("selection_cost_ratio", metrics["selection_cost_ratio"])
+                entry.setdefault("deployment_accesses", metrics["deployment_accesses"])
+                entry.setdefault("deployment_ratio", metrics["deployment_ratio"])
+                entry["total_cost"] = metrics["total_cost"]
+                entry.setdefault("total_cost_ratio", metrics["total_cost_ratio"])
+                entry.setdefault("target_profile", target_profile.to_dict())
+                entry.setdefault("cost_model_label", target_profile.cost_model_label)
                 entry["metric_version"] = COST_METRIC_VERSION
 
             new_key = f"legacy_{old_key}"
             frontier[new_key] = entry
 
-    def _refresh_frontier_cost_metrics(self, frontier: dict[str, Any]) -> None:
-        """Recompute stale or incomplete frontier cost fields using current logic."""
-        from .compatibility import compute_selection_cost
-        from .controller import _extract_extra_config, _estimate_total_cost_from_entry
-
-        for entry in frontier.values():
+    def _refresh_frontier_objective_metrics(self, frontier: dict[str, Any]) -> None:
+        """Recompute stale or incomplete frontier objective fields using current logic."""
+        cost_cache: dict[str, dict[str, Any]] = {}
+        for key, entry in frontier.items():
             if not isinstance(entry, dict):
-                continue
-            if cost_entry_is_current(entry) and entry.get("total_cost") is not None:
                 continue
 
             cfg = dict(entry.get("config", {}) or {})
             if entry.get("target_profile") is not None and "target_profile" not in cfg:
                 cfg["target_profile"] = entry["target_profile"]
-            arch = str(entry.get("architecture") or cfg.get("architecture") or "topk").lower()
-            k_val = int(entry.get("k") or cfg.get("k") or 128)
-            ef_val = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
             target_profile = resolve_target_profile(cfg)
-            cost = compute_selection_cost(
-                arch,
-                k=k_val,
-                ef=ef_val,
-                d_in=target_profile.d_in,
-                n_output=target_profile.n_output,
-                extra_config=_extract_extra_config(cfg),
-            )
-            if "error" not in cost:
-                entry["selection_cost"] = float(cost["total_accesses"])
-                entry["deployment_accesses"] = float(cost.get("deployment_accesses", 0))
-                entry["deployment_ratio"] = cost.get("deployment_ratio")
-                entry["total_cost"] = float(cost.get("combined_accesses", 0))
+            if (
+                not cost_entry_is_current(entry)
+                or entry.get("total_cost") is None
+                or entry.get("total_cost_ratio") is None
+                or entry.get("selection_cost_ratio") is None
+            ):
+                metrics = entry_objective_metrics(entry, cost_cache=cost_cache)
+                entry["selection_cost"] = metrics["selection_cost"]
+                entry["selection_cost_ratio"] = metrics["selection_cost_ratio"]
+                entry["deployment_accesses"] = metrics["deployment_accesses"]
+                entry["deployment_ratio"] = metrics["deployment_ratio"]
+                entry["total_cost"] = metrics["total_cost"]
+                entry["total_cost_ratio"] = metrics["total_cost_ratio"]
                 entry["target_profile"] = target_profile.to_dict()
                 entry["cost_model_label"] = target_profile.cost_model_label
                 entry["metric_version"] = COST_METRIC_VERSION
-            else:
-                entry["total_cost"] = _estimate_total_cost_from_entry(entry)
+
+            if entry.get(EXCEED_FIELD) is None:
+                summary = self._load_frontier_round_summary(key)
+                exceed = _extract_exceed_from_summary(summary, hookpoint=cfg.get("HOOKPOINTS") or cfg.get("hookpoints"))
+                if exceed is not None:
+                    entry[EXCEED_FIELD] = exceed
+
+            if entry.get(OBJECTIVE_FIELD) is None:
+                entry[OBJECTIVE_FIELD] = compute_objective_score(
+                    entry.get("total_cost_ratio"),
+                    entry.get(EXCEED_FIELD),
+                )
 
     def _backfill_frontier_target_profiles(self, frontier: dict[str, Any]) -> None:
         for entry in frontier.values():
@@ -743,6 +609,9 @@ class StateManager:
             "family_stage": family_stage,
             "decision": result.decision,
             "val_fvu": result.val_fvu,
+            EXCEED_FIELD: result.exceed_alpha_0_50,
+            "objective_score": result.objective_score,
+            "total_cost_ratio": result.total_cost_ratio,
             "observed_fvu": result.observed_fvu,
             "k": result.k,
             "architecture": arch,
@@ -762,12 +631,14 @@ class StateManager:
         for note in action.notes_to_memory:
             m.setdefault("recent_insights", []).append(f"NOTE: {note}")
         # Compact outcome line
+        objective_part = f" objective={result.objective_score}" if result.objective_score else ""
+        exceed_part = f" exceed={result.exceed_alpha_0_50}" if result.exceed_alpha_0_50 else ""
         fvu_part = f" fvu={result.val_fvu}" if result.val_fvu else ""
         health_part = f" [{result.run_health}]" if result.run_health != "normal" else ""
         term_part = f" ({result.termination_reason})" if result.termination_reason != "completed" else ""
         outcome_note = (
             f"r{round_id} {family_name} {action.change_type} k{result.k or '?'}"
-            f" -> {result.decision}{fvu_part}{health_part}{term_part}"
+            f" -> {result.decision}{objective_part}{exceed_part}{fvu_part}{health_part}{term_part}"
         )
         m.setdefault("recent_insights", []).append(outcome_note)
         m["recent_insights"] = m["recent_insights"][-40:]
@@ -833,6 +704,7 @@ class StateManager:
             "tested_configs": [],
             "known_issues": [],
             "next_steps": [],
+            "best_objective_score": None,
             "best_fvu": None,
             "last_round": None,
         })
@@ -853,15 +725,24 @@ class StateManager:
                 "stage": family_stage,
                 "k": result.k,
                 "decision": result.decision,
+                "objective_score": result.objective_score,
+                EXCEED_FIELD: result.exceed_alpha_0_50,
+                "total_cost_ratio": result.total_cost_ratio,
                 "val_fvu": result.val_fvu,
                 "run_health": result.run_health,
             })
         family["tested_configs"] = family["tested_configs"][-20:]
 
-        # Update best FVU and family status based on decision
+        # Update best objective / FVU and family status based on decision
+        objective_score = _safe_float(result.objective_score)
         val_fvu = _safe_float(result.val_fvu)
         if result.decision == "keep":
             family["status"] = "active"
+            if objective_score is not None and (
+                family.get("best_objective_score") is None
+                or objective_score < float(family["best_objective_score"])
+            ):
+                family["best_objective_score"] = objective_score
             if val_fvu is not None and (
                 family.get("best_fvu") is None or val_fvu < float(family["best_fvu"])
             ):
@@ -954,6 +835,22 @@ class StateManager:
 
     def _append_results_tsv(self, result_dict: dict[str, str]) -> None:
         results_path = self.history_dir / "results.tsv"
+        if results_path.exists():
+            with open(results_path, newline="") as f:
+                reader = csv.reader(f, delimiter="\t")
+                try:
+                    header = next(reader)
+                except StopIteration:
+                    header = []
+            if header != RESULTS_COLUMNS:
+                existing_rows = self.load_results()
+                with open(results_path, "w", newline="") as f:
+                    writer = csv.DictWriter(
+                        f, fieldnames=RESULTS_COLUMNS, delimiter="\t", extrasaction="ignore"
+                    )
+                    writer.writeheader()
+                    for row in existing_rows:
+                        writer.writerow(row)
         write_header = not results_path.exists()
         with open(results_path, "a", newline="") as f:
             writer = csv.DictWriter(
@@ -1031,6 +928,30 @@ def _safe_int(v: Any) -> int | None:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _round_id_from_frontier_key(key: Any) -> int | None:
+    s = str(key or "")
+    if s.startswith("r") and s[1:].isdigit():
+        return int(s[1:])
+    return None
+
+
+def _extract_exceed_from_summary(
+    summary: dict[str, Any] | None,
+    hookpoint: str | None = None,
+) -> float | None:
+    if not isinstance(summary, dict):
+        return None
+    result = summary.get("result", {}) if isinstance(summary.get("result"), dict) else {}
+    direct = _safe_float(result.get(EXCEED_FIELD))
+    if direct is not None:
+        return direct
+    metrics_path = result.get("metrics_path")
+    if not metrics_path:
+        return None
+    latest_step = read_latest_step(metrics_path)
+    return extract_step_exceed_alpha_0_50(latest_step, hookpoint=hookpoint)
 
 
 def _is_invalid_runtime_result(result: Result) -> bool:

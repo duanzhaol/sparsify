@@ -33,7 +33,6 @@ from .git_ops import (
     snapshot_paths,
     touched_files,
 )
-from .compatibility import frontier_has_feasible_entry
 from .policy import (
     auto_archive_stale_families,
     behavioral_diff_test,
@@ -156,11 +155,9 @@ def _run_round(
 
     # 1. 判定本轮策略模式，并生成给 agent 的策略说明
     registry = state.load_compatibility_registry()
-    has_feasible = frontier_has_feasible_entry(state.frontier, registry)
     policy_state = detect_stagnation(
         state.consecutive_no_improve,
         state.consecutive_crashes,
-        has_feasible_frontier=has_feasible,
         frontier=state.frontier,
         registry=registry,
     )
@@ -300,7 +297,11 @@ def _run_round(
         _commit_round(round_id, action, result, ctx, state)
 
     cleanup_round_snapshots(round_id)
-    print(f"Round {round_id}: completed | decision={result.decision} fvu={result.val_fvu}")
+    print(
+        f"Round {round_id}: completed | decision={result.decision} "
+        f"objective={result.objective_score} cost={result.total_cost_ratio} "
+        f"exceed={result.exceed_alpha_0_50} fvu={result.val_fvu}"
+    )
 
 
 def _bootstrap_runtime(

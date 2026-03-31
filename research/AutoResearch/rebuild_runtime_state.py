@@ -1,14 +1,15 @@
 """Rebuild runtime decision state from history using compatibility labels.
 
-This script performs a "medium cleanup":
-- keep raw round_summaries / logs / timeline untouched
-- rebuild frontier and family runtime state from compatible families only
-- mark explicitly incompatible families as filtered_incompatible
+This script now performs a metric backfill + runtime rebuild:
+- enrich round_summaries with objective fields derived from current metrics/cost logic
+- rebuild the compatible-family runtime leaderboard from those enriched summaries
+- rewrite results.tsv using the current Results schema
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -16,13 +17,16 @@ from typing import Any
 from .compatibility import (
     COST_METRIC_VERSION,
     INCOMPATIBLE,
+    compute_selection_cost,
+    extract_cost_extra_config,
     is_compatible_label,
     parse_compatibility_registry,
 )
 from .config_resolution import config_from_round_summary, summary_invalid_reason
-from .controller import compact_frontier, frontier_key, _extract_extra_config
+from .controller import compact_frontier, frontier_key
+from .objective import EXCEED_FIELD, compute_objective_score, extract_step_exceed_alpha_0_50, read_latest_step
 from .target_profile import resolve_target_profile
-from .types import BASE_ENV_DEFAULTS, HISTORY_DIR
+from .types import BASE_ENV_DEFAULTS, HISTORY_DIR, RESULTS_COLUMNS
 
 
 def main() -> int:
@@ -46,10 +50,14 @@ def main() -> int:
 
     state = _load_json(state_path, {})
     memory = _load_json(memory_path, {})
-    summaries = [
-        _load_json(path, {})
-        for path in sorted(round_dir.glob("round_*.json"))
-    ]
+    summary_records = []
+    cost_cache: dict[str, dict[str, Any]] = {}
+    for path in sorted(round_dir.glob("round_*.json")):
+        summary = _load_json(path, {})
+        if isinstance(summary, dict):
+            _enrich_summary_objective_metrics(summary, cost_cache)
+        summary_records.append((path, summary))
+    summaries = [summary for _, summary in summary_records]
 
     rebuilt = rebuild_runtime_state(summaries, registry, memory)
 
@@ -79,6 +87,9 @@ def main() -> int:
     _save_json(frontier_path, rebuilt["frontier"])
     _save_json(memory_path, rebuilt["memory"])
     _save_json(compat_path, registry)
+    for path, summary in summary_records:
+        _save_json(path, summary)
+    _write_results_tsv(history_dir / "results.tsv", summaries)
 
     print(f"Rebuilt frontier entries: {len(rebuilt['frontier'])}")
     print(f"Latest round: {rebuilt['latest_round']}")
@@ -98,6 +109,7 @@ def rebuild_runtime_state(
     existing_memory: dict[str, Any],
 ) -> dict[str, Any]:
     frontier: dict[str, Any] = {}
+    cost_cache: dict[str, dict[str, Any]] = {}
     families: dict[str, dict[str, Any]] = {}
     recent_rounds: list[dict[str, Any]] = []
     recent_insights: list[str] = []
@@ -125,6 +137,7 @@ def rebuild_runtime_state(
             "tested_configs": [],
             "known_issues": [],
             "next_steps": [],
+            "best_objective_score": None,
             "best_fvu": None,
             "last_round": round_id,
             "compatibility": compat_label,
@@ -143,6 +156,9 @@ def rebuild_runtime_state(
                 "stage": summary.get("family_stage"),
                 "k": result.get("k"),
                 "decision": result.get("decision"),
+                "objective_score": result.get("objective_score"),
+                EXCEED_FIELD: result.get(EXCEED_FIELD),
+                "total_cost_ratio": result.get("total_cost_ratio"),
                 "val_fvu": result.get("val_fvu"),
                 "run_health": result.get("run_health"),
             })
@@ -176,6 +192,12 @@ def rebuild_runtime_state(
             continue
 
         if _is_successful_metric(result):
+            current_best_objective = family.get("best_objective_score")
+            objective = _safe_float(result.get("objective_score"))
+            if objective is not None and (
+                current_best_objective is None or objective < float(current_best_objective)
+            ):
+                family["best_objective_score"] = objective
             current_best = family.get("best_fvu")
             fvu = float(result["val_fvu"])
             if current_best is None or fvu < float(current_best):
@@ -193,6 +215,7 @@ def rebuild_runtime_state(
             k_val = int(result["k"])
             ef_val = int(result.get("expansion_factor") or 12)
             new_entry = {
+                "objective_score": _safe_float(result.get("objective_score")),
                 "k": k_val,
                 "ef": ef_val,
                 "fvu": fvu,
@@ -201,26 +224,38 @@ def rebuild_runtime_state(
                 "config": config,
                 "checkpoint": result.get("checkpoint"),
                 "peak_memory_gb": result.get("peak_memory_gb"),
+                EXCEED_FIELD: _safe_float(result.get(EXCEED_FIELD)),
             }
             # Compute cost breakdown (selection + deployment + total)
-            from .compatibility import compute_selection_cost
             target_profile = resolve_target_profile(config)
-            cost = compute_selection_cost(
+            cost = _cached_selection_cost(
                 arch,
-                k=k_val,
-                ef=ef_val,
-                d_in=target_profile.d_in,
-                n_output=target_profile.n_output,
-                extra_config=_extract_extra_config(config),
+                k_val,
+                ef_val,
+                target_profile.d_in,
+                target_profile.n_output,
+                extract_cost_extra_config(config),
+                cost_cache,
             )
             if "error" not in cost:
                 new_entry["selection_cost"] = float(cost["total_accesses"])
+                new_entry["selection_cost_ratio"] = cost.get("ratio")
                 new_entry["deployment_accesses"] = float(cost.get("deployment_accesses", 0))
                 new_entry["deployment_ratio"] = cost.get("deployment_ratio")
                 new_entry["total_cost"] = float(cost.get("combined_accesses", 0))
+                new_entry["total_cost_ratio"] = cost.get("combined_ratio")
             else:
                 from .controller import _estimate_total_cost_from_entry
                 new_entry["total_cost"] = _estimate_total_cost_from_entry(new_entry)
+                if target_profile.original_matmul_accesses > 0:
+                    new_entry["total_cost_ratio"] = (
+                        float(new_entry["total_cost"]) / target_profile.original_matmul_accesses
+                    )
+            if new_entry.get("objective_score") is None:
+                new_entry["objective_score"] = compute_objective_score(
+                    new_entry.get("total_cost_ratio"),
+                    new_entry.get(EXCEED_FIELD),
+                )
             new_entry["target_profile"] = target_profile.to_dict()
             new_entry["cost_model_label"] = target_profile.cost_model_label
             new_entry["metric_version"] = COST_METRIC_VERSION
@@ -241,7 +276,7 @@ def rebuild_runtime_state(
             continue
         if family_name in active_family_names:
             family["status"] = "active"
-        elif family.get("best_fvu") is not None:
+        elif family.get("best_objective_score") is not None or family.get("best_fvu") is not None:
             family["status"] = "archived"
         else:
             family["status"] = "discarded"
@@ -394,6 +429,9 @@ def _recent_round_entry(summary: dict[str, Any]) -> dict[str, Any]:
         "family_stage": summary.get("family_stage"),
         "decision": result.get("decision"),
         "val_fvu": result.get("val_fvu"),
+        EXCEED_FIELD: result.get(EXCEED_FIELD),
+        "objective_score": result.get("objective_score"),
+        "total_cost_ratio": result.get("total_cost_ratio"),
         "observed_fvu": result.get("observed_fvu"),
         "k": result.get("k"),
         "architecture": str(result.get("architecture") or "").lower(),
@@ -412,7 +450,10 @@ def _outcome_line(summary: dict[str, Any]) -> str:
     return (
         f"r{summary.get('round','?')} {family_name} "
         f"{action.get('change_type','?')} k{result.get('k','?')} "
-        f"-> {result.get('decision','?')} fvu={result.get('val_fvu','?')}"
+        f"-> {result.get('decision','?')} "
+        f"objective={result.get('objective_score','?')} "
+        f"exceed={result.get(EXCEED_FIELD,'?')} "
+        f"fvu={result.get('val_fvu','?')}"
     )
 
 
@@ -421,14 +462,16 @@ def _derive_next_hypotheses(
     families: dict[str, dict[str, Any]],
 ) -> list[str]:
     best = None
-    best_fvu = float("inf")
+    best_rank = (float("inf"), float("inf"), float("inf"), float("inf"))
     for entry in frontier.values():
-        try:
-            fvu = float(entry.get("fvu", float("inf")))
-        except (TypeError, ValueError):
-            continue
-        if fvu < best_fvu:
-            best_fvu = fvu
+        rank = (
+            _safe_float(entry.get("objective_score")) if _safe_float(entry.get("objective_score")) is not None else float("inf"),
+            _safe_float(entry.get("total_cost_ratio")) if _safe_float(entry.get("total_cost_ratio")) is not None else float("inf"),
+            _safe_float(entry.get(EXCEED_FIELD)) if _safe_float(entry.get(EXCEED_FIELD)) is not None else float("inf"),
+            _safe_float(entry.get("fvu")) if _safe_float(entry.get("fvu")) is not None else float("inf"),
+        )
+        if rank < best_rank:
+            best_rank = rank
             best = entry
     if best is None:
         return []
@@ -446,13 +489,150 @@ def _derive_next_hypotheses(
 
 def _derive_current_focus(frontier: dict[str, Any]) -> str:
     if not frontier:
-        return "兼容 frontier 已重建，但当前没有可用兼容点。"
+        return "兼容 objective leaderboard 已重建，但当前没有可用兼容点。"
     best = min(
         frontier.values(),
-        key=lambda item: float(item.get("fvu", float("inf"))),
+        key=lambda item: (
+            _safe_float(item.get("objective_score")) if _safe_float(item.get("objective_score")) is not None else float("inf"),
+            _safe_float(item.get("total_cost_ratio")) if _safe_float(item.get("total_cost_ratio")) is not None else float("inf"),
+            _safe_float(item.get(EXCEED_FIELD)) if _safe_float(item.get(EXCEED_FIELD)) is not None else float("inf"),
+            _safe_float(item.get("fvu")) if _safe_float(item.get("fvu")) is not None else float("inf"),
+        ),
     )
     family_name = str(best.get("config", {}).get("family_name") or best.get("architecture") or "").lower()
-    return f"兼容 frontier 已重建；当前主线优先关注 {family_name}。"
+    return f"兼容 objective leaderboard 已重建；当前主线优先关注 {family_name}。"
+
+
+def _enrich_summary_objective_metrics(
+    summary: dict[str, Any],
+    cost_cache: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Backfill per-round objective metrics from current cost logic + metrics.jsonl."""
+    if not isinstance(summary, dict):
+        return
+    result = summary.get("result")
+    if not isinstance(result, dict):
+        return
+    config = _effective_config(summary)
+    target_profile = resolve_target_profile(config)
+
+    hookpoint = config.get("HOOKPOINTS") or config.get("hookpoints")
+    exceed = _safe_float(result.get(EXCEED_FIELD))
+    if exceed is None:
+        latest_step = read_latest_step(result.get("metrics_path"))
+        exceed = extract_step_exceed_alpha_0_50(latest_step, hookpoint=hookpoint)
+        if exceed is not None:
+            result[EXCEED_FIELD] = str(exceed)
+
+    arch = str(result.get("architecture") or config.get("architecture") or "topk").lower()
+    k = _safe_int(result.get("k") or config.get("k"))
+    ef = _safe_int(result.get("expansion_factor") or config.get("expansion_factor"))
+    if k is None or ef is None:
+        return
+
+    cost = _cached_selection_cost(
+        arch,
+        k,
+        ef,
+        target_profile.d_in,
+        target_profile.n_output,
+        extract_cost_extra_config(config),
+        cost_cache,
+    )
+    if "error" not in cost:
+        selection_cost = float(cost["total_accesses"])
+        deployment_accesses = float(cost.get("deployment_accesses", 0) or 0)
+        total_cost = float(cost.get("combined_accesses", selection_cost + deployment_accesses))
+        result["selection_cost"] = str(selection_cost)
+        result["selection_cost_ratio"] = str(cost.get("ratio"))
+        result["deployment_accesses"] = str(deployment_accesses)
+        result["deployment_ratio"] = str(cost.get("deployment_ratio"))
+        result["total_cost"] = str(total_cost)
+        result["total_cost_ratio"] = str(cost.get("combined_ratio"))
+
+    objective_score = compute_objective_score(
+        result.get("total_cost_ratio"),
+        result.get(EXCEED_FIELD),
+    )
+    if objective_score is not None:
+        result["objective_score"] = str(objective_score)
+
+
+def _write_results_tsv(path: Path, summaries: list[dict[str, Any]]) -> None:
+    rows = []
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        result = summary.get("result")
+        if isinstance(result, dict):
+            rows.append(result)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RESULTS_COLUMNS, delimiter="\t", extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def _cached_selection_cost(
+    architecture: str,
+    k: int,
+    ef: int,
+    d_in: int,
+    n_output: int,
+    extra_config: dict[str, Any] | None,
+    cache: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if cache is None:
+        return compute_selection_cost(
+            architecture,
+            k=k,
+            ef=ef,
+            d_in=d_in,
+            n_output=n_output,
+            extra_config=extra_config,
+        )
+
+    normalized_extra = extra_config or {}
+    cache_key = json.dumps(
+        {
+            "architecture": architecture,
+            "k": k,
+            "ef": ef,
+            "d_in": d_in,
+            "n_output": n_output,
+            "extra_config": normalized_extra,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    if cache_key not in cache:
+        cache[cache_key] = compute_selection_cost(
+            architecture,
+            k=k,
+            ef=ef,
+            d_in=d_in,
+            n_output=n_output,
+            extra_config=normalized_extra,
+        )
+    return cache[cache_key]
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, "", "None"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value in (None, "", "None"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_json(path: Path, default: Any) -> Any:

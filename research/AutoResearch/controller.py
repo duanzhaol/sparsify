@@ -1,11 +1,13 @@
 """Lightweight result evaluation for the autoresearch framework.
 
-Replaces the old controller.py CLI.  Called as Python functions, not
-as a subprocess.  No proxy/full tier distinction — single frontier.
+The runtime leaderboard is now a single-objective ranking over:
 
-The frontier is a 2D Pareto front over (total_cost, FVU).
-total_cost = encoder selection cost + deployment lookup cost.
-Lower total_cost and lower FVU are both better.
+    objective_score = total_cost_ratio + exceed_alpha_0_50
+
+where total_cost_ratio uses the current fused-QKV cost proxy and
+``exceed_alpha_0_50`` comes from the final training-step metrics.
+
+FVU remains a diagnostic field and only acts as a late tie-break.
 """
 
 from __future__ import annotations
@@ -14,7 +16,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .compatibility import COST_METRIC_VERSION, compute_selection_cost, cost_entry_is_current
+from .compatibility import COST_METRIC_VERSION, compute_selection_cost, extract_cost_extra_config
+from .objective import (
+    EXCEED_FIELD,
+    LEADERBOARD_LIMIT,
+    candidate_objective_metrics,
+    entry_objective_metrics,
+    is_objective_near_duplicate,
+    objective_rank_tuple,
+)
 from .target_profile import TargetProfile, resolve_target_profile
 
 
@@ -36,11 +46,7 @@ _SUMMARY_PATTERNS = {
 
 
 def parse_log(log_path: Path) -> dict[str, Any]:
-    """Extract key metrics from a training log file.
-
-    Returns a dict with: status, val_fvu, k, architecture, expansion_factor,
-    wall_time_sec, peak_memory_gb, total_tokens, checkpoint.
-    """
+    """Extract key metrics from a training log file."""
     if not log_path.exists():
         return {"status": "crash"}
 
@@ -51,7 +57,6 @@ def parse_log(log_path: Path) -> dict[str, Any]:
         matches = list(pattern.finditer(text))
         parsed[key] = matches[-1].group(1).strip() if matches else None
 
-    # Type coercion
     if parsed.get("val_fvu") in (None, "nan"):
         parsed["val_fvu"] = None
     elif parsed["val_fvu"] is not None:
@@ -75,15 +80,11 @@ def parse_log(log_path: Path) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Decision logic — 2D Pareto front: (total_cost, FVU)
+# Decision logic — single-objective leaderboard
 # ---------------------------------------------------------------------------
-
-FVU_TOL = 0.001
-COST_REL_TOL = 0.05  # 5% relative tolerance for total_cost near-duplicate
 
 
 def frontier_key(round_id: int | str) -> str:
-    """Canonical frontier key based on round id."""
     return f"r{round_id}"
 
 
@@ -92,48 +93,51 @@ def decide(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
 ) -> str:
-    """Compare a training result against the 2D Pareto frontier.
+    """Compare a result against the single-objective leaderboard.
 
-    The frontier is two-dimensional: **(total_cost, FVU)**.
-    total_cost = encoder selection cost + deployment lookup cost.
-    Lower total_cost and lower FVU are both better.
-
-    Returns one of: "keep", "crash", "archive", "discard".
-    - keep:    result is Pareto non-dominated (expands or improves frontier)
-    - crash:   training failed, no usable metric
-    - archive: result is near-duplicate of an existing frontier point
-    - discard: result is Pareto-dominated by existing frontier points
+    Returns one of:
+    - keep: enters the feasible top-k objective leaderboard
+    - archive: objective-near-duplicate of an existing retained point
+    - discard: valid run, but not leaderboard-worthy
+    - crash: missing essential metrics
     """
     status = parsed.get("status")
     fvu = parsed.get("val_fvu")
-
     if status != "ok" or fvu is None:
         return "crash"
 
-    target_profile = _resolve_cost_profile(config or {})
-    total_cost = _compute_candidate_total_cost(parsed, config)
-    candidate = {"total_cost": total_cost, "fvu": fvu}
-
-    points = _frontier_points(frontier, target_profile.profile_id)
-    if not points:
-        return "keep"
-
-    # Check for near-duplicate (both dimensions within tolerance)
-    for pt in points:
-        cost_close = (
-            abs(pt["total_cost"] - total_cost) / max(total_cost, 1) <= COST_REL_TOL
-        )
-        fvu_close = abs(pt["fvu"] - fvu) <= FVU_TOL
-        if cost_close and fvu_close:
-            if fvu < pt["fvu"] - FVU_TOL:
-                return "keep"  # same cost region but strictly better FVU
-            return "archive"
-
-    # Pareto dominance check
-    if any(_pareto_dominates(pt, candidate) for pt in points):
+    candidate = _candidate_metrics(parsed, config)
+    if candidate["objective_score"] is None:
+        return "crash"
+    if not candidate["feasible"]:
         return "discard"
 
-    return "keep"
+    target_profile = _resolve_cost_profile(config or {})
+    entries = _frontier_entries(frontier, target_profile.profile_id)
+    if not entries:
+        return "keep"
+
+    for entry in entries:
+        existing = _entry_to_metrics(entry)
+        if existing["objective_score"] is None:
+            continue
+        if is_objective_near_duplicate(
+            existing["objective_score"],
+            candidate["objective_score"],
+        ):
+            if _rank_tuple(candidate) < _rank_tuple(existing):
+                return "keep"
+            return "archive"
+
+    ranked_existing = sorted(
+        (_entry_to_metrics(entry) for entry in entries),
+        key=_rank_tuple,
+    )
+    if len(ranked_existing) < LEADERBOARD_LIMIT:
+        return "keep"
+
+    worst = ranked_existing[-1]
+    return "keep" if _rank_tuple(candidate) < _rank_tuple(worst) else "discard"
 
 
 def update_frontier(
@@ -144,26 +148,29 @@ def update_frontier(
     commit: str,
     round_id: int | str | None = None,
 ) -> None:
-    """If decision is 'keep', add to frontier and remove dominated points."""
+    """If decision is 'keep', update the retained objective leaderboard."""
     if decision != "keep":
         return
-    fvu = parsed.get("val_fvu")
-    if fvu is None:
+
+    metrics = _candidate_metrics(parsed, config)
+    if metrics["objective_score"] is None or not metrics["feasible"]:
         return
 
     k = parsed.get("k")
     ef = parsed.get("expansion_factor")
-    full_cost = _compute_candidate_cost_full(parsed, config)
-    sel_cost = float(full_cost["total_accesses"])
-    deploy_accesses = full_cost.get("deployment_accesses", 0)
-    combined = float(full_cost.get("combined_accesses", sel_cost + (deploy_accesses or 0)))
     target_profile = _resolve_cost_profile(config)
 
     key = frontier_key(round_id or "unknown")
     frontier[key] = {
-        "total_cost": combined,
-        "selection_cost": sel_cost,
-        "fvu": fvu,
+        "objective_score": metrics["objective_score"],
+        "total_cost": metrics["total_cost"],
+        "total_cost_ratio": metrics["total_cost_ratio"],
+        "selection_cost": metrics["selection_cost"],
+        "selection_cost_ratio": metrics["selection_cost_ratio"],
+        "deployment_accesses": metrics["deployment_accesses"],
+        "deployment_ratio": metrics["deployment_ratio"],
+        EXCEED_FIELD: metrics[EXCEED_FIELD],
+        "fvu": parsed.get("val_fvu"),
         "k": int(k) if k is not None else None,
         "ef": int(ef) if ef is not None else None,
         "architecture": parsed.get("architecture"),
@@ -171,159 +178,82 @@ def update_frontier(
         "config": config,
         "checkpoint": parsed.get("checkpoint"),
         "peak_memory_gb": parsed.get("peak_memory_gb"),
-        "deployment_accesses": deploy_accesses,
-        "deployment_ratio": full_cost.get("deployment_ratio"),
         "target_profile": target_profile.to_dict(),
         "cost_model_label": target_profile.cost_model_label,
         "metric_version": COST_METRIC_VERSION,
     }
 
-    # Remove points dominated by the new entry
-    new_pt = {"total_cost": combined, "fvu": fvu}
-    to_remove = [
-        fk
-        for fk, entry in frontier.items()
-        if fk != key
-        and isinstance(entry, dict)
-        and _entry_target_profile(entry).profile_id == target_profile.profile_id
-        and _pareto_dominates(new_pt, _entry_to_point(entry))
-    ]
-    for fk in to_remove:
-        del frontier[fk]
-
-
-# ---------------------------------------------------------------------------
-# Pareto helpers — 2D (total_cost, FVU)
-# ---------------------------------------------------------------------------
-
-
-def compute_pareto_frontier(frontier: dict[str, Any]) -> list[dict[str, Any]]:
-    """Compute the non-dominated 2D Pareto frontier."""
-    points = _frontier_points(frontier)
-    pareto: list[dict[str, Any]] = []
-    for candidate in points:
-        dominated = any(
-            _pareto_dominates(other, candidate) and other is not candidate
-            for other in points
-        )
-        if not dominated:
-            pareto.append(candidate)
-    pareto.sort(key=lambda x: x["total_cost"])
-    return pareto
+    compacted = compact_frontier(frontier)
+    frontier.clear()
+    frontier.update(compacted)
 
 
 def compact_frontier(frontier: dict[str, Any]) -> dict[str, Any]:
-    """Compact a stored frontier using the same semantics as live updates.
-
-    This removes:
-    - malformed entries that cannot be interpreted as (total_cost, fvu)
-    - near-duplicate archive-like points within current tolerance
-    - points dominated by earlier kept points
-
-    The surviving representative entry keeps its original stored metadata.
-    Entries are replayed in round-key order so the result matches live
-    controller behavior as closely as possible.
-    """
-    compacted: dict[str, Any] = {}
-    for key, entry in sorted(frontier.items(), key=lambda kv: _frontier_sort_key(kv[0])):
+    """Compact stored entries into a per-target top-k objective leaderboard."""
+    grouped: dict[str, list[tuple[str, dict[str, Any], dict[str, Any]]]] = {}
+    for key, entry in frontier.items():
         if not isinstance(entry, dict):
             continue
         try:
-            candidate = _entry_to_point(entry)
-            candidate_profile = _entry_target_profile(entry)
+            target_profile = _entry_target_profile(entry)
+            metrics = _entry_to_metrics(entry)
         except (TypeError, ValueError, KeyError, IndexError):
             continue
+        if metrics["objective_score"] is None or not metrics["feasible"]:
+            continue
+        grouped.setdefault(target_profile.profile_id, []).append((key, entry, metrics))
 
-        duplicate = False
-        kept_points: list[tuple[str, dict[str, Any]]] = []
-        for kept_key, kept_entry in compacted.items():
-            try:
-                if _entry_target_profile(kept_entry).profile_id != candidate_profile.profile_id:
-                    continue
-                kept_pt = _entry_to_point(kept_entry)
-            except (TypeError, ValueError, KeyError, IndexError):
+    compacted: dict[str, Any] = {}
+    for _profile_id, items in grouped.items():
+        items.sort(key=lambda item: (_rank_tuple(item[2]), _frontier_sort_key(item[0])))
+        kept_metrics: list[dict[str, Any]] = []
+        kept_count = 0
+        for key, entry, metrics in items:
+            if any(
+                is_objective_near_duplicate(
+                    kept["objective_score"],
+                    metrics["objective_score"],
+                )
+                for kept in kept_metrics
+            ):
                 continue
-            kept_points.append((kept_key, kept_pt))
-            cost_close = (
-                abs(kept_pt["total_cost"] - candidate["total_cost"])
-                / max(candidate["total_cost"], 1)
-                <= COST_REL_TOL
-            )
-            fvu_close = abs(kept_pt["fvu"] - candidate["fvu"]) <= FVU_TOL
-            if cost_close and fvu_close:
-                if candidate["fvu"] < kept_pt["fvu"] - FVU_TOL:
-                    break
-                duplicate = True
+            compacted[key] = dict(entry)
+            kept_metrics.append(metrics)
+            kept_count += 1
+            if kept_count >= LEADERBOARD_LIMIT:
                 break
-        if duplicate:
-            continue
-
-        if any(_pareto_dominates(kept_pt, candidate) for _, kept_pt in kept_points):
-            continue
-
-        compacted[key] = dict(entry)
-        to_remove = [
-            kept_key
-            for kept_key, kept_pt in kept_points
-            if _pareto_dominates(candidate, kept_pt)
-        ]
-        for kept_key in to_remove:
-            compacted.pop(kept_key, None)
-
     return compacted
 
 
-def _frontier_points(
+def _frontier_entries(
     frontier: dict[str, Any],
     target_profile_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract {total_cost, fvu} from all frontier entries."""
-    points: list[dict[str, Any]] = []
-    for _key, entry in frontier.items():
+    entries: list[dict[str, Any]] = []
+    for entry in frontier.values():
         if not isinstance(entry, dict):
             continue
         if target_profile_id is not None and _entry_target_profile(entry).profile_id != target_profile_id:
             continue
-        try:
-            points.append(_entry_to_point(entry))
-        except (TypeError, ValueError, KeyError, IndexError):
-            continue
-    return points
+        entries.append(entry)
+    return entries
 
 
-def _entry_to_point(entry: dict[str, Any]) -> dict[str, Any]:
-    """Convert a frontier entry to a {total_cost, fvu} point."""
-    fvu = float(entry["fvu"])
-    # Prefer stored total_cost only when it matches the current cost schema.
-    tc = entry.get("total_cost")
-    if cost_entry_is_current(entry) and tc is not None:
-        return {"total_cost": float(tc), "fvu": fvu}
-    # Backward compat: selection_cost + deployment_accesses from current schema.
-    sel_cost = entry.get("selection_cost")
-    deploy = entry.get("deployment_accesses", 0) or 0
-    if cost_entry_is_current(entry) and sel_cost is not None:
-        return {"total_cost": float(sel_cost) + float(deploy), "fvu": fvu}
-    # Last resort: recompute
-    return {"total_cost": _estimate_total_cost_from_entry(entry), "fvu": fvu}
+def _entry_to_metrics(entry: dict[str, Any]) -> dict[str, Any]:
+    """Convert a stored entry to normalized objective metrics."""
+    return entry_objective_metrics(entry)
 
 
-def _pareto_dominates(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """Return True if point a dominates point b in 2D (total_cost, FVU).
-
-    a dominates b if a is at least as good in both dimensions and strictly
-    better in at least one.
-    """
-    cost_ok = a["total_cost"] <= b["total_cost"]
-    fvu_ok = a["fvu"] <= b["fvu"] + FVU_TOL
-    strictly_better = (
-        (a["total_cost"] < b["total_cost"])
-        or (a["fvu"] < b["fvu"] - FVU_TOL)
+def _rank_tuple(metrics: dict[str, Any]) -> tuple[float, float, float, float]:
+    return objective_rank_tuple(
+        metrics.get("objective_score"),
+        metrics.get("total_cost_ratio"),
+        metrics.get(EXCEED_FIELD),
+        metrics.get("fvu"),
     )
-    return cost_ok and fvu_ok and strictly_better
 
 
 def _frontier_sort_key(key: str) -> tuple[int, int, str]:
-    """Sort round-based keys chronologically, then keep legacy keys last."""
     if key.startswith("r") and key[1:].isdigit():
         return (0, int(key[1:]), key)
     m = re.search(r"(\d+)$", key)
@@ -333,7 +263,7 @@ def _frontier_sort_key(key: str) -> tuple[int, int, str]:
 
 
 # ---------------------------------------------------------------------------
-# Cost computation helpers
+# Cost / objective computation helpers
 # ---------------------------------------------------------------------------
 
 
@@ -341,14 +271,14 @@ def _compute_candidate_cost_full(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Compute full cost dict (encoder + deployment + combined) for a candidate."""
+    """Compute full cost dict (selection + deployment + combined) for a candidate."""
     cfg = config or {}
     arch = parsed.get("architecture") or cfg.get("architecture", "topk")
     k = int(parsed.get("k") or cfg.get("k") or 128)
     ef = int(parsed.get("expansion_factor") or cfg.get("expansion_factor") or 12)
     target_profile = _resolve_cost_profile(cfg)
 
-    extra_config = _extract_extra_config(cfg)
+    extra_config = extract_cost_extra_config(cfg)
     cost = compute_selection_cost(
         arch,
         k=k,
@@ -360,82 +290,37 @@ def _compute_candidate_cost_full(
     if "error" not in cost:
         return cost
 
-    # Fallback: rough estimate (encoder-only, no deployment info)
     fallback = float(target_profile.d_in * target_profile.d_in * ef)
     return {"total_accesses": fallback, "combined_accesses": fallback, "error": "fallback"}
 
 
-def _compute_candidate_total_cost(
+def _candidate_metrics(
     parsed: dict[str, Any],
     config: dict[str, Any] | None = None,
-) -> float:
-    """Compute total_cost (encoder + deployment) for a candidate result."""
-    cost = _compute_candidate_cost_full(parsed, config)
-    if "combined_accesses" in cost:
-        return float(cost["combined_accesses"])
-    # Fallback: encoder + deployment if available
-    sel = float(cost.get("total_accesses", 0))
-    deploy = float(cost.get("deployment_accesses", 0) or 0)
-    return sel + deploy
-
-
-def _extract_extra_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Extract architecture-specific params from config for cost estimation."""
-    extra: dict[str, Any] = {}
-    for env_key, cfg_key in [
-        ("trunk_rank", "trunk_rank"),
-        ("num_codes", "num_codes"),
-        ("stage1_ratio", "stage1_ratio"),
-        ("factorized_hidden_dim", "factorized_hidden_dim"),
-        ("num_experts", "num_experts"),
-        ("active_experts", "active_experts"),
-        ("latents_per_expert", "latents_per_expert"),
-        ("TRUNK_RANK", "trunk_rank"),
-        ("NUM_CODES", "num_codes"),
-        ("STAGE1_RATIO", "stage1_ratio"),
-        ("FACTORIZED_HIDDEN_DIM", "factorized_hidden_dim"),
-        ("NUM_EXPERTS", "num_experts"),
-        ("ACTIVE_EXPERTS", "active_experts"),
-        ("LATENTS_PER_EXPERT", "latents_per_expert"),
-    ]:
-        val = config.get(env_key)
-        if val is not None and val != "":
-            try:
-                extra[cfg_key] = float(val) if "." in str(val) else int(val)
-            except (ValueError, TypeError):
-                pass
-    return extra
+) -> dict[str, Any]:
+    cfg = config or {}
+    target_profile = _resolve_cost_profile(cfg)
+    arch = parsed.get("architecture") or cfg.get("architecture", "topk")
+    k = int(parsed.get("k") or cfg.get("k") or 128)
+    ef = int(parsed.get("expansion_factor") or cfg.get("expansion_factor") or 12)
+    return candidate_objective_metrics(
+        str(arch).lower(),
+        k,
+        ef,
+        target_profile,
+        extra_config=extract_cost_extra_config(cfg),
+        exceed_alpha_0_50=parsed.get(EXCEED_FIELD),
+        fvu=parsed.get("val_fvu"),
+    )
 
 
 def _estimate_total_cost_from_entry(entry: dict[str, Any]) -> float:
-    """Estimate total_cost (encoder + deployment) from a frontier entry."""
-    cfg = entry.get("config", {})
-    arch = str(
-        entry.get("architecture")
-        or cfg.get("architecture")
-        or cfg.get("family_name")
-        or "topk"
-    ).lower()
-    k = int(entry.get("k") or cfg.get("k") or 128)
-    ef = int(entry.get("ef") or cfg.get("expansion_factor") or 12)
+    """Estimate total_cost (selection + deployment) from an entry."""
+    metrics = entry_objective_metrics(entry)
+    if metrics["total_cost"] is not None:
+        return float(metrics["total_cost"])
     target_profile = _entry_target_profile(entry)
-
-    extra_config = _extract_extra_config(cfg)
-    cost = compute_selection_cost(
-        arch,
-        k=k,
-        ef=ef,
-        d_in=target_profile.d_in,
-        n_output=target_profile.n_output,
-        extra_config=extra_config or None,
-    )
-    if "error" not in cost:
-        if "combined_accesses" in cost:
-            return float(cost["combined_accesses"])
-        sel = float(cost.get("total_accesses", 0))
-        deploy = float(cost.get("deployment_accesses", 0) or 0)
-        return sel + deploy
-
+    ef = int(entry.get("ef") or entry.get("config", {}).get("expansion_factor") or 12)
     return float(target_profile.d_in * target_profile.d_in * ef)
 
 

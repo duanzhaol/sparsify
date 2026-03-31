@@ -14,12 +14,13 @@ import re
 from typing import Any
 
 from .compatibility import is_compatible_label
+from .objective import EXCEED_FIELD, entry_objective_metrics, objective_rank_tuple
 from .override_registry import (
     allowed_override_keys_for_architecture,
     config_from_overrides,
     env_config_from_runtime_config,
 )
-from .target_profile import budget_accesses, default_target_profile, profile_matches
+from .target_profile import default_target_profile, profile_matches
 from .types import Action, BASE_ENV_DEFAULTS
 
 
@@ -295,14 +296,18 @@ def best_frontier_entry(
     current_profile = default_target_profile()
 
     def _pick_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-        best, best_fvu = None, float("inf")
+        best = None
+        best_rank = (float("inf"), float("inf"), float("inf"), float("inf"))
         for entry in entries:
-            try:
-                fvu = float(entry.get("fvu", float("inf")))
-            except (TypeError, ValueError):
-                continue
-            if fvu < best_fvu:
-                best_fvu = fvu
+            metrics = entry_objective_metrics(entry)
+            rank = objective_rank_tuple(
+                metrics["objective_score"],
+                metrics["total_cost_ratio"],
+                metrics[EXCEED_FIELD],
+                metrics["fvu"],
+            )
+            if rank < best_rank:
+                best_rank = rank
                 best = entry
         return best
 
@@ -328,37 +333,12 @@ def best_frontier_entry(
         if not profile_matches(entry_cfg, current_profile):
             continue
         all_candidates.append(entry)
-        if prefer_feasible:
-            total_cost = entry.get("total_cost")
-            if total_cost is None:
-                sel = entry.get("selection_cost")
-                deploy = entry.get("deployment_accesses", 0) or 0
-                total_cost = float(sel) + float(deploy) if sel is not None else None
-            if total_cost is not None and float(total_cost) <= budget_accesses(entry_cfg):
-                feasible.append(entry)
+        if prefer_feasible and entry_objective_metrics(entry)["feasible"]:
+            feasible.append(entry)
 
     if prefer_feasible and feasible:
         return _pick_best(feasible)
     return _pick_best(all_candidates)
-
-
-def latest_active_family_name(
-    families: dict[str, Any],
-    registry: dict[str, str] | None = None,
-) -> str | None:
-    best_name: str | None = None
-    best_round = -1
-    for name, family in families.items():
-        if registry is not None and not is_compatible_label(registry.get(str(name).lower())):
-            continue
-        if family.get("status") != "active":
-            continue
-        last_round = int(family.get("last_round") or -1)
-        if last_round > best_round:
-            best_round = last_round
-            best_name = name
-    return best_name
-
 
 def resolve_mainline_snapshot(state: Any) -> dict[str, Any]:
     registry = state.load_compatibility_registry()

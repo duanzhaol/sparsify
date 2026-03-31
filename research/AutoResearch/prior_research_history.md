@@ -1,33 +1,36 @@
-# Prior Research History: Target-Restart Brief
+# Prior Research History: Objective-Restart Brief
 
 ## 1. 文档用途
 
-这份文档的作用不是给出“当前最优主线”，而是给 Agent 一份更低偏置的背景说明。
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
 
-应当这样使用它：
+应这样使用它：
 
 - 把它当成兼容性约束、工程不变量、和未决问题清单
-- 不要把旧位置、旧轮次、旧 frontier 的 family 排名当成当前 target 的默认真理
-- 不要把这里出现的候选方向理解成固定 opening order
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
 - 当前 target 上的结论，必须依赖当前 target 自己的新结果
 
 当前固定事实：
 
 - 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
 - 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
-- 训练代理目标是维护 `(total_cost, FVU)` 的 2D Pareto frontier
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
 
-## 1.1 当前 target 的弱先验更新
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
 
-下面这些只算当前 target 的弱先验，不是结论：
+## 1.1 当前 target 的阅读方式
 
-- 当前主战场应放在 `<0.25x total_cost` 区域；`0.25x-0.35x` 只作辅助对照，`>0.4x` 只保留少量质量锚点
-- 当前 `<0.25x` 区域最强兼容前沿主要由 `shared_routed_expert_topk` 构成；它现在更适合作为 matched low-cost baseline / cost anchor，而不是默认继续细扫的主线
-- 目前这条 baseline 上的 `K≈108-112` 与 `LATENTS_PER_EXPERT≈160` 已经提供了足够局部证据；继续在线性 `K/LATENTS` 轴上补点的信息增量很小
-- `expert_topk` 仍有极低成本 anchor 价值，但在 `<0.25x` 的质量明显弱于当前 shared+routed 主线
-- `lowrank_expert_residual` 在 `0.49x-0.54x` 一带给出了当前更强的质量锚点，但这不意味着后续应让中成本结构继续主导搜索预算
+下面这些是当前 target 的阅读方式，不是结论：
 
-一句话：当前 target 上，优先问题不是“哪个中成本结构最好”，也不是“`K=110` 和 `K=111` 谁更好”，而是“谁能在 `<0.25x` 区域用新的结构槽位打败现有 low-cost anchors”。
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
 
 ## 2. LUTurbo/Lottable 兼容性约束
 
@@ -42,7 +45,8 @@
 - `selection_cost`: encoder 端为选出在线原子所需的访存
 - `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
 - `total_cost = selection_cost + deployment_cost`
-- 当前成本 proxy 以 fused QKV 原始矩阵 `1024 x 4096` 为分母
+- `total_cost_ratio = total_cost / (1024 x 4096)`
+- `objective_score = total_cost_ratio + exceed_alpha_0.50`
 - 成本硬约束：`total_cost <= 1.5 x (1024 x 4096)`
 
 兼容性注册表：
@@ -102,7 +106,8 @@
 - 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
 - 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
 - invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
-- total_cost 必须拆成 encoder 与 deployment 两部分看
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
 - compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
 
 ## 4. 不可信的旧结论
@@ -110,9 +115,10 @@
 下面这些都不应直接继承到当前 target：
 
 - 旧位置上的 family 排名
-- 旧位置上的最优 frontier 点
+- 旧位置上的最优点或历史“objective 分布形状”
 - “复杂 backbone 一定优于简单结构”这类总括判断
 - “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
 - 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
 - 某个 family 在旧位置失败，就默认它在新位置也失败
 - 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
@@ -124,51 +130,51 @@
 
 这些问题都还没有在当前 target 上被证明：
 
-- 简单结构和复杂结构，谁在当前位置的低成本区更优
-- low-rank trunk 是否能显著降低当前 target 的所需 K
-- factorized scorer 在当前位置是收益还是约束
-- codebook / VQ / staged residual 的额外结构是否值得其部署开销
-- whitening / preprocessing 在当前位置是稳定增益还是副作用
-- loss/preprocess 切换是否会比结构切换更重要
-- MoE-like / multi-branch / routed 子库方案是否能在保持导出约束的前提下带来新 Pareto 点
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
 
 Agent 应把这些当成未决问题，而不是已有答案。
 
 ## 6. 当前高优先级方向
 
-当前优先级最高的方向不是泛泛的“结构扩展”，而是明确围绕 `<0.25x` 主战场补点：
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
 
-- 新的 matched-cost architecture probe，而不是继续沿同一 family 做线性插值
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
 - `shared bottleneck + expert-specific head`
 - expert 内部 low-rank
-- 更轻的 shared scorer / router
-- hetero/shared experts 与 active path 更短的 sparse MoE-like 结构
-- 只有在仍能保持 low-cost 带的前提下，才考虑 very-light residual / factorized 变体
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
 
 这些方向优先级高，不是因为它们已经被证明最好，而是因为：
 
-- 当前 `<0.25x` 前沿已经有可用点，但质量仍明显不够好
-- 这一区间目前的 baseline 已基本摸清局部 knee，继续在线性 `K/LATENTS` 轴上细扫的信息增量已经明显下降
-- 很多会自然把成本抬到 `>0.35x` 的结构，即使质量更高，也不直接回答当前主问题
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
 
-如果要实现新的 low-cost 原型，应优先满足：
+如果要实现新的原型，应优先满足：
 
 - `ACTIVE_EXPERTS` 很小，例如 1 或 2
 - router 足够轻，不要把省下来的选择成本重新吃掉
 - 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
-- shared 分支若存在，不能自然把 total_cost 抬出 low-cost 带
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
 - 最终形式仍能写成若干静态子库上的有限加权和
-
-一句话：当前优先级最高的是“更轻的 low-cost MoE-like 结构”，不是一般性的中成本结构扩展。
 
 ## 7. 当前默认做法
 
 如果当前 target 还没有足够本地证据，默认做法应当是：
 
-- 先建立当前 target 自己的可解释 baseline 和 cost anchors
-- 再根据当前 target 的 frontier 形状决定下一步往哪里扩
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
 - 优先选择归因清晰、接线风险低、能补充新信息的实验
-- 当 `<0.25x` 区域已经有 anchor 后，默认应优先继续改善这一区域，而不是把主要预算转回 `0.5x` 左右的结构打磨
-- 但当最近 2-3 轮都属于同一 family、同一 low-cost 成本带、且只是 `K` 或 `LATENTS_PER_EXPERT` 微调，同时没有形成新的 frontier 扩展时，下一轮应优先换结构槽位，而不是继续补局部插值点
-- 如果 low-cost family 持续不能给出满意结果，应优先尝试新的轻量 routed / shared+routed / low-rank expert 变体，而不是直接跳回更重的 trunk/residual 结构
+- 如果最近 2-3 轮都属于同一 family 且只是局部参数插值，同时 objective 没有扩展，则下一轮应优先换结构槽位
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
 - 不要让旧位置的主线故事替代当前 target 的新证据

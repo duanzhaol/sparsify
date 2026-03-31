@@ -5,16 +5,16 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from typing import Any, Iterable
+from typing import Any
 
 from .git_ops import REPO_ROOT
-from .target_profile import budget_accesses, default_target_profile, profile_matches, resolve_target_profile
+from .target_profile import default_target_profile
 
 DIRECT_COMPATIBLE = "direct_compatible"
 EXTENDED_COMPATIBLE = "extended_compatible"
 INCOMPATIBLE = "incompatible"
 UNKNOWN_COMPATIBILITY = "unknown"
-COST_METRIC_VERSION = "total_cost_v2"
+COST_METRIC_VERSION = "objective_v1"
 
 _LABEL_MAP = {
     "直接兼容": DIRECT_COMPATIBLE,
@@ -124,7 +124,7 @@ def compatibility_hard_rules() -> str:
         "1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。",
         "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
         "3. 明确标记为不兼容的 family，不得继续占据 frontier，也不得继续作为主线推进。",
-        "4. 当前 frontier 只代表兼容 family 的最优点；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        "4. 当前 frontier 只代表兼容 family 的 objective leaderboard；不兼容 family 只能作为历史参考，不能驱动后续决策。",
         f"当前 target：训练 hookpoint 为 {profile.training_hookpoint}。",
         f"成本 proxy：{profile.cost_model_label}。",
         "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
@@ -132,6 +132,7 @@ def compatibility_hard_rules() -> str:
         "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
         "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。",
         "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
+        "6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。",
     ])
 
 
@@ -264,115 +265,9 @@ def compute_selection_cost_table(
     return results
 
 
-def frontier_has_feasible_entry(
-    frontier: dict[str, Any],
-    registry: dict[str, str],
-    d_in: int | None = None,
-    n_output: int | None = None,
-) -> bool:
-    """Check if frontier has at least one feasible entry within total cost budget.
-
-    Feasible means: total_cost / original_matmul_accesses <= 1.5
-    where total_cost = encoder selection cost + deployment lookup cost.
-    """
-    for entry in frontier.values():
-        if not isinstance(entry, dict):
-            continue
-        cfg = dict(entry.get("config", {}) or {})
-        if entry.get("target_profile") is not None and "target_profile" not in cfg:
-            cfg["target_profile"] = entry["target_profile"]
-        if d_in is None and not profile_matches(cfg, default_target_profile()):
-            continue
-        family_name = str(
-            cfg.get("family_name") or entry.get("architecture") or ""
-        ).lower()
-        if not is_compatible_label(registry.get(family_name)):
-            continue
-        if d_in is not None:
-            entry_budget = 1.5 * d_in * (n_output if n_output is not None else 4 * d_in)
-            cost_d_in = d_in
-            cost_n_output = n_output if n_output is not None else 4 * d_in
-        else:
-            entry_budget = budget_accesses(cfg)
-            profile = resolve_target_profile(cfg)
-            cost_d_in = profile.d_in
-            cost_n_output = profile.n_output
-
-        # Prefer stored total_cost only when the cost schema is current.
-        tc = entry.get("total_cost")
-        if cost_entry_is_current(entry) and tc is not None:
-            if float(tc) <= entry_budget:
-                return True
-            continue
-        sel_cost = entry.get("selection_cost")
-        deploy = entry.get("deployment_accesses", 0) or 0
-        if cost_entry_is_current(entry) and sel_cost is not None:
-            if float(sel_cost) + float(deploy) <= entry_budget:
-                return True
-            continue
-        # No stored cost — compute from entry fields
-        cost = compute_selection_cost(
-            str(entry.get("architecture") or cfg.get("architecture") or "topk"),
-            k=int(entry.get("k") or cfg.get("k") or 128),
-            ef=int(entry.get("ef") or cfg.get("expansion_factor") or 12),
-            d_in=cost_d_in,
-            n_output=cost_n_output,
-            extra_config=extract_cost_extra_config(cfg) or None,
-        )
-        if "error" not in cost and cost.get("combined_feasible", False):
-            return True
-
-    return False
-
-
-def format_cost_summary(cost: dict[str, Any]) -> str:
-    """Format a cost dict as a compact one-liner."""
-    if "error" in cost:
-        return f"cost=error({cost['error']})"
-    ratio = cost.get("ratio", "?")
-    budget = cost.get("budget_ratio", "?")
-    feasible = "feasible" if cost.get("feasible") else "infeasible"
-    return f"cost={ratio}x baseline (budget={budget}x, {feasible})"
-
-
 def extract_full_prior_document(prior_text: str) -> str:
     """Return the full prior document for fresh-session prompts."""
     return prior_text.strip()
-
-
-def extract_compatibility_digest(prior_text: str) -> str:
-    """Extract the compact compatibility-focused sections for proposal prompts."""
-    if not prior_text:
-        return ""
-
-    keep_headers = (
-        "## 2. LUTurbo/Lottable 兼容性约束",
-        "## 10.4 把“兼容性”写进 prompt，而不是靠事后人工筛选",
-    )
-    lines = prior_text.splitlines()
-    extracted: list[str] = []
-    capture = False
-    for line in lines:
-        if any(line.startswith(header) for header in keep_headers):
-            capture = True
-        elif capture and line.startswith("## "):
-            capture = False
-
-        if capture:
-            extracted.append(line)
-
-    return "\n".join(extracted).strip()
-
-
-def filter_compatible_family_names(
-    family_names: Iterable[str],
-    registry: dict[str, str],
-) -> list[str]:
-    return [
-        str(name).lower()
-        for name in family_names
-        if is_compatible_label(registry.get(str(name).lower()))
-    ]
 
 
 def _normalize_family_name(raw: str) -> str:

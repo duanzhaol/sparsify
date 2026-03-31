@@ -13,11 +13,18 @@ from typing import Any
 
 from .git_ops import REPO_ROOT
 from .config_resolution import resolve_action_configs
+from .objective import (
+    EXCEED_FIELD,
+    compute_objective_score,
+    extract_step_exceed_alpha_0_50,
+    extract_step_fvu,
+    read_step_records,
+)
 from .override_registry import (
     env_config_from_runtime_config,
     validate_env_overrides,
 )
-from .controller import decide, parse_log, update_frontier
+from .controller import _compute_candidate_cost_full, decide, parse_log, update_frontier
 from .target_profile import resolve_target_profile
 from .types import (
     Action,
@@ -221,8 +228,12 @@ def run_training(
 
     # Finalize
     checkpoint_dir = _latest_checkpoint_dir(save_dir, run_name)
-    curve_metrics = _summarize_curve(step_records)
-    observed_fvu = _extract_step_fvu(last_step_record)
+    curve_metrics = _summarize_curve(step_records, config_json.get("hookpoints"))
+    observed_fvu = _extract_step_fvu(last_step_record, config_json.get("hookpoints"))
+    final_exceed_alpha_0_50 = extract_step_exceed_alpha_0_50(
+        last_step_record,
+        config_json.get("hookpoints"),
+    )
 
     from .git_ops import current_git_commit
     commit = current_git_commit()
@@ -241,9 +252,20 @@ def run_training(
         parsed["val_fvu"] = observed_fvu
         if parsed.get("status") in (None, "crash"):
             parsed["status"] = "ok"
+    parsed[EXCEED_FIELD] = final_exceed_alpha_0_50
+
+    cost = _compute_candidate_cost_full(parsed, config_json)
+    original_accesses = float(config_json.get("original_matmul_accesses") or 0)
+    selection_cost = float(cost.get("total_accesses", 0) or 0)
+    deployment_accesses = float(cost.get("deployment_accesses", 0) or 0)
+    total_cost = float(cost.get("combined_accesses", selection_cost + deployment_accesses) or 0)
+    selection_cost_ratio = selection_cost / original_accesses if original_accesses > 0 else None
+    deployment_ratio = deployment_accesses / original_accesses if original_accesses > 0 else None
+    total_cost_ratio = total_cost / original_accesses if original_accesses > 0 else None
+    objective_score = compute_objective_score(total_cost_ratio, final_exceed_alpha_0_50)
 
     config_mismatch = _validate_checkpoint_config(checkpoint_dir, config_json)
-    if config_mismatch is None:
+    if config_mismatch is None and final_exceed_alpha_0_50 is not None:
         decision = decide(state.frontier, parsed, config=config_json)
         update_frontier(state.frontier, parsed, decision, config_json, commit, round_id=round_id)
     else:
@@ -256,6 +278,9 @@ def run_training(
     if config_mismatch is not None:
         run_health = "crash"
         termination_reason = "config_mismatch"
+    elif final_exceed_alpha_0_50 is None:
+        run_health = "crash"
+        termination_reason = "missing_objective_metric"
     elif termination_reason == "throughput_too_low":
         run_health = "perf_regression"
     elif termination_reason != "completed" or decision == "crash":
@@ -267,6 +292,14 @@ def run_training(
         status=parsed.get("status", ""),
         timestamp=str(int(time.time())),
         val_fvu=str(parsed["val_fvu"]) if parsed.get("val_fvu") is not None else None,
+        exceed_alpha_0_50=_fmt(final_exceed_alpha_0_50),
+        objective_score=_fmt(objective_score),
+        total_cost=_fmt(total_cost),
+        total_cost_ratio=_fmt(total_cost_ratio),
+        selection_cost=_fmt(selection_cost),
+        selection_cost_ratio=_fmt(selection_cost_ratio),
+        deployment_accesses=_fmt(deployment_accesses),
+        deployment_ratio=_fmt(deployment_ratio),
         observed_fvu=f"{observed_fvu:.6f}" if observed_fvu is not None else None,
         k=str(parsed["k"]) if parsed.get("k") is not None else None,
         architecture=parsed.get("architecture"),
@@ -320,6 +353,14 @@ def run_training(
             result.description = (
                 f"{action.summary} [INVALID: requested structural parameter did not reach runtime]"
             )
+        elif final_exceed_alpha_0_50 is None:
+            result.error_type = "missing_objective_metric"
+            result.error_summary = (
+                f"missing {EXCEED_FIELD} in final metrics; round cannot enter objective leaderboard"
+            )
+            result.traceback_excerpt = None
+            result.log_excerpt = result.error_summary
+            result.description = f"{action.summary} [MISSING OBJECTIVE METRIC]"
         else:
             details = extract_failure_details(log_path)
             result.error_type = details.get("error_type")
@@ -710,35 +751,27 @@ def _read_step_records(checkpoint_dir: Path | None) -> list[dict[str, Any]]:
     if checkpoint_dir is None:
         return []
     metrics = checkpoint_dir / "metrics.jsonl"
-    if not metrics.exists():
-        return []
-    records = []
-    with open(metrics) as f:
-        for line in f:
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("type") == "step":
-                records.append(rec)
-    return records
+    return read_step_records(metrics)
 
 
-def _extract_step_fvu(step_record: dict[str, Any] | None) -> float | None:
-    if not step_record:
-        return None
-    vals = [v for k, v in step_record.items() if k.endswith("/fvu") and isinstance(v, (int, float))]
-    return sum(vals) / len(vals) if vals else None
+def _extract_step_fvu(
+    step_record: dict[str, Any] | None,
+    hookpoint: str | None = None,
+) -> float | None:
+    return extract_step_fvu(step_record, hookpoint=hookpoint)
 
 
-def _summarize_curve(step_records: list[dict[str, Any]]) -> dict[str, Any]:
+def _summarize_curve(
+    step_records: list[dict[str, Any]],
+    hookpoint: str | None = None,
+) -> dict[str, Any]:
     if not step_records:
         return {k: None for k in ("curve_start_fvu", "curve_mid_fvu", "curve_end_fvu", "curve_late_slope", "curve_still_improving")}
     n = len(step_records)
-    start_fvu = _extract_step_fvu(step_records[max(0, n // 5 - 1)])
-    mid_fvu = _extract_step_fvu(step_records[max(0, n // 2 - 1)])
-    end_fvu = _extract_step_fvu(step_records[-1])
-    tail_fvu = _extract_step_fvu(step_records[max(0, int(n * 0.8) - 1)])
+    start_fvu = _extract_step_fvu(step_records[max(0, n // 5 - 1)], hookpoint)
+    mid_fvu = _extract_step_fvu(step_records[max(0, n // 2 - 1)], hookpoint)
+    end_fvu = _extract_step_fvu(step_records[-1], hookpoint)
+    tail_fvu = _extract_step_fvu(step_records[max(0, int(n * 0.8) - 1)], hookpoint)
     late_slope = None
     still_improving = None
     tail_start = step_records[max(0, int(n * 0.8) - 1)]

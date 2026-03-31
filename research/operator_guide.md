@@ -63,7 +63,7 @@
 
 - `expert_topk / MoE-like` 是否能在保持部署可导出的前提下形成新的低成本前沿段
 - `lowrank + expert` 是否能把平滑主干与局部子库分开处理，从而改善同成本下的 FVU
-- `lowrank + expert + residual` 或 `two-stage residual expert` 是否能在中等成本带带来新的 Pareto 段
+- `lowrank + expert + residual` 或 `two-stage residual expert` 是否能在中等成本带带来新的 objective 改善区间
 
 因此：
 
