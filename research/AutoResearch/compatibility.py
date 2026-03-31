@@ -14,7 +14,7 @@ DIRECT_COMPATIBLE = "direct_compatible"
 EXTENDED_COMPATIBLE = "extended_compatible"
 INCOMPATIBLE = "incompatible"
 UNKNOWN_COMPATIBILITY = "unknown"
-COST_METRIC_VERSION = "objective_v1"
+COST_METRIC_VERSION = "objective_v2_full_deploy"
 
 _LABEL_MAP = {
     "直接兼容": DIRECT_COMPATIBLE,
@@ -130,7 +130,7 @@ def compatibility_hard_rules() -> str:
         "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
         "   超过此阈值的配置将被 policy 拦截。",
         "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
-        "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES。",
+        "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。",
         "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
         "6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。",
     ])

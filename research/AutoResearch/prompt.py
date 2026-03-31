@@ -64,7 +64,7 @@ PROXY_OBJECTIVE = """\
 - 旧位置、旧轮次、旧 family 排名都只算弱先验；在新 target 上必须重新验证
 - K, EF, TRUNK_RANK, NUM_CODES 等参数均可自由调整，目标是更低的 objective_score
 - encoder 选择成本由 EF 主导，降低主要靠降低 EXPANSION_FACTOR
-- 部署查表成本由 K、trunk_rank、NUM_CODES 主导，K 增大会增加 K×n 查表访存
+- 部署成本由 K、trunk_rank、NUM_CODES 主导；每个静态库条目同时计入输入侧原子/value 访问与输出侧查表结果，因此 sparse 路径近似按 `K × (d_in + n_output)` 增长
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
 - 在比较两个候选时，优先问清楚：它是在降 cost，还是在降 exceed，还是两者都没有实质改善
 - 局部参数微调只是辅助校准手段，不应连续多轮主导预算；若最近几轮都只是同一 family 上的小参数插值且 objective 没有扩展，应优先换结构槽位
@@ -447,7 +447,7 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
     for row in rows:
         parts.append(f"  {row}")
     parts.append("  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。")
-    parts.append("  部署查表成本 K×n 额外贡献约：K=32 +3%，K=64 +6%，K=128 +12%。")
+    parts.append("  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。")
     parts.append("  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。")
     parts.append("  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。")
 

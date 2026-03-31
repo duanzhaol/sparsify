@@ -43,7 +43,7 @@
 当前 run 的成本定义：
 
 - `selection_cost`: encoder 端为选出在线原子所需的访存
-- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存
+- `deployment_cost`: trunk / sparse lookup / codebook lookup 等部署端访存；对每个静态库条目，同时计入输入侧原子/value 读取与输出侧查表结果
 - `total_cost = selection_cost + deployment_cost`
 - `total_cost_ratio = total_cost / (1024 x 4096)`
 - `objective_score = total_cost_ratio + exceed_alpha_0.50`

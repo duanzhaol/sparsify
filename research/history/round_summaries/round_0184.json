@@ -16,7 +16,7 @@
   "experiment_branch": "autoresearch-sae-l10-qproj",
   "action": {
     "command": "run",
-    "hypothesis": "候选 family 设为 `factorized_expert_topk`。最终重构公式为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维投影，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 有限加权求和”的 LUTurbo/Lottable 推理链路，静态库不随样本动态生成，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍是 `不兼容`，只能作历史参考，不能驱动当前 frontier。r183 的新 family `shared_two_stage_residual_expert` 在约 `0.24x` 下仅做到 `FVU=0.1411`，说明“shared coarse trunk + routed residual cleanup”这条 two-stage 变体没有打败现有 low-cost anchor；因此下一步更高信息量的问题不是继续在 shared/coarse 线上补参数，而是转向当前高优先级但尚未在这条 exact low-cost recipe 上 fresh 验证的“expert 内部 low-rank / small head”槽位。相对 r176 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=108`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“把 routed-only expert 的 full-dim 局部 scorer 换成 shared bottleneck + expert-specific small head，能否在更低总成本下修复 r176 的质量缺口”。本地成本自检显示该候选在当前 1024x4096 proxy 下 selection_accesses=360448、deployment_accesses=442368、combined_accesses=802816，对应 combined_ratio 约 `0.19x`，明确落在当前 `<0.25x` 主战场内，也显著低于 1.5×h×n 硬约束。",
+    "hypothesis": "候选 family 设为 `factorized_expert_topk`。最终重构公式为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维投影，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 有限加权求和”的 LUTurbo/Lottable 推理链路，静态库不随样本动态生成，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍是 `不兼容`，只能作历史参考，不能驱动当前 frontier。r183 的新 family `shared_two_stage_residual_expert` 在约 `0.24x` 下仅做到 `FVU=0.1411`，说明“shared coarse trunk + routed residual cleanup”这条 two-stage 变体没有打败现有 low-cost anchor；因此下一步更高信息量的问题不是继续在 shared/coarse 线上补参数，而是转向当前高优先级但尚未在这条 exact low-cost recipe 上 fresh 验证的“expert 内部 low-rank / small head”槽位。相对 r176 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=108`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“把 routed-only expert 的 full-dim 局部 scorer 换成 shared bottleneck + expert-specific small head，能否在更低总成本下修复 r176 的质量缺口”。，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。",
     "summary": "以 r176 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`，做一轮新的 `<0.25x` low-cost architecture probe。目标是在约 `0.19x` 总成本下直接判断：把 routed-only `expert_topk` 换成“shared bottleneck + expert-specific small head”的 expert-internal low-rank 变体，是否能比 r176 更接近当前 `shared_routed_expert_topk` low-cost anchors。",
     "change_type": "param_only",
     "expected_win": "explore_unknown",
@@ -34,7 +34,7 @@
     "notes_to_memory": [
       "`factorized_expert_topk` 的 LUTurbo 导出形式仍是静态 expert 子库上的有限加权和，应按 `扩展兼容` 处理。",
       "这轮是 architecture-level low-cost probe：相对 r176 只改 `ARCHITECTURE`，直接隔离“expert 内部 low-rank / small head”是否能修复 routed-only `expert_topk` 的质量缺口。",
-      "本地成本自检：在 `K=108, EF=1, NUM_EXPERTS=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160, FACTORIZED_HIDDEN_DIM=256` 下，`factorized_expert_topk` 的 selection_accesses=360448、deployment_accesses=442368、combined_accesses=802816，对当前 1024x4096 proxy 的 total_cost 约 `0.19x`。",
+      "，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。",
       "r183 的 `shared_two_stage_residual_expert` 已在约 `0.24x` 失败并归档，当前不应继续沿 shared-coarse two-stage 线做局部参数补点。"
     ],
     "next_hypotheses": [
@@ -77,11 +77,11 @@
     "exceed_alpha_0_50": "0.28626638650894165",
     "selection_cost": "360448.0",
     "selection_cost_ratio": "0.09",
-    "deployment_accesses": "442368.0",
-    "deployment_ratio": "0.11",
-    "total_cost": "802816.0",
-    "total_cost_ratio": "0.19",
-    "objective_score": "0.47626638650894165"
+    "deployment_accesses": "552960.0",
+    "deployment_ratio": "0.13",
+    "total_cost": "913408.0",
+    "total_cost_ratio": "0.22",
+    "objective_score": "0.5062663865089416"
   },
   "resolved_reference_env_config": {
     "ARCHITECTURE": "expert_topk",
@@ -150,10 +150,10 @@
       "d_in": 1024,
       "n_output": 4096,
       "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
-      "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+      "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
       "original_matmul_accesses": 4194304
     },
-    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
     "d_in": 1024,
     "n_output": 4096,
     "original_matmul_accesses": 4194304,
@@ -191,10 +191,10 @@
     "d_in": 1024,
     "n_output": 4096,
     "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
-    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
     "original_matmul_accesses": 4194304
   },
-  "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096",
+  "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
   "touched_files": [],
   "patch_path": null
 }

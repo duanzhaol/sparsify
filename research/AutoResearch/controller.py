@@ -4,7 +4,9 @@ The runtime leaderboard is now a single-objective ranking over:
 
     objective_score = total_cost_ratio + exceed_alpha_0_50
 
-where total_cost_ratio uses the current fused-QKV cost proxy and
+where total_cost_ratio uses the current fused-QKV cost proxy, with deploy-side
+static libraries counted as input-side atom/value reads plus output lookup
+reads, and
 ``exceed_alpha_0_50`` comes from the final training-step metrics.
 
 FVU remains a diagnostic field and only acts as a late tie-break.

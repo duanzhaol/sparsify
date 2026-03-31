@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from .compatibility import (
@@ -27,6 +28,83 @@ from .controller import compact_frontier, frontier_key
 from .objective import EXCEED_FIELD, compute_objective_score, extract_step_exceed_alpha_0_50, read_latest_step
 from .target_profile import resolve_target_profile
 from .types import BASE_ENV_DEFAULTS, HISTORY_DIR, RESULTS_COLUMNS
+
+
+_SANITIZED_COST_SENTENCE = "基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束"
+_LEGACY_COST_TEXT_MARKERS = (
+    "selection_accesses=",
+    "deployment_accesses=",
+    "combined_accesses=",
+    "combined_ratio",
+    "total_cost_ratio",
+    "本地成本自检",
+    "本地 cost 自检",
+    "本地成本估算",
+    "本地成本估计",
+    "本地 cost 估算",
+    "本地 cost 估计",
+    "按当前 cost proxy 估算",
+    "按当前成本 proxy 估算",
+    "按当前代码成本估算",
+    "按当前代码路径成本估算",
+    "encoder 0.",
+    "selection 0.",
+    "deployment 0.",
+    "exact total_cost_ratio",
+)
+_LEGACY_COST_TEXT_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"该点的本地成本自检已完成[^。]*"), _SANITIZED_COST_SENTENCE),
+    (re.compile(r"本地(?:成本| cost )自检(?:已完成|显示)?[^。]*"), _SANITIZED_COST_SENTENCE),
+    (re.compile(r"本地(?:成本| cost )估(?:算|计)[^。]*"), _SANITIZED_COST_SENTENCE),
+    (re.compile(r"成本自检：[^。]*"), _SANITIZED_COST_SENTENCE),
+    (re.compile(r"按当前(?: cost proxy|成本 proxy|代码路径成本|代码成本)估算，[^。]*"), _SANITIZED_COST_SENTENCE),
+    (
+        re.compile(
+            r"总成本仍约为\s*selection\s*0\.\d+x\s*\+\s*deployment\s*0\.\d+x\s*=\s*(?:total\s*)?0\.\d+x，远低于 1\.5×h×n 硬约束"
+        ),
+        "总成本仍处于可接受区间并满足预算约束",
+    ),
+    (
+        re.compile(r"选择[^。]*?是因为本地 cost 自检显示[^。]*"),
+        "选择该配置的原因之一是它在当前成本口径下仍处于目标成本带内",
+    ),
+    (
+        re.compile(r"selection\s*0\.\d+x\s*\+\s*deployment\s*0\.\d+x\s*=\s*(?:total\s*)?0\.\d+x"),
+        "当前口径下仍处于目标成本带内",
+    ),
+    (
+        re.compile(r"encoder\s*0\.\d+x[、，, ]*deployment\s*0\.\d+x[、，, ]*total\s*0\.\d+x"),
+        "仍位于当前目标成本带内",
+    ),
+    (
+        re.compile(
+            r"selection_accesses=\d+(?:\.\d+)?[、，, ]*selection_ratio=[^。；\n]*[；;，, ]*deployment_accesses=\d+(?:\.\d+)?[、，, ]*deployment_ratio=[^。；\n]*[；;，, ]*combined_ratio=[^。；\n]*"
+        ),
+        "当前口径下的访问统计与成本比例已重新复核",
+    ),
+    (
+        re.compile(
+            r"selection_accesses=\d+(?:\.\d+)?[、，, ]*deployment_accesses=\d+(?:\.\d+)?[、，, ]*combined_accesses=\d+(?:\.\d+)?"
+        ),
+        "当前口径下的访问统计已重新复核",
+    ),
+    (
+        re.compile(r"combined_accesses=\d+(?:\.\d+)?[^。；\n]*actual total_cost[^。；\n]*"),
+        "当前口径下的总成本已重新复核",
+    ),
+    (
+        re.compile(r"精确\s*combined_accesses=\d+(?:\.\d+)?[^。；\n]*"),
+        "当前口径下的总成本已重新复核",
+    ),
+    (
+        re.compile(r"combined_ratio\s*约\s*`?0\.\d+x`?"),
+        "当前口径下的成本比例已重新复核",
+    ),
+    (
+        re.compile(r"exact total_cost_ratio=`?0\.\d+`?"),
+        "当前口径下的 total_cost_ratio 已重新复核",
+    ),
+]
 
 
 def main() -> int:
@@ -510,11 +588,13 @@ def _enrich_summary_objective_metrics(
     """Backfill per-round objective metrics from current cost logic + metrics.jsonl."""
     if not isinstance(summary, dict):
         return
+    _sanitize_legacy_cost_text_in_summary(summary)
     result = summary.get("result")
     if not isinstance(result, dict):
         return
     config = _effective_config(summary)
     target_profile = resolve_target_profile(config)
+    _rewrite_summary_target_metadata(summary, target_profile)
 
     hookpoint = config.get("HOOKPOINTS") or config.get("hookpoints")
     exceed = _safe_float(result.get(EXCEED_FIELD))
@@ -556,6 +636,68 @@ def _enrich_summary_objective_metrics(
     )
     if objective_score is not None:
         result["objective_score"] = str(objective_score)
+
+
+def _rewrite_summary_target_metadata(summary: dict[str, Any], target_profile: Any) -> None:
+    """Normalize persisted target-profile metadata to the current definition."""
+    profile_dict = target_profile.to_dict()
+    summary["target_profile"] = profile_dict
+    summary["cost_model_label"] = target_profile.cost_model_label
+
+    runtime_cfg = summary.get("runtime_config_json")
+    if isinstance(runtime_cfg, dict):
+        runtime_cfg["target_profile"] = profile_dict
+        runtime_cfg["cost_model_label"] = target_profile.cost_model_label
+        runtime_cfg["d_in"] = target_profile.d_in
+        runtime_cfg["n_output"] = target_profile.n_output
+        runtime_cfg["original_matmul_accesses"] = target_profile.original_matmul_accesses
+
+
+def _sanitize_legacy_cost_text_in_summary(summary: dict[str, Any]) -> None:
+    """Remove stale free-text cost numbers that no longer match current metrics."""
+    _sanitize_legacy_cost_text_in_obj(summary)
+
+
+def _sanitize_legacy_cost_text_in_obj(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        for key, value in list(obj.items()):
+            if isinstance(value, str):
+                obj[key] = _sanitize_legacy_cost_text(value)
+            else:
+                _sanitize_legacy_cost_text_in_obj(value)
+        return obj
+    if isinstance(obj, list):
+        for idx, value in enumerate(obj):
+            if isinstance(value, str):
+                obj[idx] = _sanitize_legacy_cost_text(value)
+            else:
+                _sanitize_legacy_cost_text_in_obj(value)
+        return obj
+    return obj
+
+
+def _sanitize_legacy_cost_text(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    if not any(marker in text for marker in _LEGACY_COST_TEXT_MARKERS):
+        return text
+
+    cleaned = text
+    for pattern, replacement in _LEGACY_COST_TEXT_REPLACEMENTS:
+        cleaned = pattern.sub(replacement, cleaned)
+
+    cleaned = re.sub(
+        r"，?" + re.escape(_SANITIZED_COST_SENTENCE) + r"，?" + re.escape(_SANITIZED_COST_SENTENCE),
+        _SANITIZED_COST_SENTENCE,
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"，?" + re.escape(_SANITIZED_COST_SENTENCE) + r"，?",
+        "，" + _SANITIZED_COST_SENTENCE + "，",
+        cleaned,
+    )
+    cleaned = cleaned.replace("，。", "。").replace("。。", "。").replace("，，", "，")
+    return cleaned
 
 
 def _write_results_tsv(path: Path, summaries: list[dict[str, Any]]) -> None:

@@ -46,7 +46,7 @@ DEFAULT_TARGET_PROFILE = TargetProfile(
     elbow_threshold_path="thresholds/Qwen3-0.6B/thresholds_q.json",
     cost_model_label=(
         "train on q_proj activations; cost proxy uses fused QKV deployment "
-        "matrix 1024x4096"
+        "matrix 1024x4096 and counts deploy libraries as d_in+n_output"
     ),
 )
 

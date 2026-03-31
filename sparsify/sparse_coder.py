@@ -232,11 +232,32 @@ class SparseCoder(nn.Module):
     def _deployment_lookup_accesses(self, n_output: int) -> list[tuple[str, int, str]]:
         """Return deployment-side memory accesses for LUTurbo lookup phase.
 
-        These represent the cost of producing W @ x_hat via lookup tables:
-        for each static vector library, count × n_output accesses.
+        These represent the cost of deploying each static library element:
+        read the input-side atom/value (size d_in) and the output-side lookup
+        result (size n_output). For each static vector library, this proxy
+        counts count × (d_in + n_output) accesses.
         Override in subclasses that add trunk / codebook / extra libraries.
         """
-        return [("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}")]
+        return [
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            )
+        ]
+
+    def _deploy_library_accesses(self, num_vectors: int, n_output: int) -> int:
+        """Cost proxy for one deploy-time static library of `num_vectors` entries."""
+        return int(num_vectors * (self.d_in + n_output))
+
+    def _deploy_library_shape(
+        self,
+        num_vectors: int,
+        n_output: int,
+        *,
+        label: str,
+    ) -> str:
+        return f"{label}×(d={self.d_in}+n={n_output})"
 
     def selection_cost_estimate(self, n_output: int | None = None) -> dict:
         """Estimate encoder-side, deployment-side, and combined memory accesses.
@@ -734,7 +755,13 @@ class CodebookTopKSparseCoder(SparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+        return [
+            (
+                "codebook_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ] + base
 
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
@@ -847,7 +874,13 @@ class ResidualVQSparseCoder(SparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+        return [
+            (
+                "codebook_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ] + base
 
     def _select_code(self, x: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(x)
@@ -946,7 +979,13 @@ class TwoCodeResidualVQSparseCoder(ResidualVQSparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return base + [("codebook2_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")]
+        return base + [
+            (
+                "codebook2_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ]
 
     def _select_code_from(
         self, x: Tensor, router: nn.Linear, codebook: Tensor
@@ -2383,7 +2422,11 @@ class SharedRoutedFactorizedExpertResidualSparseCoder(SparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         return [
-            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            ),
         ]
 
     def _encode_stage1(
@@ -2677,7 +2720,11 @@ class SharedLowRankTwoStageResidualExpertSparseCoder(SparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         return [
-            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            ),
         ]
 
     def _encode_shared_stage(
@@ -2965,7 +3012,11 @@ class SharedLowRankRoutedExpertResidualSparseCoder(SparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         return [
-            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            ),
         ]
 
     def _encode_stage1(
@@ -3208,10 +3259,18 @@ class LowRankExpertTopKSparseCoder(SparseCoder):
         return [
             (
                 "trunk_deploy",
-                self.trunk_encoder.out_features * n_output,
-                f"r={self.trunk_encoder.out_features}×n={n_output}",
+                self._deploy_library_accesses(self.trunk_encoder.out_features, n_output),
+                self._deploy_library_shape(
+                    self.trunk_encoder.out_features,
+                    n_output,
+                    label=f"r={self.trunk_encoder.out_features}",
+                ),
             ),
-            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            ),
         ]
 
     def _encode_residual(
@@ -3410,10 +3469,18 @@ class LowRankExpertResidualSparseCoder(SparseCoder):
         return [
             (
                 "trunk_deploy",
-                self.trunk_encoder.out_features * n_output,
-                f"r={self.trunk_encoder.out_features}×n={n_output}",
+                self._deploy_library_accesses(self.trunk_encoder.out_features, n_output),
+                self._deploy_library_shape(
+                    self.trunk_encoder.out_features,
+                    n_output,
+                    label=f"r={self.trunk_encoder.out_features}",
+                ),
             ),
-            ("sparse_lookup", self.cfg.k * n_output, f"K={self.cfg.k}×n={n_output}"),
+            (
+                "sparse_lookup",
+                self._deploy_library_accesses(self.cfg.k, n_output),
+                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
+            ),
         ]
 
     def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
@@ -3868,7 +3935,13 @@ class LowRankResidualSparseCoder(SparseCoder):
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
         r = self.trunk_encoder.out_features
-        return [("trunk_deploy", r * n_output, f"r={r}×n={n_output}")] + base
+        return [
+            (
+                "trunk_deploy",
+                self._deploy_library_accesses(r, n_output),
+                self._deploy_library_shape(r, n_output, label=f"r={r}"),
+            )
+        ] + base
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
@@ -4463,7 +4536,13 @@ class LowRankResidualVQSparseCoder(LowRankResidualSparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+        return [
+            (
+                "codebook_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ] + base
 
     def _select_code(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -4700,7 +4779,13 @@ class LowRankFactorizedResidualSparseCoder(SparseCoder):
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
         r = self.trunk_encoder.out_features
-        return [("trunk_deploy", r * n_output, f"r={r}×n={n_output}")] + base
+        return [
+            (
+                "trunk_deploy",
+                self._deploy_library_accesses(r, n_output),
+                self._deploy_library_shape(r, n_output, label=f"r={r}"),
+            )
+        ] + base
 
     def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
@@ -4791,7 +4876,13 @@ class LowRankSoftCodebookResidualSparseCoder(LowRankResidualSparseCoder):
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+        return [
+            (
+                "codebook_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ] + base
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
@@ -5116,7 +5207,13 @@ class LowRankTwoStageSoftCodebookResidualSparseCoder(
 
     def _deployment_lookup_accesses(self, n_output):
         base = super()._deployment_lookup_accesses(n_output)
-        return [("codebook_deploy", self.num_codes * n_output, f"codes={self.num_codes}×n={n_output}")] + base
+        return [
+            (
+                "codebook_deploy",
+                self._deploy_library_accesses(self.num_codes, n_output),
+                self._deploy_library_shape(self.num_codes, n_output, label=f"codes={self.num_codes}"),
+            )
+        ] + base
 
     def _project_codebook(self, residual: Tensor) -> tuple[Tensor, Tensor]:
         logits = self.code_router(residual)
