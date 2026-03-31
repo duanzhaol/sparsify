@@ -1,0 +1,1282 @@
+{"command":"run","hypothesis":"候选 family 设为 `factorized_expert_topk`。最终重构公式写为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维 bottleneck，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 加权求和 + 选择性补偿”的 LUTurbo/Lottable 推理链路，最终仍是静态向量库上的有限加权和，因此兼容性判断为 `扩展兼容`。`expert_topk`、`shared_routed_expert_topk` 属于直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍属 `不兼容`，不能驱动当前 objective leaderboard。本轮唯一主假设是：r209→r210 已证明“更大总静态 expert bank + 更小 K”能把 routed-only direct-compatible 主线压到 `objective≈0.365`，但当前缺口仍主要在 exceed 而不是纯 deploy cost；因此下一步最有信息量的问题不是继续在 `expert_topk` 上做第三轮局部 K 插值，而是测试更轻 scorer / router 是否能在保持 `K=48`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 的短 active path 结构下，把 encoder 选择成本明显压低而不把 exceed 拉坏。相对 r210 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `EXPANSION_FACTOR=1`、`K=48`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“expert 内部 low-rank / shared bottleneck + expert-specific small head”这条结构槽位，是否能在当前 small-K 成本带内换回更低 objective。本地成本复核显示该点的 selection_accesses=393216、deployment_accesses=245760、combined_accesses=638976，对当前 1024x4096 fused-QKV proxy 的 exact total_cost_ratio=0.15234375；相对 r210 的 exact 0.18359375 释放出 0.03125 的 objective 空间，因此只要 exceed 保持在约 0.21298 以下，就能刷新当前 incumbent。","summary":"建议以 r210 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`。这是一轮新的 matched-objective architecture probe，目标是在保持 `K=48` 和大静态 expert bank 的前提下，用更轻 scorer / router 直接测试“expert 内部 low-rank”能否把当前 routed-only 主线从 `objective≈0.365` 再明显推低，而不是继续围绕 incumbent 做第三轮局部 K 打磨。","change_type":"param_only","expected_win":"explore_unknown","family_name":"factorized_expert_topk","family_stage":"probe","self_review":"这轮严格满足单变量原则：相对 r210 只改 `ARCHITECTURE`。选择 `factorized_expert_topk` 而不是继续把 `expert_topk K=48` 压到 `K=40`，是因为当前连续两轮已经在同一 routed-only family 上拿到清晰正信号；继续压 K 虽可能再拿到 0.00x 级别改进，但信息增量已明显下降，不符合本轮“优先结构槽位”的要求。相反，`factorized_expert_topk` 正好对应 operator guide 当前高优先级的“更轻 scorer / router、expert 内部 low-rank”方向，而且本地成本复核表明它仍处在当前主战场甚至更左的位置。主要风险是这条 family 在当前 target 上有明确负先验：r184 在 `K=108` 时 objective=0.506266、exceed=0.286266，r193 在 `K=96` 时 objective=0.602707、exceed=0.402707；但这些旧点的 `K`、`NUM_EXPERTS`、`LATENTS_PER_EXPERT` 与当前 `K=48, NUM_EXPERTS=128, LATENTS_PER_EXPERT=192` 的 matched recipe 差异很大，尚不足以替代这次更干净的 fresh revalidation。若本轮仍失败，就可以更果断地下调 routed-only small-head 这条线的优先级。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"factorized_expert_topk"}],"touched_files":[],"notes_to_memory":["`factorized_expert_topk` 的 LUTurbo 导出形式仍是静态 expert 子库上的有限加权和，按当前 runtime registry 应视为 `扩展兼容`；本轮不会把任何不兼容 family 带回 objective leaderboard 主线。","本轮不是继续围绕 `expert_topk` 做第三轮局部 K 插值，而是利用 r209/r210 刚建立起来的 `small-K + large bank` 配方，做一轮更高信息量的 matched-cost architecture probe。","本地 allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: factorized_expert_topk}], fallback_architecture='expert_topk')` 返回空列表。","本地成本复核：`factorized_expert_topk K=48 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192 FACTORIZED_HIDDEN_DIM=256` 的 selection_accesses=393216、deployment_accesses=245760、combined_accesses=638976、exact total_cost_ratio=0.15234375，明显低于 r210 的 0.18359375。","当前 target 上这条 family 仍有负先验需要正视：r184 `factorized_expert_topk K=108` 的 objective=0.506266、exceed=0.286266，r193 `factorized_expert_topk K=96` 的 objective=0.602707、exceed=0.402707；因此本轮的价值首先在于 revalidate 当前新 recipe，而不是预设其必然成为新主线。"],"next_hypotheses":["如果 `factorized_expert_topk@K48` 在当前 `NUM_EXPERTS=128` recipe 下把 exceed 控到约 0.21 以下并刷新 r210，下一轮保持该 family 不变，只改 `K=64`，测试它是否能用仍低于 incumbent 的总成本换回更低 exceed，形成新的 objective 段。","如果 `factorized_expert_topk@K48` 的 objective 接近但未能赢过 r210，且主要败在 exceed 而不是 cost，下一轮保持 family 不变，只改 `FACTORIZED_HIDDEN_DIM=192` 或 `K=64` 二选一，确认 bottleneck 宽度与 sparse lookup 哪个才是主瓶颈。","如果该点复现当前 target 上 factorized family 的旧负信号，说明 routed-only small-head 这条线在当前 hookpoint 上大概率仍不成立；后续应停止让它主导预算，转向 shared/coarse 吃主干、routed experts 做 residual cleanup 的不对称结构槽位。"],"reference_round":210}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d45b5-091a-7142-ab32-adbc4d04ecc7
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 211。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 211 策略模式：主线推进
+原因：当前没有连续 crash；主线应继续推进单目标改进，并优先考虑结构性信息增量。
+当前 objective anchor family：expert_topk
+当前 anchor 摘要：ARCHITECTURE=expert_topk K=48 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 当前 mainline 配方首先是 objective anchor / matched baseline，不等于后续必须继续围绕它做局部推进。
+2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，然后优先选择信息增量最大的改动。
+3. 如果最近 2 轮没有把 objective 明显拉低，默认应切换到新的结构槽位；只有在你能明确说明当前 family 仍有高价值未验证假设时，才继续做局部调整。
+4. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。
+5. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+6. 当前优先的结构方向仍是 routed / shared+routed / low-rank expert / asymmetric MoE-like probe；相比同 family 补插值点，应更偏向新的结构性 probe。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。
+
+兼容性注册表：直接兼容 11 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=210, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=11
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前阶段目标不是把 incumbent 从 0.386 再抠到 0.37x，而是推动一次能把 objective 明显拉向 0.30 的结构突破。
+  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 首选仍应聚焦 `total_cost_ratio≈0.18~0.22` 这一主战场；如果新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  7. 宁可做中等风险但高信息增量的新结构原型，也不要把预算继续花在低信息的 incumbent 邻域细扫上。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。
+  5. 目标仍远高于 0.30 时，还继续围绕 incumbent 做保守小步扫描。
+  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r210 objective=0.3617326545715332 = cost 0.18x + exceed 0.1817326545715332 | fvu=0.15731249749660492 | arch=expert_topk K=48 EF=1 | FEASIBLE
+  r209 objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | fvu=0.14861851930618286 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r199 objective=0.386114 = cost 0.19x + exceed 0.196114 | fvu=0.16656622290611267 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r208 objective=0.3925313973426819 = cost 0.19x + exceed 0.20253139734268188 | fvu=0.1712922751903534 | arch=lowrank_expert_topk K=64 EF=1 | FEASIBLE
+  r196 objective=0.4145242083072662 = cost 0.23x + exceed 0.18452420830726624 | fvu=0.15407827496528625 | arch=expert_topk K=96 EF=1 | FEASIBLE
+  r176 objective=0.4211236047744751 = cost 0.23x + exceed 0.1911236047744751 | fvu=0.15915092825889587 | arch=expert_topk K=108 EF=1 | FEASIBLE
+  r187 objective=0.426606148481369 = cost 0.25x + exceed 0.17660614848136902 | fvu=0.14519497752189636 | arch=lowrank_expert_topk K=96 EF=1 | FEASIBLE
+  r168 objective=0.4319258725643158 = cost 0.26x + exceed 0.1719258725643158 | fvu=0.1410711109638214 | arch=shared_routed_expert_topk K=112 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → expert_topk (K=48, EF=1):
+    objective=0.3617326545715332 = cost 0.18x + exceed 0.1817326545715332 | encoder=0.12x | deploy=0.06x | fvu=0.15731249749660492
+  最低 exceed leader → lowrank_expert_topk (K=96, EF=1):
+    objective=0.4398040068149567 = cost 0.27x + exceed 0.16980400681495667 | encoder=0.13x | deploy=0.14x | fvu=0.14044544100761414
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.30 以下。
+  当前 incumbent 约为 objective=0.361733 (cost=0.18x, exceed=0.181733)；距离目标仍差 0.061733。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.16x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.18x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.20x，则 exceed 需压到 ≤0.10
+    - 若 cost≈0.22x，则 exceed 需压到 ≤0.08
+  因此：若新结构 cost 升到 0.22x 左右，却仍无法把 exceed 压到约 0.08~0.10，则通常不够支撑 0.30 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，5）：
+  r203 shared_routed_expert_topk param_only -> keep objective=0.449101 cost=0.171875x exceed=0.277226 fvu=0.23898851871490479 523s
+  r207 lowrank_expert_topk param_only -> archive objective=0.396871 cost=0.199219x exceed=0.197653 fvu=0.16646146774291992 639s
+  r208 lowrank_expert_topk param_only -> keep objective=0.388078 cost=0.185547x exceed=0.202531 fvu=0.1712922751903534 632s
+  r209 expert_topk param_only -> keep objective=0.376055 cost=0.203125x exceed=0.172930 fvu=0.14861851930618286 955s
+  r210 expert_topk param_only -> keep objective=0.365326 cost=0.183594x exceed=0.181733 fvu=0.15731249749660492 707s
+
+操作提示：
+  1. 当前主目标是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。若 cost 略升但 exceed 明显下降且 objective 更低，算成功；反之只降 FVU 不算主成功。
+  2. 如果最近 2 轮只是同一 family 的 `K` / `LATENTS_PER_EXPERT` / rank / lr 小插值，且 objective 没有明显下降，下一轮默认应优先换结构槽位，而不是继续局部扫点。当前 incumbent 只应视作 matched baseline / objective anchor，不应默认继续细扫。
+  3. MoE-like 方向优先按“不对称分工”理解：shared/coarse 分支负责吃平滑主干，routed experts 只做 sparse residual cleanup，active path 尽量短。重点不是让对称 experts 共同承担主表示，而是把 shared capacity、expert capacity、cleanup 责任拆开。
+  4. 优先尝试有结构信息增量的 probe：`shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。核心问题是怎样增大总容量，同时不显著拉长每个 token 的 active path。
+  5. 应主动探索“在更小 `K` 下仍能把 `exceed_alpha_0.50` 控住”的结构，而不是只把降 `K` 当成 deployment 成本的线性压缩按钮。若 shared/coarse/trunk 分支不能显著缓解 tail error 或在线补偿需求，它们就不值得保留。
+  6. 当前更需要的是结构突破，不是 incumbent 邻域打磨。若没有非常具体的未验证高价值假设，不要继续围绕当前最佳 family 做小修小补；优先提出一个新的 matched-objective architecture slot，并用这一轮回答“这条结构线值不值得继续”。
+  7. 全局目标仍是把 `objective_score` 压到 `0.30` 以下；这通常不可能靠 incumbent 邻域的小步微调自然达到。若多轮结果仍停留在 `0.38~0.40` 一带，应主动允许更激进的结构跳跃，优先测试那些一旦成立就可能带来 regime shift 的方案，而不是继续做温和插值。只要保持 LUTurbo 可导出性与单变量归因清晰，就可以接受中高风险的新结构 probe。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r210 expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_topk
+  EXPANSION_FACTOR=1
+  K=48
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r208 lowrank_expert_topk (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=lowrank_expert_topk
+  EXPANSION_FACTOR=1
+  K=64
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=160
+  NUM_EXPERTS=64
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=8
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先核对 r210 的真实落盘结果，并快速筛一遍现有可兼容 family 在当前配方附近的低成本带，避免把一次结构切换建在错误的 cost 预期上。
+exec
+/bin/bash -lc "sed -n '1,140p' research/history/round_summaries/round_0210.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 210,
+  "timestamp": 1774992641,
+  "started_at": 1774991934,
+  "ended_at": 1774992641,
+  "duration_sec": 707,
+  "family_name": "expert_topk",
+  "family_stage": "mainline",
+  "session_id": "019d45b5-091a-7142-ab32-adbc4d04ecc7",
+  "timeline_event_ids": [
+    "evt_1774991934979708175",
+    "evt_1774992088799044953",
+    "evt_1774992641502029843"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{e\u2208E(x)} \u03a3_{i\u2208S_e(x)} \u03b1_{e,i}(x) b_{e,i}\uff0c\u5176\u4e2d {b_{e,i}} \u662f\u5404 expert \u7684\u9759\u6001\u5b50\u5e93\u539f\u5b50\uff0c\u5728\u7ebf\u4fa7\u5148\u505a\u8f7b\u91cf router \u9009\u62e9\u5c11\u91cf expert \u5b50\u5e93\uff0c\u518d\u5728\u6240\u9009\u9759\u6001\u5b50\u5e93\u5185\u505a local top-k\u3001\u67e5\u8868\u3001\u52a0\u6743\u6c42\u548c\uff0c\u5e76\u5728\u8bef\u5dee\u9608\u503c\u5916\u89e6\u53d1\u9009\u62e9\u6027\u8865\u507f\uff1b\u56e0\u6b64 `expert_topk` \u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201c\u5b50\u5e93\u9009\u62e9 + \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u94fe\u8def\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a `\u76f4\u63a5\u517c\u5bb9`\u3002`lowrank_expert_topk`\u3001`two_stage_residual_expert` \u7b49\u5c5e\u4e8e\u6269\u5c55\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u4ecd\u662f\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1ar209 \u5df2\u8bc1\u660e\u5728 `K=64` \u4e0b\u6269\u5927\u603b\u9759\u6001 expert bank \u80fd\u663e\u8457\u538b\u4f4e exceed\uff0c\u56e0\u6b64\u4e0b\u4e00\u6b65\u6700\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u4e0d\u662f\u7ee7\u7eed\u6269\u5bb9\u91cf\u6216\u7acb\u523b\u5207\u65b0 family\uff0c\u800c\u662f\u6d4b\u8bd5\u8fd9\u90e8\u5206\u65b0\u589e\u9759\u6001\u5bb9\u91cf\u80fd\u5426\u88ab\u201c\u5151\u73b0\u201d\u4e3a\u66f4\u4f4e\u603b\u6210\u672c\u3002\u76f8\u5bf9 r209 \u53ea\u5c06 `K` \u4ece 64 \u964d\u5230 48\uff0c\u4fdd\u6301 `ARCHITECTURE=expert_topk`\u3001`NUM_EXPERTS=128`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u201c\u66f4\u5927\u7684\u9759\u6001 expert bank \u662f\u5426\u8db3\u4ee5\u8ba9\u66f4\u5c0f deploy budget \u4ecd\u628a exceed \u63a7\u5728\u53ef\u8d62\u533a\u95f4\u201d\u3002\u672c\u5730\u6210\u672c\u590d\u6838\u663e\u793a\u8be5\u70b9 selection_accesses=524288\u3001deployment_accesses=245760\u3001combined_accesses=770048\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 exact total_cost_ratio=0.18359375\uff1b\u76f8\u5bf9 r209 \u7684 exact 0.203125 \u91ca\u653e\u51fa 0.01953125 \u7684 objective \u7a7a\u95f4\uff0c\u56e0\u6b64\u53ea\u8981 exceed \u4fdd\u6301\u5728\u7ea6 0.19246 \u4ee5\u4e0b\uff0c\u5c31\u80fd\u5237\u65b0\u5f53\u524d incumbent\u3002",
+    "summary": "\u5efa\u8bae\u4ee5 r209 \u4e3a reference\uff0c\u53ea\u6539 `K=48`\u3002\u8fd9\u662f\u4e00\u6b21\u5229\u7528 r209 \u65b0\u83b7\u5f97\u7684 routed-only \u5bb9\u91cf\u589e\u76ca\u53bb\u6362\u66f4\u4f4e\u90e8\u7f72\u6210\u672c\u7684\u5355\u53d8\u91cf probe\uff0c\u76ee\u6807\u662f\u5224\u65ad `expert_topk` \u5728\u5f53\u524d `NUM_EXPERTS=128` \u914d\u65b9\u4e0b\u80fd\u5426\u8fdb\u5165\u66f4\u4f4e objective \u7684 small-K \u6bb5\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u7ebf\u6027\u6269\u5bb9\u6216\u4f4e\u4fe1\u606f\u63d2\u503c\u4e0a\u6d88\u8017\u9884\u7b97\u3002",
+    "change_type": "param_only",
+    "expected_win": "lower_objective",
+    "family_name": "expert_topk",
+    "family_stage": "mainline",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r209 \u53ea\u6539 `K`\u3002\u867d\u7136\u5f53\u524d\u9636\u6bb5\u603b\u4f53\u504f\u5411\u65b0\u7ed3\u6784\u69fd\u4f4d\uff0c\u4f46 r209 \u521a\u521a\u7ed9\u51fa\u4e00\u6b21\u5b9e\u8d28\u6027\u6539\u8fdb\uff0c\u4e14\u5b83\u6253\u5f00\u4e86\u4e00\u4e2a\u5f53\u524d target \u4e0a\u66f4\u9ad8\u4ef7\u503c\u3001\u4ecd\u672a\u88ab\u56de\u7b54\u7684\u95ee\u9898\uff1a\u65b0\u589e\u9759\u6001 expert \u5bb9\u91cf\u7a76\u7adf\u53ea\u662f\u63d0\u9ad8\u4e86\u8d28\u91cf\uff0c\u8fd8\u662f\u4e5f\u5141\u8bb8\u628a deploy path \u7f29\u77ed\u800c\u4e0d\u663e\u8457\u62ac\u9ad8 exceed\u3002\u9009\u62e9 `K=48` \u800c\u4e0d\u662f\u66f4\u4fdd\u5b88\u7684 `K=56`\uff0c\u662f\u56e0\u4e3a\u5b83\u7684\u4fe1\u606f\u589e\u91cf\u66f4\u5927\uff0c\u540c\u65f6\u4ecd\u4fdd\u7559\u7ea6 0.0195 \u7684 objective \u7f13\u51b2\uff1b\u82e5\u5931\u8d25\uff0c\u4e5f\u80fd\u66f4\u660e\u786e\u5730\u8bf4\u660e\u5f53\u524d routed-only \u4e3b\u7ebf\u7684 tail error \u4ecd\u5bf9 active atom \u6570\u654f\u611f\uff0c\u540e\u7eed\u5e94\u8f6c\u56de\u66f4\u5f3a\u7ed3\u6784\u5206\u5de5\u800c\u4e0d\u662f\u7ee7\u7eed\u505a\u5c0f\u6b65 K \u63d2\u503c\u3002\u4e3b\u8981\u98ce\u9669\u662f exceed \u56de\u5f39\u8d85\u8fc7\u8282\u7701\u7684\u6210\u672c\u7a97\u53e3\uff0c\u5bfc\u81f4 objective \u4e0d\u5982 r209\uff1b\u4f46\u8fd9\u540c\u6837\u662f\u9ad8\u4ef7\u503c\u8d1f\u4fe1\u53f7\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "K",
+        "value": "48"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "`expert_topk` \u7684 LUTurbo \u5bfc\u51fa\u5f62\u5f0f\u4ecd\u662f\u9759\u6001 expert \u5b50\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff0c\u5c5e\u4e8e\u76f4\u63a5\u517c\u5bb9 family\uff1b\u672c\u8f6e\u4e0d\u4f1a\u628a\u4efb\u4f55\u4e0d\u517c\u5bb9 family \u5e26\u56de objective leaderboard \u4e3b\u7ebf\u3002",
+      "r209 \u5df2\u7528 `NUM_EXPERTS: 64 -> 128` \u7ed9\u51fa\u4e00\u6b21\u975e\u5fae\u5c0f\u6539\u8fdb\uff0c\u56e0\u6b64 Round 210 \u5141\u8bb8\u5728\u540c\u4e00 family \u5185\u505a\u4e00\u6b21\u9ad8\u4ef7\u503c follow-up\uff0c\u4f46\u76ee\u6807\u662f\u5151\u73b0\u65b0\u589e\u5bb9\u91cf\u5e26\u6765\u7684\u6210\u672c\u6536\u76ca\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u505a\u4f4e\u4fe1\u606f\u90bb\u57df\u7ec6\u626b\u3002",
+      "\u672c\u5730 allowlist \u6821\u9a8c\u5df2\u901a\u8fc7\uff1a`validate_env_overrides([{key: K, value: 48}], fallback_architecture='expert_topk')` \u8fd4\u56de\u7a7a\u5217\u8868\u3002",
+      "\u672c\u5730\u6210\u672c\u590d\u6838\uff1a`expert_topk K=48 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` \u7684 selection_accesses=524288\u3001deployment_accesses=245760\u3001combined_accesses=770048\u3001exact total_cost_ratio=0.18359375\uff0c\u4f4d\u4e8e\u5f53\u524d `0.18x~0.22x` \u4e3b\u6218\u573a\u4e0b\u6cbf\u3002",
+      "\u76f8\u5bf9 r209 \u7684 exact total_cost_ratio=0.203125\uff0c`K=48` \u91ca\u653e\u51fa 0.01953125 \u7684 objective \u7a97\u53e3\uff1b\u56e0\u6b64\u672c\u8f6e\u6210\u8d25\u7684\u5173\u952e\u4e0d\u662f FVU\uff0c\u800c\u662f exceed \u662f\u5426\u80fd\u7ef4\u6301\u5728\u7ea6 0.19246 \u4ee5\u4e0b\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c `K=48` \u5728 `NUM_EXPERTS=128` \u4e0b\u4ecd\u80fd\u628a exceed \u63a7\u5728\u7ea6 0.19 \u4ee5\u4e0b\u5e76\u5237\u65b0 objective\uff0c\u4e0b\u4e00\u8f6e\u7ee7\u7eed\u7559\u5728 `expert_topk`\uff0c\u53ea\u6539 `K=40` \u6216 `K=56` \u4e4b\u4e00\uff0c\u7528\u6765\u5b9a\u4f4d\u8fd9\u6761 routed-only \u4e3b\u7ebf\u7684 deploy knee\u3002",
+      "\u5982\u679c `K=48` \u7684 exceed \u660e\u663e\u56de\u5f39\u5e76\u541e\u6389\u6210\u672c\u6536\u76ca\uff0c\u8bf4\u660e\u5f53\u524d `expert_topk` \u7684\u6539\u8fdb\u4ecd\u4e3b\u8981\u4f9d\u8d56 active atom \u6570\u800c\u4e0d\u662f\u66f4\u597d\u7684\u5bb9\u91cf\u5206\u5de5\uff1b\u540e\u7eed\u5e94\u505c\u6b62\u5728 routed-only family \u4e0a\u7ee7\u7eed\u538b K\uff0c\u8f6c\u5411\u65b0\u7684\u7ed3\u6784\u69fd\u4f4d\u3002",
+      "\u5982\u679c `K=48` \u53ea\u5e26\u6765\u5f88\u5c0f\u7684 objective \u6539\u5584\uff0c\u7ed3\u8bba\u5e94\u8bb0\u4e3a\u201c\u65b0\u589e\u9759\u6001\u5bb9\u91cf\u53ef\u4ee5\u90e8\u5206\u6362\u56de\u90e8\u7f72\u6210\u672c\uff0c\u4f46\u4ea4\u6362\u7387\u4ecd\u4e0d\u8db3\u4ee5\u903c\u8fd1 0.30\u201d\uff1b\u540e\u7eed\u4f18\u5148\u63a2\u7d22 shared/coarse \u5403\u4e3b\u5e72\u3001experts \u505a residual cleanup \u7684\u4e0d\u5bf9\u79f0\u7ed3\u6784\u3002"
+    ],
+    "reference_round": 209
+  },
+  "result": {
+    "decision": "keep",
+    "status": "ok",
+    "timestamp": "1774992641",
+    "val_fvu": "0.15731249749660492",
+    "exceed_alpha_0_50": "0.181733",
+    "objective_score": "0.365326",
+    "total_cost": "770048.000000",
+    "total_cost_ratio": "0.183594",
+    "selection_cost": "524288.000000",
+    "selection_cost_ratio": "0.125000",
+    "deployment_accesses": "245760.000000",
+    "deployment_ratio": "0.058594",
+    "observed_fvu": "0.157312",
+    "k": "48",
+    "architecture": "expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "83280.062075",
+    "baseline_ratio": "0.416690",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0210/round0210_standard_1774992088_dp2_bs1_ga8_ef1_k48_20260401_052135",
+    "experiment_id": "r210_1774992641",
+    "head_commit": "39407c00395bb01c6300196ef1b2bbfe5a858a2b",
+    "description": "\u5efa\u8bae\u4ee5 r209 \u4e3a reference\uff0c\u53ea\u6539 `K=48`\u3002\u8fd9\u662f\u4e00\u6b21\u5229\u7528 r209 \u65b0\u83b7\u5f97\u7684 routed-only \u5bb9\u91cf\u589e\u76ca\u53bb\u6362\u66f4\u4f4e\u90e8\u7f72\u6210\u672c\u7684\u5355\u53d8\u91cf probe\uff0c\u76ee\u6807\u662f\u5224\u65ad `expert_topk` \u5728\u5f53\u524d `NUM_EXPERTS=128` \u914d\u65b9\u4e0b\u80fd\u5426\u8fdb\u5165\u66f4\u4f4e objective \u7684 small-K \u6bb5\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u7ebf\u6027\u6269\u5bb9\u6216\u4f4e\u4fe1\u606f\u63d2\u503c\u4e0a\u6d88\u8017\u9884\u7b97\u3002",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r209 \u53ea\u6539 `K`\u3002\u867d\u7136\u5f53\u524d\u9636\u6bb5\u603b\u4f53\u504f\u5411\u65b0\u7ed3\u6784\u69fd\u4f4d\uff0c\u4f46 r209 \u521a\u521a\u7ed9\u51fa\u4e00\u6b21\u5b9e\u8d28\u6027\u6539\u8fdb\uff0c\u4e14\u5b83\u6253\u5f00\u4e86\u4e00\u4e2a\u5f53\u524d target \u4e0a\u66f4\u9ad8\u4ef7\u503c\u3001\u4ecd\u672a\u88ab\u56de\u7b54\u7684\u95ee\u9898\uff1a\u65b0\u589e\u9759\u6001 expert \u5bb9\u91cf\u7a76\u7adf\u53ea\u662f\u63d0\u9ad8\u4e86\u8d28\u91cf\uff0c\u8fd8\u662f\u4e5f\u5141\u8bb8\u628a deploy path \u7f29\u77ed\u800c\u4e0d\u663e\u8457\u62ac\u9ad8 exceed\u3002\u9009\u62e9 `K=48` \u800c\u4e0d\u662f\u66f4\u4fdd\u5b88\u7684 `K=56`\uff0c\u662f\u56e0\u4e3a\u5b83\u7684\u4fe1\u606f\u589e\u91cf\u66f4\u5927\uff0c\u540c\u65f6\u4ecd\u4fdd\u7559\u7ea6 0.0195 \u7684 objective \u7f13\u51b2\uff1b\u82e5\u5931\u8d25\uff0c\u4e5f\u80fd\u66f4\u660e\u786e\u5730\u8bf4\u660e\u5f53\u524d routed-only \u4e3b\u7ebf\u7684 tail error \u4ecd\u5bf9 active atom \u6570\u654f\u611f\uff0c\u540e\u7eed\u5e94\u8f6c\u56de\u66f4\u5f3a\u7ed3\u6784\u5206\u5de5\u800c\u4e0d\u662f\u7ee7\u7eed\u505a\u5c0f\u6b65 K \u63d2\u503c\u3002\u4e3b\u8981\u98ce\u9669\u662f exceed \u56de\u5f39\u8d85\u8fc7\u8282\u7701\u7684\u6210\u672c\u7a97\u53e3\uff0c\u5bfc\u81f4 objective \u4e0d\u5982 r209\uff1b\u4f46\u8fd9\u540c\u6837\u662f\u9ad8\u4ef7\u503c\u8d1f\u4fe1\u53f7\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0210_standard_1774992088.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0210/round0210_standard_1774992088_dp2_bs1_ga8_ef1_k48_20260401_052135/metrics.jsonl",
+    "curve_start_fvu": "0.214143",
+    "curve_mid_fvu": "0.176481",
+    "curve_end_fvu": "0.157312",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "64",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "16",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "128",
+    "LATENTS_PER_EXPERT": "192",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "expert_topk",
+    "EXPANSION_FACTOR": "1",
+    "K": "48",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "16",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "128",
+    "LATENTS_PER_EXPERT": "192",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "changed_keys": [
+    "K"
+  ],
+  "reference_source": "reference_round:r209",
+  "runtime_config_json": {
+    "architecture": "expert_topk",
+    "expansion_factor": 1,
+    "k": 48,
+    "optimizer": "adam",
+    "lr": "8e-4",
+    "hookpoints": "layers.[3].self_attn.q_proj",
+
+exec
+/bin/bash -lc "rg -n \"validate_env_overrides|compute_selection_cost|deployment_accesses|combined_accesses|total_cost_ratio\" research/AutoResearch sparsify -g '*.py'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/AutoResearch/config_resolution.py:305:                metrics["total_cost_ratio"],
+research/AutoResearch/controller.py:5:    objective_score = total_cost_ratio + exceed_alpha_0_50
+research/AutoResearch/controller.py:7:where total_cost_ratio uses the current fused-QKV cost proxy, with deploy-side
+research/AutoResearch/controller.py:21:from .compatibility import COST_METRIC_VERSION, compute_selection_cost, extract_cost_extra_config
+research/AutoResearch/controller.py:169:        "total_cost_ratio": metrics["total_cost_ratio"],
+research/AutoResearch/controller.py:172:        "deployment_accesses": metrics["deployment_accesses"],
+research/AutoResearch/controller.py:252:        metrics.get("total_cost_ratio"),
+research/AutoResearch/controller.py:284:    cost = compute_selection_cost(
+research/AutoResearch/controller.py:296:    return {"total_accesses": fallback, "combined_accesses": fallback, "error": "fallback"}
+research/AutoResearch/objective.py:5:    objective_score = total_cost_ratio + exceed_alpha_0_50
+research/AutoResearch/objective.py:16:from .compatibility import compute_selection_cost, extract_cost_extra_config
+research/AutoResearch/objective.py:130:    total_cost_ratio: Any,
+research/AutoResearch/objective.py:133:    cost = safe_float(total_cost_ratio)
+research/AutoResearch/objective.py:142:    total_cost_ratio: Any,
+research/AutoResearch/objective.py:148:    cost = safe_float(total_cost_ratio)
+research/AutoResearch/objective.py:198:        return compute_selection_cost(
+research/AutoResearch/objective.py:207:        cost_cache[cache_key] = compute_selection_cost(
+research/AutoResearch/objective.py:242:        deployment_accesses = float(cost.get("deployment_accesses", 0) or 0)
+research/AutoResearch/objective.py:244:        total_cost = float(cost.get("combined_accesses", selection_cost + deployment_accesses) or 0)
+research/AutoResearch/objective.py:245:        total_cost_ratio = safe_float(cost.get("combined_ratio"))
+research/AutoResearch/objective.py:249:        deployment_accesses = 0.0
+research/AutoResearch/objective.py:252:        total_cost_ratio = total_cost / original if original > 0 else None
+research/AutoResearch/objective.py:255:    objective_score = compute_objective_score(total_cost_ratio, exceed)
+research/AutoResearch/objective.py:259:        "deployment_accesses": deployment_accesses,
+research/AutoResearch/objective.py:262:        "total_cost_ratio": total_cost_ratio,
+research/AutoResearch/objective.py:281:    deployment_accesses = safe_float(entry.get("deployment_accesses"))
+research/AutoResearch/objective.py:284:    total_cost_ratio = safe_float(entry.get("total_cost_ratio"))
+research/AutoResearch/objective.py:292:            total_cost_ratio,
+research/AutoResearch/objective.py:311:        deployment_accesses = computed["deployment_accesses"]
+research/AutoResearch/objective.py:314:        total_cost_ratio = computed["total_cost_ratio"]
+research/AutoResearch/objective.py:318:    if deployment_accesses is None and deployment_ratio is not None and original > 0:
+research/AutoResearch/objective.py:319:        deployment_accesses = deployment_ratio * original
+research/AutoResearch/objective.py:321:        if total_cost_ratio is not None and original > 0:
+research/AutoResearch/objective.py:322:            total_cost = total_cost_ratio * original
+research/AutoResearch/objective.py:324:            total_cost = selection_cost + (deployment_accesses or 0.0)
+research/AutoResearch/objective.py:325:    if total_cost_ratio is None and total_cost is not None and original > 0:
+research/AutoResearch/objective.py:326:        total_cost_ratio = total_cost / original
+research/AutoResearch/objective.py:329:    if deployment_accesses is None:
+research/AutoResearch/objective.py:330:        deployment_accesses = 0.0
+research/AutoResearch/objective.py:332:        deployment_ratio = deployment_accesses / original
+research/AutoResearch/objective.py:337:        objective_score = compute_objective_score(total_cost_ratio, exceed)
+research/AutoResearch/objective.py:342:        "deployment_accesses": deployment_accesses,
+research/AutoResearch/objective.py:345:        "total_cost_ratio": total_cost_ratio,
+research/AutoResearch/override_registry.py:177:def validate_env_overrides(overrides: list | dict, fallback_architecture: str = "topk") -> list[str]:
+research/AutoResearch/loop.py:302:        f"objective={result.objective_score} cost={result.total_cost_ratio} "
+research/AutoResearch/types.py:99:    "total_cost", "total_cost_ratio",
+research/AutoResearch/types.py:101:    "deployment_accesses", "deployment_ratio",
+research/AutoResearch/types.py:218:    total_cost_ratio: str | None = None
+research/AutoResearch/types.py:221:    deployment_accesses: str | None = None
+research/AutoResearch/policy.py:10:- cost_exploration: 当前最佳可行点的 objective 主要受 total_cost_ratio 主导
+research/AutoResearch/policy.py:257:            "1. 首要目标是降低 total_cost_ratio，同时保持 total_cost ≤1.5×h×n 的硬预算。",
+research/AutoResearch/policy.py:263:            "单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。",
+research/AutoResearch/policy.py:281:            "单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。",
+research/AutoResearch/policy.py:313:        "单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。",
+research/AutoResearch/policy.py:334:    total_cost_ratio = metrics["total_cost_ratio"]
+research/AutoResearch/policy.py:337:    if total_cost_ratio is None or exceed is None or objective is None:
+research/AutoResearch/policy.py:344:    if total_cost_ratio > exceed + OBJECTIVE_BALANCE_MARGIN:
+research/AutoResearch/policy.py:347:            f"当前 incumbent objective={objective:.4f}，其中 cost={total_cost_ratio:.4f} "
+research/AutoResearch/policy.py:348:            f"明显高于 exceed={exceed:.4f}；下一步应优先降 total_cost_ratio。"
+research/AutoResearch/policy.py:350:    elif exceed > total_cost_ratio + OBJECTIVE_BALANCE_MARGIN:
+research/AutoResearch/policy.py:354:            f"明显高于 cost={total_cost_ratio:.4f}；下一步应优先降 exceed_alpha_0.50。"
+research/AutoResearch/policy.py:359:            f"当前 incumbent objective={objective:.4f}，cost={total_cost_ratio:.4f} "
+research/AutoResearch/policy.py:404:            metrics["total_cost_ratio"],
+research/AutoResearch/policy.py:584:    combined_ratio = metrics.get("total_cost_ratio", 0) or 0
+sparsify/sparse_coder.py:271:            - Deployment (lookup): deployment_accesses, deployment_ratio
+sparsify/sparse_coder.py:272:            - Combined (total): combined_accesses, combined_ratio,
+sparsify/sparse_coder.py:319:            "deployment_accesses": deploy_total,
+sparsify/sparse_coder.py:323:            "combined_accesses": combined,
+research/AutoResearch/runner.py:25:    validate_env_overrides,
+research/AutoResearch/runner.py:260:    deployment_accesses = float(cost.get("deployment_accesses", 0) or 0)
+research/AutoResearch/runner.py:261:    total_cost = float(cost.get("combined_accesses", selection_cost + deployment_accesses) or 0)
+research/AutoResearch/runner.py:263:    deployment_ratio = deployment_accesses / original_accesses if original_accesses > 0 else None
+research/AutoResearch/runner.py:264:    total_cost_ratio = total_cost / original_accesses if original_accesses > 0 else None
+research/AutoResearch/runner.py:265:    objective_score = compute_objective_score(total_cost_ratio, final_exceed_alpha_0_50)
+research/AutoResearch/runner.py:298:        total_cost_ratio=_fmt(total_cost_ratio),
+research/AutoResearch/runner.py:301:        deployment_accesses=_fmt(deployment_accesses),
+research/AutoResearch/runner.py:593:    rejected = validate_env_overrides(
+research/AutoResearch/compatibility.py:135:        "6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。",
+research/AutoResearch/compatibility.py:139:def compute_selection_cost(
+research/AutoResearch/compatibility.py:204:def compute_selection_cost_table(
+research/AutoResearch/prompt.py:21:    compute_selection_cost_table,
+research/AutoResearch/prompt.py:56:- 当前主目标是最小化单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+research/AutoResearch/prompt.py:57:- 其中 `total_cost_ratio = (encoder 选择成本 + 部署查表成本) / original_matmul_accesses`
+research/AutoResearch/prompt.py:112:    "当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。"
+research/AutoResearch/prompt.py:179:        "当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。",
+research/AutoResearch/prompt.py:188:        "  2. 首选仍应聚焦 `total_cost_ratio≈0.18~0.22` 这一主战场；如果新结构想占用更高 cost，必须能非常明确地换回更低 exceed。",
+research/AutoResearch/prompt.py:191:        "  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+research/AutoResearch/prompt.py:198:        "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
+research/AutoResearch/prompt.py:230:            metrics["total_cost_ratio"],
+research/AutoResearch/prompt.py:242:    cost = incumbent_metrics["total_cost_ratio"]
+research/AutoResearch/prompt.py:363:            metrics["total_cost_ratio"],
+research/AutoResearch/prompt.py:370:            f"= cost {metrics['total_cost_ratio'] if metrics['total_cost_ratio'] is not None else '?'}x "
+research/AutoResearch/prompt.py:380:    parts = ["训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）："]
+research/AutoResearch/prompt.py:418:            metrics["total_cost_ratio"],
+research/AutoResearch/prompt.py:425:            metrics["total_cost_ratio"] is not None
+research/AutoResearch/prompt.py:426:            and (lowest_cost is None or metrics["total_cost_ratio"] < lowest_cost[0])
+research/AutoResearch/prompt.py:428:            lowest_cost = (float(metrics["total_cost_ratio"]), entry, metrics)
+research/AutoResearch/prompt.py:447:            f"= cost {metrics['total_cost_ratio'] if metrics['total_cost_ratio'] is not None else '?'}x "
+research/AutoResearch/prompt.py:462:    parts.append("  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50")
+research/AutoResearch/prompt.py:472:    table = compute_selection_cost_table(
+research/AutoResearch/prompt.py:603:            metrics["total_cost_ratio"],
+research/AutoResearch/prompt.py:1089:    cost_ratio = result.get("total_cost_ratio")
+research/AutoResearch/state.py:89:        "Minimize objective_score = total_cost_ratio + exceed_alpha_0_50 under the total_cost budget. "
+research/AutoResearch/state.py:103:        "Minimize objective_score = total_cost_ratio + exceed_alpha_0_50 instead of treating FVU as the main target.",
+research/AutoResearch/state.py:514:                entry.setdefault("deployment_accesses", metrics["deployment_accesses"])
+research/AutoResearch/state.py:517:                entry.setdefault("total_cost_ratio", metrics["total_cost_ratio"])
+research/AutoResearch/state.py:539:                or entry.get("total_cost_ratio") is None
+research/AutoResearch/state.py:545:                entry["deployment_accesses"] = metrics["deployment_accesses"]
+research/AutoResearch/state.py:548:                entry["total_cost_ratio"] = metrics["total_cost_ratio"]
+research/AutoResearch/state.py:561:                    entry.get("total_cost_ratio"),
+research/AutoResearch/state.py:614:            "total_cost_ratio": result.total_cost_ratio,
+research/AutoResearch/state.py:730:                "total_cost_ratio": result.total_cost_ratio,
+research/AutoResearch/rebuild_runtime_state.py:21:    compute_selection_cost,
+research/AutoResearch/rebuild_runtime_state.py:36:    "deployment_accesses=",
+research/AutoResearch/rebuild_runtime_state.py:37:    "combined_accesses=",
+research/AutoResearch/rebuild_runtime_state.py:39:    "total_cost_ratio",
+research/AutoResearch/rebuild_runtime_state.py:53:    "exact total_cost_ratio",
+research/AutoResearch/rebuild_runtime_state.py:81:            r"selection_accesses=\d+(?:\.\d+)?[、，, ]*selection_ratio=[^。；\n]*[；;，, ]*deployment_accesses=\d+(?:\.\d+)?[、，, ]*deployment_ratio=[^。；\n]*[；;，, ]*combined_ratio=[^。；\n]*"
+research/AutoResearch/rebuild_runtime_state.py:87:            r"selection_accesses=\d+(?:\.\d+)?[、，, ]*deployment_accesses=\d+(?:\.\d+)?[、，, ]*combined_accesses=\d+(?:\.\d+)?"
+research/AutoResearch/rebuild_runtime_state.py:92:        re.compile(r"combined_accesses=\d+(?:\.\d+)?[^。；\n]*actual total_cost[^。；\n]*"),
+research/AutoResearch/rebuild_runtime_state.py:96:        re.compile(r"精确\s*combined_accesses=\d+(?:\.\d+)?[^。；\n]*"),
+research/AutoResearch/rebuild_runtime_state.py:104:        re.compile(r"exact total_cost_ratio=`?0\.\d+`?"),
+research/AutoResearch/rebuild_runtime_state.py:105:        "当前口径下的 total_cost_ratio 已重新复核",
+research/AutoResearch/rebuild_runtime_state.py:239:                "total_cost_ratio": result.get("total_cost_ratio"),
+research/AutoResearch/rebuild_runtime_state.py:321:                new_entry["deployment_accesses"] = float(cost.get("deployment_accesses", 0))
+research/AutoResearch/rebuild_runtime_state.py:323:                new_entry["total_cost"] = float(cost.get("combined_accesses", 0))
+research/AutoResearch/rebuild_runtime_state.py:324:                new_entry["total_cost_ratio"] = cost.get("combined_ratio")
+research/AutoResearch/rebuild_runtime_state.py:329:                    new_entry["total_cost_ratio"] = (
+research/AutoResearch/rebuild_runtime_state.py:334:                    new_entry.get("total_cost_ratio"),
+research/AutoResearch/rebuild_runtime_state.py:512:        "total_cost_ratio": result.get("total_cost_ratio"),
+research/AutoResearch/rebuild_runtime_state.py:547:            _safe_float(entry.get("total_cost_ratio")) if _safe_float(entry.get("total_cost_ratio")) is not None else float("inf"),
+research/AutoResearch/rebuild_runtime_state.py:575:            _safe_float(item.get("total_cost_ratio")) if _safe_float(item.get("total_cost_ratio")) is not None else float("inf"),
+research/AutoResearch/rebuild_runtime_state.py:624:        deployment_accesses = float(cost.get("deployment_accesses", 0) or 0)
+research/AutoResearch/rebuild_runtime_state.py:625:        total_cost = float(cost.get("combined_accesses", selection_cost + deployment_accesses))
+research/AutoResearch/rebuild_runtime_state.py:628:        result["deployment_accesses"] = str(deployment_accesses)
+research/AutoResearch/rebuild_runtime_state.py:631:        result["total_cost_ratio"] = str(cost.get("combined_ratio"))
+research/AutoResearch/rebuild_runtime_state.py:634:        result.get("total_cost_ratio"),
+research/AutoResearch/rebuild_runtime_state.py:728:        return compute_selection_cost(
+research/AutoResearch/rebuild_runtime_state.py:751:        cache[cache_key] = compute_selection_cost(
+
+exec
+/bin/bash -lc "rg -n 'shared_routed_factorized_expert_topk|factorized_expert_topk|shared_two_stage_residual_expert|lowrank_expert_topk|shared_routed_expert_topk' research/history/round_summaries -g 'round_*.json' | tail -n 80" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0042.json:20:    "summary": "不回到 plain selector 邻域微调，也不继续对未知结果的 `two_stage_residual_expert` 做预设调参。本轮以 r27 的 `expert_topk K=192 EF=1` 为 matched baseline，只改 `ARCHITECTURE` 到 `lowrank_expert_topk`，先拿到 `lowrank + expert` 这条结构线在当前 target 上的首个真实训练点。",
+research/history/round_summaries/round_0042.json:23:    "family_name": "lowrank_expert_topk",
+research/history/round_summaries/round_0042.json:30:        "value": "lowrank_expert_topk"
+research/history/round_summaries/round_0042.json:35:      "`lowrank_expert_topk` 的导出形式是静态 low-rank trunk 库加单 expert 静态子库上的有限加权和，属于扩展兼容 family。",
+research/history/round_summaries/round_0042.json:40:      "如果 `lowrank_expert_topk` 首点明显优于 r27 `expert_topk`，下一轮保持 family 不变，只改 `TRUNK_RANK` 向低成本方向压缩，测试是否能形成新的 Pareto 段。",
+research/history/round_summaries/round_0042.json:52:    "architecture": "lowrank_expert_topk",
+research/history/round_summaries/round_0042.json:61:    "description": "不回到 plain selector 邻域微调，也不继续对未知结果的 `two_stage_residual_expert` 做预设调参。本轮以 r27 的 `expert_topk K=192 EF=1` 为 matched baseline，只改 `ARCHITECTURE` 到 `lowrank_expert_topk`，先拿到 `lowrank + expert` 这条结构线在当前 target 上的首个真实训练点。",
+research/history/round_summaries/round_0042.json:102:    "ARCHITECTURE": "lowrank_expert_topk",
+research/history/round_summaries/round_0042.json:122:    "architecture": "lowrank_expert_topk",
+research/history/round_summaries/round_0042.json:134:    "family_name": "lowrank_expert_topk",
+research/history/round_summaries/round_0042.json:152:    "ARCHITECTURE": "lowrank_expert_topk",
+research/history/round_summaries/round_0141.json:19:    "hypothesis": "最终重构公式为 x_hat = Σ_{i∈S_sh(h(x))} α_i^sh(x) u_i + Σ_{e∈E(h(x))} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}，其中 h(x)=ReLU(Bx)，U={u_i} 是 shared 静态向量库，{B_e} 是 routed expert 静态子库。在线侧可导出为“shared low-rank projection + shared library lookup + routed expert local top-k + 有限加权和”，静态库不随样本动态生成，因此 `shared_lowrank_routed_expert_topk` 判定为直接兼容，不是不兼容 family。唯一主假设：相对 r123 仅把 `ARCHITECTURE` 从 `shared_routed_expert_topk` 切到 `shared_lowrank_routed_expert_topk`，保持 `K=112`、`EXPANSION_FACTOR=1`、`ACTIVE_EXPERTS=2`、`FACTORIZED_HIDDEN_DIM=256`、`LATENTS_PER_EXPERT=224`、`NUM_EXPERTS=64` 与其余训练配方不变，直接做一次 matched-cost hetero-MoE 结构对照，回答“shared low-rank basis + expert-specific local head”这条线在约 0.30x total_cost 下是否能形成比当前 low-cost anchor 更有价值的新结构段。",
+research/history/round_summaries/round_0141.json:36:      "本轮不是回到 `shared_routed_expert_topk` 做旧 family 局部微调，而是以当前低成本 reference r123 为 matched baseline，直接重验更符合当前 agenda 的 hetero MoE 结构 `shared_lowrank_routed_expert_topk`。",
+research/history/round_summaries/round_0141.json:40:      "如果该点在约 0.30x 下明显优于现有 `shared_routed_expert_topk` 邻近锚点，则下一轮保持该 family 不变，只改 `FACTORIZED_HIDDEN_DIM` 或 `LATENTS_PER_EXPERT` 继续压低 shared/routed 成本。",
+research/history/round_summaries/round_0141.json:87:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:20:    "summary": "以 r115 为 reference，保持 `shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=192`，继续完成当前 shared+routed 低成本子线的 width knee 定位，并测试这条直接兼容结构能否进一步左移到约 0.22x。",
+research/history/round_summaries/round_0116.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:35:      "r115 已形成新的更靠左非支配点：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=224` 在约 0.24x total_cost 下达到 FVU 0.1397。",
+research/history/round_summaries/round_0116.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:62:    "description": "以 r115 为 reference，保持 `shared_routed_expert_topk`、`K=64`、`ACTIVE_EXPERTS=2`、`NUM_EXPERTS=64` 不变，只改 `LATENTS_PER_EXPERT=192`，继续完成当前 shared+routed 低成本子线的 width knee 定位，并测试这条直接兼容结构能否进一步左移到约 0.22x。",
+research/history/round_summaries/round_0116.json:87:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:108:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:133:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:145:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0116.json:168:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:19:    "hypothesis": "最终重构公式设为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与各 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选出少量 expert，再做 shared 子库查表 + routed 子库查表 + 有限加权和，因此可直接导出到 LUTurbo/Lottable 推理链路；我将 `shared_routed_expert_topk` 判断为直接兼容。明确排除不兼容 family：`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled 结构不能进入当前 frontier，也不能驱动本轮决策。本轮唯一假设是：在 r110 已把 `K=96, ACTIVE_EXPERTS=2` 的 shared+routed 低成本线压到约 0.32x、FVU=0.1191 之后，继续相对 r110 只把 `LATENTS_PER_EXPERT` 从 288 降到 256，可以用纯 encoder-side left shift 把总成本进一步压到约 0.30x（selection≈0.20x, deployment≈0.09x），而不再额外伤害 sparse lookup 预算；如果 FVU 仍明显优于现有低成本 anchor `expert_topk K=128` 的 0.3149，并保持在 shared+routed 低成本线的可接受退化范围内，就说明这条兼容 family 的 Pareto knee 仍可通过缩窄每-expert 宽度继续向左推进。",
+research/history/round_summaries/round_0111.json:20:    "summary": "Round 111 继续沿 `shared_routed_expert_topk` 的宽度 knee 做单变量压缩。以 r110 为 reference，只改 `LATENTS_PER_EXPERT=256`，回答当前 shared+routed 低成本前沿在 `K=96, ACTIVE_EXPERTS=2` 下是否还能继续靠缩窄每-expert 宽度换成本，而不必先回到 `K` 轴。",
+research/history/round_summaries/round_0111.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:36:      "按当前 1024x4096 cost proxy 估算，`shared_routed_expert_topk K=96 NUM_EXPERTS=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=256` 的 selection≈0.20x、deployment≈0.09x、total≈0.30x，显著低于 1.5×h×n 硬预算。",
+research/history/round_summaries/round_0111.json:37:      "当前 <0.5x 区域最有信息量的兼容主线已经从旧 `expert_topk` anchor 转到 `shared_routed_expert_topk`；本轮继续补它的 encoder-width knee，而不是回到 old-family 局部扫点。"
+research/history/round_summaries/round_0111.json:53:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:62:    "description": "Round 111 继续沿 `shared_routed_expert_topk` 的宽度 knee 做单变量压缩。以 r110 为 reference，只改 `LATENTS_PER_EXPERT=256`，回答当前 shared+routed 低成本前沿在 `K=96, ACTIVE_EXPERTS=2` 下是否还能继续靠缩窄每-expert 宽度换成本，而不必先回到 `K` 轴。",
+research/history/round_summaries/round_0111.json:87:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:108:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:133:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:145:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0111.json:168:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:7:  "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:19:    "hypothesis": "最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 shared 子库 B^sh 与 routed expert 子库 {B_e} 都是静态向量库，在线侧只做轻量 router 选择少量 routed experts，然后执行 shared 子库查表 + routed 子库查表 + 有限加权求和，因此可直接导出到 LUTurbo/Lottable 推理链路，兼容性判断为直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍明确不兼容，不能驱动 frontier。r159→r160 已证明 `LATENTS_PER_EXPERT=160` 这条更轻 shared+routed 子线在 `<0.25x` 带内仍可通过增加少量 lookup budget 稳定改善（0.20x/0.1551 -> 0.21x/0.1484），因此当前最有信息量的问题是这条子线是否仍主要受 deployment lookup 限制。唯一主假设是：相对 r160 仅把 `K` 从 80 提到 96，保持 `ARCHITECTURE=shared_routed_expert_topk`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`NUM_EXPERTS=64` 与其余训练配方不变，可以把 total_cost 控制在约 0.22x，同时继续显著改善 FVU；若能逼近或优于当前 0.22x 锚点 0.1464，并尽量接近 0.24x 锚点 0.1397，则说明更轻 expert 子库这条低成本主线仍值得继续，而不是马上回到更宽子库或切到别的 family。",
+research/history/round_summaries/round_0161.json:20:    "summary": "以 r160 为 reference，保持当前更轻的 `shared_routed_expert_topk` 配方不变，只改 `K=96`。这是一轮严格留在 `<0.25x` 主战场的 matched-cost deployment probe，直接测试 `LATENTS_PER_EXPERT=160` 这条更轻 shared+routed 子线是否还能在约 0.22x 成本下继续向现有 low-cost best 靠近。",
+research/history/round_summaries/round_0161.json:23:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:35:      "r159 已给出更左 low-cost anchor：`shared_routed_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 在约 0.20x total_cost 下达到 FVU 0.1551。",
+research/history/round_summaries/round_0161.json:38:      "本轮不需要代码修改；`K`、`LATENTS_PER_EXPERT`、`ACTIVE_EXPERTS` 与 `shared_routed_expert_topk` 的 wiring 已在历史轮次中稳定生效。"
+research/history/round_summaries/round_0161.json:43:      "如果 `K=96` 仍明显落后于同成本 anchors，则可下调 width=160 子线优先级，下一轮改做 low-cost matched architecture probe，例如直接对照 `shared_routed_factorized_expert_topk` 是否能在同成本带提供更优质量。"
+research/history/round_summaries/round_0161.json:54:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:63:    "description": "以 r160 为 reference，保持当前更轻的 `shared_routed_expert_topk` 配方不变，只改 `K=96`。这是一轮严格留在 `<0.25x` 主战场的 matched-cost deployment probe，直接测试 `LATENTS_PER_EXPERT=160` 这条更轻 shared+routed 子线是否还能在约 0.22x 成本下继续向现有 low-cost best 靠近。",
+research/history/round_summaries/round_0161.json:88:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:109:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:134:    "architecture": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:146:    "family_name": "shared_routed_expert_topk",
+research/history/round_summaries/round_0161.json:169:    "ARCHITECTURE": "shared_routed_expert_topk",
+research/history/round_summaries/round_0184.json:7:  "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:19:    "hypothesis": "候选 family 设为 `factorized_expert_topk`。最终重构公式为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维投影，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 有限加权求和”的 LUTurbo/Lottable 推理链路，静态库不随样本动态生成，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍是 `不兼容`，只能作历史参考，不能驱动当前 frontier。r183 的新 family `shared_two_stage_residual_expert` 在约 `0.24x` 下仅做到 `FVU=0.1411`，说明“shared coarse trunk + routed residual cleanup”这条 two-stage 变体没有打败现有 low-cost anchor；因此下一步更高信息量的问题不是继续在 shared/coarse 线上补参数，而是转向当前高优先级但尚未在这条 exact low-cost recipe 上 fresh 验证的“expert 内部 low-rank / small head”槽位。相对 r176 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=108`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“把 routed-only expert 的 full-dim 局部 scorer 换成 shared bottleneck + expert-specific small head，能否在更低总成本下修复 r176 的质量缺口”。，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。",
+research/history/round_summaries/round_0184.json:20:    "summary": "以 r176 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`，做一轮新的 `<0.25x` low-cost architecture probe。目标是在约 `0.19x` 总成本下直接判断：把 routed-only `expert_topk` 换成“shared bottleneck + expert-specific small head”的 expert-internal low-rank 变体，是否能比 r176 更接近当前 `shared_routed_expert_topk` low-cost anchors。",
+research/history/round_summaries/round_0184.json:23:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:25:    "self_review": "这轮严格遵守 param_only 单变量约束：相对 r176 只改 `ARCHITECTURE`。选择 r176 而不是 r165，是为了把比较聚焦在最新的 routed-only 负信号上，直接回答“expert path 太短的问题，是否能靠 expert 内部 low-rank / small head 修复”，而不是重新把问题混到 shared branch 是否存在。选择 `factorized_expert_topk` 而不是继续回到 `shared_lowrank_*` 或 `shared_two_stage_*`，是因为后两条线在当前 target 上刚给出更直接的负信号；当前更值得补的是尚未在这条 exact low-cost recipe 上 fresh 验证的 routed-only small-head 槽位。主要风险是该 family 的旧轮次先验偏弱；但这些都属于旧位置、旧 recipe 的弱先验，不足以替代当前 target 上这次更干净的 matched-cost architecture probe。",
+research/history/round_summaries/round_0184.json:30:        "value": "factorized_expert_topk"
+research/history/round_summaries/round_0184.json:35:      "`factorized_expert_topk` 的 LUTurbo 导出形式仍是静态 expert 子库上的有限加权和，应按 `扩展兼容` 处理。",
+research/history/round_summaries/round_0184.json:38:      "r183 的 `shared_two_stage_residual_expert` 已在约 `0.24x` 失败并归档，当前不应继续沿 shared-coarse two-stage 线做局部参数补点。"
+research/history/round_summaries/round_0184.json:41:      "如果 `factorized_expert_topk@K108` 明显优于 r176 的 `expert_topk@K108`，则说明当前 low-cost gap 里“expert 内部 low-rank / small head”确有价值；下一轮保持 family 不变，只改 `FACTORIZED_HIDDEN_DIM`，确认共享 bottleneck 的最小有效宽度。",
+research/history/round_summaries/round_0184.json:42:      "如果该点仍明显弱于 `shared_routed_expert_topk` anchors，且也没有优于 r176，则可更明确下调 routed-only small-head 这条 low-cost MoE-like 方向的优先级，把预算转向新的 hetero/shared-expert 结构槽位，而不是继续复验同线 family。"
+research/history/round_summaries/round_0184.json:53:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:62:    "description": "以 r176 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`，做一轮新的 `<0.25x` low-cost architecture probe。目标是在约 `0.19x` 总成本下直接判断：把 routed-only `expert_topk` 换成“shared bottleneck + expert-specific small head”的 expert-internal low-rank 变体，是否能比 r176 更接近当前 `shared_routed_expert_topk` low-cost anchors。",
+research/history/round_summaries/round_0184.json:63:    "self_review": "这轮严格遵守 param_only 单变量约束：相对 r176 只改 `ARCHITECTURE`。选择 r176 而不是 r165，是为了把比较聚焦在最新的 routed-only 负信号上，直接回答“expert path 太短的问题，是否能靠 expert 内部 low-rank / small head 修复”，而不是重新把问题混到 shared branch 是否存在。选择 `factorized_expert_topk` 而不是继续回到 `shared_lowrank_*` 或 `shared_two_stage_*`，是因为后两条线在当前 target 上刚给出更直接的负信号；当前更值得补的是尚未在这条 exact low-cost recipe 上 fresh 验证的 routed-only small-head 槽位。主要风险是该 family 的旧轮次先验偏弱；但这些都属于旧位置、旧 recipe 的弱先验，不足以替代当前 target 上这次更干净的 matched-cost architecture probe。",
+research/history/round_summaries/round_0184.json:108:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:133:    "architecture": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:145:    "family_name": "factorized_expert_topk",
+research/history/round_summaries/round_0184.json:168:    "ARCHITECTURE": "factorized_expert_topk",
+research/history/round_summaries/round_0098.json:19:    "hypothesis": "最终重构公式为 x_hat = Σ_{r=1..R} β_r(x) u_r + Σ_{i∈S_{e(x-t(x))}(x-t(x))} α_{e,i}(x) b_{e,i} + Σ_{j∈S_2(r_1)} γ_j(x) c_j，其中 t(x)=Σ_r β_r(x)u_r 是共享 low-rank trunk，{B_e} 是静态 expert 子库，r_1 = x - t(x) - Σ_{i∈S_{e(x-t(x))}(x-t(x))} α_{e,i}(x) b_{e,i}，C={c_j} 是静态 residual 补偿库。在线侧可直接导出到 LUTurbo/Lottable 的“trunk 查表 + 单个静态 expert 子库查表 + residual 补偿查表 + 有限加权和”推理链路，因此 `lowrank_expert_residual` 属于扩展兼容；`expert_topk` 属于直接兼容；`batch_topk` / `adaptive_budget_topk` 属于不兼容，不能驱动 frontier。唯一主假设是：r95-r97 已基本完成当前 `lowrank_expert_topk` 主线的 `TRUNK_RANK=40-48` 与 `K=96-128` knee 定位，因此下一个高信息量问题不再是继续细扫该 family，而是 residual cleanup 在已压缩 recipe 上是否仍值得其额外成本。相对 r96 仅将 `ARCHITECTURE: lowrank_expert_topk -> lowrank_expert_residual`，保持 `K=96`、`TRUNK_RANK=40`、`NUM_EXPERTS=32`、`STAGE1_RATIO=0.25`、`EF=1`、`adam`、`8e-4` 不变；如果 residual 分支在当前 target 上仍有真实结构价值，则 FVU 应显著低于 r96 的 0.1305，并有机会把这条 mid-cost 线压回接近 0.11 左右，同时总成本约为 selection≈0.53x、deployment≈0.13x、total≈0.66x，仍处于允许的 0.3x-0.8x 结构对照带且远低于 1.5×h×n 硬预算。",
+research/history/round_summaries/round_0098.json:20:    "summary": "当前不再继续细扫 `lowrank_expert_topk` 的 `K` 或 `TRUNK_RANK`，因为 `K=96-128` 与 `TRUNK_RANK=40-48` 的边界已经基本补齐。以 r96 为 matched reference，只改 `ARCHITECTURE=lowrank_expert_residual`，直接回答 residual cleanup 在当前最强低成本 `lowrank + expert` recipe 上是否值得其额外成本，这是 operator guide 明确要求在 knee 定位完成后优先回答的结构问题。",
+research/history/round_summaries/round_0098.json:25:    "self_review": "满足单轮单变量约束：相对 r96 只改 `ARCHITECTURE`。这不是回到旧 family 的局部 K 轴，也不是继续重复 routed-only 或 `factorized_expert_topk` 的已否定方向，而是对当前已完成 knee 定位的有效主线做一次高信息量 matched 结构切换。主要风险是参考配置中的 `STAGE1_RATIO=0.25` 在 `lowrank_expert_topk` 下原本不生效、在新 family 下会开始生效，因此这是“recipe matched、但并非所有旋钮都语义共享”的 architecture swap；不过这正是当前需要的真实部署可行结构对照。",
+research/history/round_summaries/round_0098.json:35:      "`lowrank_expert_topk` 当前主线的 `TRUNK_RANK=40-48` 与 `K=96-128` 边界已基本补齐：r95、r96、r97 已经给出足够清晰的 deployment/trunk knee 信息。",
+research/history/round_summaries/round_0098.json:36:      "按照当前 operator guide，knee 定位完成后，下一个高优先级问题应是 matched `lowrank_expert_residual` 对照，而不是继续在 `lowrank_expert_topk` 上细扫。",
+research/history/round_summaries/round_0098.json:38:      "`factorized_expert_topk` 与 routed-only `ACTIVE_EXPERTS>1` 方向仍维持负信号，本轮继续避开这些已低优先级路线。"
+research/history/round_summaries/round_0098.json:42:      "如果 matched `lowrank_expert_residual` 只带来很弱改善，说明当前 target 上 residual cleanup 对已压缩的 `lowrank + expert` recipe 边际价值有限；下一轮应停止让三段式结构主导预算，并考虑回到 `lowrank_expert_topk` 主线或转向 `two_stage_residual_expert`。",
+research/history/round_summaries/round_0098.json:63:    "description": "当前不再继续细扫 `lowrank_expert_topk` 的 `K` 或 `TRUNK_RANK`，因为 `K=96-128` 与 `TRUNK_RANK=40-48` 的边界已经基本补齐。以 r96 为 matched reference，只改 `ARCHITECTURE=lowrank_expert_residual`，直接回答 residual cleanup 在当前最强低成本 `lowrank + expert` recipe 上是否值得其额外成本，这是 operator guide 明确要求在 knee 定位完成后优先回答的结构问题。",
+research/history/round_summaries/round_0098.json:64:    "self_review": "满足单轮单变量约束：相对 r96 只改 `ARCHITECTURE`。这不是回到旧 family 的局部 K 轴，也不是继续重复 routed-only 或 `factorized_expert_topk` 的已否定方向，而是对当前已完成 knee 定位的有效主线做一次高信息量 matched 结构切换。主要风险是参考配置中的 `STAGE1_RATIO=0.25` 在 `lowrank_expert_topk` 下原本不生效、在新 family 下会开始生效，因此这是“recipe matched、但并非所有旋钮都语义共享”的 architecture swap；不过这正是当前需要的真实部署可行结构对照。",
+research/history/round_summaries/round_0098.json:88:    "ARCHITECTURE": "lowrank_expert_topk",
+
+codex
+r210 的真实落盘值是 `objective=0.365326, cost=0.183594, exceed=0.181733`，确实赢了但仍离 0.30 很远。我现在做一轮 matched-cost 候选筛选：优先看是否有结构切换能在同一成本带内换回更低 exceed，而不是盲目继续压 K。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+cands=['lowrank_expert_topk','shared_routed_expert_topk','shared_lowrank_routed_expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk','shared_two_stage_residual_expert','two_stage_residual_expert']
+for a in cands:
+    errs=validate_env_overrides([{'key':'ARCHITECTURE','value':a}], fallback_architecture='expert_topk')
+    print(a, errs)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+lowrank_expert_topk []
+shared_routed_expert_topk []
+shared_lowrank_routed_expert_topk []
+factorized_expert_topk []
+shared_routed_factorized_expert_topk []
+shared_two_stage_residual_expert []
+two_stage_residual_expert []
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+base=dict(k=48, expansion_factor=1, d_model=2048, n_outputs=1024)
+extras=dict(active_experts=2, num_experts=128, latents_per_expert=192, factorized_hidden_dim=256, trunk_rank=16, stage1_ratio=0.25)
+for arch in ['expert_topk','lowrank_expert_topk','shared_routed_expert_topk','shared_lowrank_routed_expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk','shared_two_stage_residual_expert','two_stage_residual_expert']:
+    try:
+        r=compute_selection_cost(architecture=arch, **base, extra_config=extras)
+        print(arch, r)
+    except Exception as e:
+        print(arch, 'ERR', e)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+lowrank_expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+shared_routed_expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+shared_lowrank_routed_expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+factorized_expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+shared_routed_factorized_expert_topk ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+shared_two_stage_residual_expert ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+two_stage_residual_expert ERR compute_selection_cost() got an unexpected keyword argument 'expansion_factor'
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json,glob,os
+wanted=['lowrank_expert_topk','shared_routed_expert_topk','shared_lowrank_routed_expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk','shared_two_stage_residual_expert','two_stage_residual_expert']
+rows=[]
+for p in glob.glob('research/history/round_summaries/round_*.json'):
+    with open(p) as f:
+        d=json.load(f)
+    arch=((d.get('result') or {}).get('architecture') or d.get('family_name'))
+    if arch in wanted:
+        res=d.get('result') or {}
+        rows.append((float(res.get('objective_score') or 'inf'), os.path.basename(p), arch, res.get('total_cost_ratio'), res.get('exceed_alpha_0_50'), res.get('k')))
+rows.sort()
+for row in rows[:40]:
+    print(row)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+(0.388078, 'round_0208.json', 'lowrank_expert_topk', '0.185547', '0.202531', '64')
+(0.39523442745208737, 'round_0159.json', 'shared_routed_expert_topk', '0.21', '0.1852344274520874', '64')
+(0.396871, 'round_0207.json', 'lowrank_expert_topk', '0.199219', '0.197653', '64')
+(0.396941, 'round_0206.json', 'shared_two_stage_residual_expert', '0.210938', '0.186004', '64')
+(0.398672, 'round_0201.json', 'shared_two_stage_residual_expert', '0.210938', '0.187735', '64')
+(0.40286, 'round_0200.json', 'lowrank_expert_topk', '0.214844', '0.188017', '64')
+(0.403221, 'round_0205.json', 'shared_two_stage_residual_expert', '0.210938', '0.192283', '64')
+(0.4051316487789154, 'round_0116.json', 'shared_routed_expert_topk', '0.23', '0.1751316487789154', '64')
+(0.408192526102066, 'round_0160.json', 'shared_routed_expert_topk', '0.23', '0.17819252610206604', '80')
+(0.412777, 'round_0202.json', 'shared_two_stage_residual_expert', '0.234375', '0.178402', '64')
+(0.41847577691078186, 'round_0118.json', 'shared_routed_expert_topk', '0.25', '0.16847577691078186', '80')
+(0.4215753972530365, 'round_0161.json', 'shared_routed_expert_topk', '0.25', '0.1715753972530365', '96')
+(0.42589443922042847, 'round_0191.json', 'shared_two_stage_residual_expert', '0.25', '0.17589443922042847', '96')
+(0.426606148481369, 'round_0187.json', 'lowrank_expert_topk', '0.25', '0.17660614848136902', '96')
+(0.426606148481369, 'round_0197.json', 'lowrank_expert_topk', '0.25', '0.17660614848136902', '96')
+(0.4270162081718445, 'round_0115.json', 'shared_routed_expert_topk', '0.26', '0.16701620817184448', '64')
+(0.4272928333282471, 'round_0165.json', 'shared_routed_expert_topk', '0.26', '0.16729283332824707', '108')
+(0.4284583234786987, 'round_0171.json', 'lowrank_expert_topk', '0.24', '0.18845832347869873', '96')
+(0.42869935393333436, 'round_0164.json', 'shared_routed_expert_topk', '0.26', '0.16869935393333435', '104')
+(0.4308971166610718, 'round_0126.json', 'shared_routed_expert_topk', '0.25', '0.18089711666107178', '64')
+(0.43154133319854737, 'round_0183.json', 'shared_two_stage_residual_expert', '0.26', '0.17154133319854736', '108')
+(0.4319258725643158, 'round_0168.json', 'shared_routed_expert_topk', '0.26', '0.1719258725643158', '112')
+(0.43313311457633974, 'round_0121.json', 'shared_routed_expert_topk', '0.27', '0.16313311457633972', '96')
+(0.43537325620651246, 'round_0163.json', 'shared_routed_expert_topk', '0.26', '0.17537325620651245', '112')
+(0.4358420467376709, 'round_0175.json', 'lowrank_expert_topk', '0.26', '0.1758420467376709', '96')
+(0.4363544774055481, 'round_0162.json', 'shared_routed_expert_topk', '0.27', '0.1663544774055481', '112')
+(0.4366224300861359, 'round_0167.json', 'shared_routed_expert_topk', '0.27', '0.16662243008613586', '111')
+(0.4367393147945404, 'round_0166.json', 'shared_routed_expert_topk', '0.27', '0.1667393147945404', '110')
+(0.4398040068149567, 'round_0170.json', 'lowrank_expert_topk', '0.27', '0.16980400681495667', '96')
+(0.44098910570144656, 'round_0113.json', 'shared_routed_expert_topk', '0.28', '0.16098910570144653', '64')
+(0.44510480761528015, 'round_0174.json', 'shared_lowrank_routed_expert_topk', '0.25', '0.19510480761528015', '96')
+(0.4484442663192749, 'round_0169.json', 'shared_routed_expert_topk', '0.27', '0.1784442663192749', '112')
+(0.449101, 'round_0203.json', 'shared_routed_expert_topk', '0.171875', '0.277226', '64')
+(0.45292028665542605, 'round_0117.json', 'shared_routed_expert_topk', '0.28', '0.17292028665542603', '64')
+(0.4537453532218933, 'round_0112.json', 'shared_routed_expert_topk', '0.3', '0.1537453532218933', '80')
+(0.4543857753276825, 'round_0122.json', 'shared_routed_expert_topk', '0.3', '0.1543857753276825', '96')
+(0.46156728386878965, 'round_0114.json', 'shared_routed_expert_topk', '0.22', '0.24156728386878967', '64')
+(0.467197824716568, 'round_0172.json', 'shared_lowrank_routed_expert_topk', '0.27', '0.197197824716568', '96')
+(0.467197824716568, 'round_0189.json', 'shared_lowrank_routed_expert_topk', '0.27', '0.197197824716568', '96')
+(0.46797699451446534, 'round_0111.json', 'shared_routed_expert_topk', '0.32', '0.14797699451446533', '96')
+
+codex
+验证结果表明这些 matched architecture swap 都在 allowlist 内。接下来我只补一件事：算清这些候选在 `K=48 / NUM_EXPERTS=128 / LATENTS_PER_EXPERT=192` 这条当前配方附近到底落在哪个成本带，避免选到一个一上来就偏离主战场的结构。
+exec
+/bin/bash -lc "sed -n '139,240p' research/AutoResearch/compatibility.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+def compute_selection_cost(
+    architecture: str,
+    k: int = 128,
+    ef: int = 12,
+    d_in: int | None = None,
+    n_output: int | None = None,
+    extra_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute encoder-side selection cost by instantiating the model.
+
+    Uses subprocess to avoid import-time GPU issues, similar to
+    ``policy.behavioral_diff_test()``.
+    """
+    if d_in is None or n_output is None:
+        profile = default_target_profile()
+        if d_in is None:
+            d_in = profile.d_in
+        if n_output is None:
+            n_output = profile.n_output
+
+    cfg_parts = [
+        f"architecture='{architecture}'",
+        f"k={k}",
+        f"expansion_factor={ef}",
+    ]
+    if extra_config:
+        for key, value in extra_config.items():
+            if value is not None:
+                cfg_parts.append(f"{key}={value!r}")
+
+    code = f"""\
+import sys, json; sys.path.insert(0, '.')
+from sparsify.sparse_coder import _get_sae_class
+from sparsify.config import SparseCoderConfig
+cfg = SparseCoderConfig({', '.join(cfg_parts)})
+cls = _get_sae_class('{architecture}')
+m = cls({d_in}, cfg, device='cpu')
+print("COST:" + json.dumps(m.selection_cost_estimate({int(n_output)})))
+"""
+    try:
+        result = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.startswith("COST:"):
+                return json.loads(line[5:])
+        return {"error": "parse_failed", "stderr": result.stderr[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_COST_TABLE_ARCHITECTURES = [
+    "topk", "gated", "factorized_topk",
+    "lowrank_residual", "lowrank_soft_codebook_residual",
+    "lowrank_two_stage_soft_codebook_residual",
+]
+_COST_TABLE_EF_VALUES = [1, 2, 3, 4, 6, 8, 12]
+
+
+def compute_selection_cost_table(
+    architectures: list[str] | None = None,
+    ef_values: list[int] | None = None,
+    k: int = 32,
+    d_in: int | None = None,
+    n_output: int | None = None,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Batch-compute selection costs for (architecture, EF) combinations.
+
+    Uses a single subprocess to avoid N separate invocations.
+    Returns {(arch, ef): cost_dict} where cost_dict has keys:
+    ratio, feasible, total_accesses, etc.
+    """
+    profile = default_target_profile()
+    d_in = profile.d_in if d_in is None else d_in
+    n_output = profile.n_output if n_output is None else n_output
+    archs = architectures or _COST_TABLE_ARCHITECTURES
+    efs = ef_values or _COST_TABLE_EF_VALUES
+
+    combos = [(arch, ef) for arch in archs for ef in efs]
+    if not combos:
+        return {}
+
+    # Build a single subprocess that computes all costs
+    lines = [
+        "import sys, json; sys.path.insert(0, '.')",
+        "from sparsify.sparse_coder import _get_sae_class",
+        "from sparsify.config import SparseCoderConfig",
+    ]
+    for arch, ef in combos:
+        lines.append(f"try:")
+        lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
+        lines.append(f"    _cls = _get_sae_class('{arch}')")
+        lines.append(f"    _m = _cls({d_in}, _cfg, device='cpu')")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate({int(n_output)})))")
+        lines.append(f"except Exception as _e:")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps({{'error': str(_e)}}))")
+
+exec
+/bin/bash -lc "python - <<'PY'
+import inspect
+from research.AutoResearch.compatibility import compute_selection_cost
+print(inspect.signature(compute_selection_cost))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+(architecture: 'str', k: 'int' = 128, ef: 'int' = 12, d_in: 'int | None' = None, n_output: 'int | None' = None, extra_config: 'dict[str, Any] | None' = None) -> 'dict[str, Any]'
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+base=dict(architecture='expert_topk', d_in=2048, n_output=1024, k=48, ef=1, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25})
+print(compute_selection_cost(**base))
+for arch in ['lowrank_expert_topk','shared_routed_expert_topk','shared_lowrank_routed_expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk','shared_two_stage_residual_expert','two_stage_residual_expert']:
+    kw=base.copy(); kw['architecture']=arch
+    try:
+        print(arch, compute_selection_cost(**kw))
+    except Exception as e:
+        print(arch, 'ERR', e)
+PY" in /root/sparsify-ascend
+codex
+成本子进程还在跑。我在等这些候选的 exact cost，拿到后就能决定是继续沿 `expert_topk` 定 knee，还是切到一个真正的 matched-cost 结构槽位。
+codex
+批量成本脚本卡得比较久，我改成逐个候选测。目标只剩三个：`lowrank_expert_topk`、`shared_routed_expert_topk`、`shared_two_stage_residual_expert`。这三条是当前最像“同一成本带换更低 exceed”的结构槽位。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('lowrank_expert_topk', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('shared_routed_expert_topk', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('shared_two_stage_residual_expert', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+ succeeded in 4935ms:
+{'total_accesses': 1114112, 'original_matmul_accesses': 2097152, 'ratio': 0.53, 'budget_ratio': 0.35, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 32768, 'shape': '2048x16'}, {'name': 'trunk_decoder', 'accesses': 32768, 'shape': '16x2048'}, {'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 196608, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 49152, 'shape': 'r=16×(d=2048+n=1024)'}, {'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1310720, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+
+ succeeded in 4869ms:
+{'total_accesses': 1441792, 'original_matmul_accesses': 2097152, 'ratio': 0.69, 'budget_ratio': 0.46, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'shared_expert_encoder', 'accesses': 393216, 'shape': 'shared=1×2048x192'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1589248, 'combined_ratio': 0.76, 'combined_budget_ratio': 0.51, 'combined_feasible': True}
+
+ succeeded in 35235ms:
+{'total_accesses': 1048576, 'original_matmul_accesses': 2097152, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1196032, 'combined_ratio': 0.57, 'combined_budget_ratio': 0.38, 'combined_feasible': True}
+lowrank_expert_topk {'total_accesses': 1114112, 'original_matmul_accesses': 2097152, 'ratio': 0.53, 'budget_ratio': 0.35, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 32768, 'shape': '2048x16'}, {'name': 'trunk_decoder', 'accesses': 32768, 'shape': '16x2048'}, {'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 196608, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 49152, 'shape': 'r=16×(d=2048+n=1024)'}, {'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1310720, 'combined_ratio': 0.62, 'combined_budget_ratio': 0.42, 'combined_feasible': True}
+shared_routed_expert_topk {'total_accesses': 1441792, 'original_matmul_accesses': 2097152, 'ratio': 0.69, 'budget_ratio': 0.46, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'shared_expert_encoder', 'accesses': 393216, 'shape': 'shared=1×2048x192'}, {'name': 'active_routed_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1589248, 'combined_ratio': 0.76, 'combined_budget_ratio': 0.51, 'combined_feasible': True}
+shared_lowrank_routed_expert_topk {'total_accesses': 1392640, 'original_matmul_accesses': 2097152, 'ratio': 0.66, 'budget_ratio': 0.44, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '2048x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'shared_lowrank_head', 'accesses': 49152, 'shape': 'shared=1×256x192'}, {'name': 'active_routed_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1540096, 'combined_ratio': 0.73, 'combined_budget_ratio': 0.49, 'combined_feasible': True}
+factorized_expert_topk {'total_accesses': 655360, 'original_matmul_accesses': 2097152, 'ratio': 0.31, 'budget_ratio': 0.21, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '2048x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'active_expert_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 802816, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.26, 'combined_feasible': True}
+shared_routed_factorized_expert_topk {'total_accesses': 704512, 'original_matmul_accesses': 2097152, 'ratio': 0.34, 'budget_ratio': 0.22, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '2048x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'shared_factorized_head', 'accesses': 49152, 'shape': 'shared=1×256x192'}, {'name': 'active_routed_factorized_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 851968, 'combined_ratio': 0.41, 'combined_budget_ratio': 0.27, 'combined_feasible': True}
+shared_two_stage_residual_expert {'total_accesses': 1441792, 'original_matmul_accesses': 2097152, 'ratio': 0.69, 'budget_ratio': 0.46, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'shared_expert_encoder', 'accesses': 393216, 'shape': 'shared=1×2048x192'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1589248, 'combined_ratio': 0.76, 'combined_budget_ratio': 0.51, 'combined_feasible': True}
+two_stage_residual_expert {'total_accesses': 5242880, 'original_matmul_accesses': 2097152, 'ratio': 2.5, 'budget_ratio': 1.67, 'feasible': False, 'breakdown': [{'name': 'encoder', 'accesses': 4194304, 'shape': '2048x2048'}, {'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 5390336, 'combined_ratio': 2.57, 'combined_budget_ratio': 1.71, 'combined_feasible': False}
+
+ succeeded in 5161ms:
+{'total_accesses': 1441792, 'original_matmul_accesses': 2097152, 'ratio': 0.69, 'budget_ratio': 0.46, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'shared_expert_encoder', 'accesses': 393216, 'shape': 'shared=1×2048x192'}, {'name': 'active_routed_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1589248, 'combined_ratio': 0.76, 'combined_budget_ratio': 0.51, 'combined_feasible': True}
+
+codex
+这些 matched architecture swap 在当前继承配方上都明显偏离主战场：按本地 cost 估算，`lowrank_expert_topk@K48` 已到 `~0.62`，`shared_routed_expert_topk/shared_two_stage_residual_expert@K48` 更到 `~0.76`。也就是说，直接拿 r210 recipe 去做 architecture-only 切换并不匹配当前 `0.18~0.22` 目标带。
+codex
+`factorized_expert_topk` 这条线还没排除完。我补算它和 `shared_routed_factorized_expert_topk` 在当前配方上的成本；如果它们真能留在 `0.18~0.22` 一带，才值得考虑做 Round 211 的结构跳转。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+for p in ['research/history/round_summaries/round_0184.json','research/history/round_summaries/round_0127.json','research/history/round_summaries/round_0174.json']:
+    with open(p) as f:
+        d=json.load(f)
+    res=d['result']
+    print(p, res.get('architecture'), res.get('objective_score'), res.get('total_cost_ratio'), res.get('exceed_alpha_0_50'), res.get('k'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0184.json factorized_expert_topk 0.5062663865089416 0.22 0.28626638650894165 108
+research/history/round_summaries/round_0127.json shared_routed_factorized_expert_topk 0.5507738280296326 0.28 0.27077382802963257 128
+research/history/round_summaries/round_0174.json shared_lowrank_routed_expert_topk 0.44510480761528015 0.25 0.19510480761528015 96
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('factorized_expert_topk', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('shared_routed_factorized_expert_topk', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+ succeeded in 4272ms:
+{'total_accesses': 704512, 'original_matmul_accesses': 2097152, 'ratio': 0.34, 'budget_ratio': 0.22, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '2048x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'shared_factorized_head', 'accesses': 49152, 'shape': 'shared=1×256x192'}, {'name': 'active_routed_factorized_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 851968, 'combined_ratio': 0.41, 'combined_budget_ratio': 0.27, 'combined_feasible': True}
+
+ succeeded in 4472ms:
+{'total_accesses': 655360, 'original_matmul_accesses': 2097152, 'ratio': 0.31, 'budget_ratio': 0.21, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 524288, 'shape': '2048x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'active_expert_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 802816, 'combined_ratio': 0.38, 'combined_budget_ratio': 0.26, 'combined_feasible': True}
+
+codex
+`factorized_expert_topk` 的成本没有 shared/trunk 那么夸张，但仍明显高于当前主战场；我再补一个校准点，用同一 cost 函数算当前 `expert_topk@K48`，确认这个工具与 runtime 之间的倍率关系后再决定是否值得拿 factorized family 继续赌。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('expert_topk', k=48, ef=1, d_in=2048, n_output=1024, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+ succeeded in 4293ms:
+{'total_accesses': 1048576, 'original_matmul_accesses': 2097152, 'ratio': 0.5, 'budget_ratio': 0.33, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 262144, 'shape': '2048x128'}, {'name': 'active_expert_encoder', 'accesses': 786432, 'shape': 'active=2×2048x192'}], 'deployment_accesses': 147456, 'deployment_ratio': 0.07, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 147456, 'shape': 'K=48×(d=2048+n=1024)'}], 'combined_accesses': 1196032, 'combined_ratio': 0.57, 'combined_budget_ratio': 0.38, 'combined_feasible': True}
+
+codex
+我刚校准出了一个关键问题：前面那组 architecture cost 用错了维度顺序，导致所有候选都被高估了。当前 target 的有效口径应是 `d_in=1024, n_output=4096`，也就是 fused QKV proxy。我要按这个口径重算候选，再做 Round 211 选择。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+extra={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}
+for arch in ['expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk','lowrank_expert_topk','shared_routed_expert_topk','shared_two_stage_residual_expert']:
+    print(arch, compute_selection_cost(arch, k=48, ef=1, d_in=1024, n_output=4096, extra_config=extra))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+extra={'active_experts':2,'num_experts':64,'latents_per_expert':160,'factorized_hidden_dim':256,'trunk_rank':8,'stage1_ratio':0.25}
+for arch in ['lowrank_expert_topk','factorized_expert_topk','shared_routed_factorized_expert_topk']:
+    print(arch, compute_selection_cost(arch, k=64, ef=1, d_in=1024, n_output=4096, extra_config=extra))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import json,glob,os
+wanted=['factorized_expert_topk','shared_routed_factorized_expert_topk','shared_lowrank_routed_expert_topk','shared_two_stage_residual_expert']
+rows=[]
+for p in glob.glob('research/history/round_summaries/round_*.json'):
+    with open(p) as f:
+        d=json.load(f)
+    arch=((d.get('result') or {}).get('architecture') or d.get('family_name'))
+    if arch in wanted:
+        res=d.get('result') or {}
+        rows.append((float(res.get('objective_score') or 'inf'), os.path.basename(p), arch, res.get('total_cost_ratio'), res.get('exceed_alpha_0_50'), res.get('k')))
+rows.sort()
+for row in rows[:30]:
+    print(row)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+(0.396941, 'round_0206.json', 'shared_two_stage_residual_expert', '0.210938', '0.186004', '64')
+(0.398672, 'round_0201.json', 'shared_two_stage_residual_expert', '0.210938', '0.187735', '64')
+(0.403221, 'round_0205.json', 'shared_two_stage_residual_expert', '0.210938', '0.192283', '64')
+(0.412777, 'round_0202.json', 'shared_two_stage_residual_expert', '0.234375', '0.178402', '64')
+(0.42589443922042847, 'round_0191.json', 'shared_two_stage_residual_expert', '0.25', '0.17589443922042847', '96')
+(0.43154133319854737, 'round_0183.json', 'shared_two_stage_residual_expert', '0.26', '0.17154133319854736', '108')
+(0.44510480761528015, 'round_0174.json', 'shared_lowrank_routed_expert_topk', '0.25', '0.19510480761528015', '96')
+(0.467197824716568, 'round_0172.json', 'shared_lowrank_routed_expert_topk', '0.27', '0.197197824716568', '96')
+(0.467197824716568, 'round_0189.json', 'shared_lowrank_routed_expert_topk', '0.27', '0.197197824716568', '96')
+(0.4828156018257141, 'round_0178.json', 'shared_lowrank_routed_expert_topk', '0.29', '0.1928156018257141', '108')
+(0.4828156018257141, 'round_0179.json', 'shared_lowrank_routed_expert_topk', '0.29', '0.1928156018257141', '108')
+(0.4828156018257141, 'round_0180.json', 'shared_lowrank_routed_expert_topk', '0.29', '0.1928156018257141', '108')
+(0.48930084466934204, 'round_0155.json', 'shared_lowrank_routed_expert_topk', '0.31', '0.17930084466934204', '96')
+(0.500974189043045, 'round_0192.json', 'shared_two_stage_residual_expert', '0.23', '0.27097418904304504', '96')
+(0.5022969710826874, 'round_0141.json', 'shared_lowrank_routed_expert_topk', '0.33', '0.17229697108268738', '112')
+(0.5062663865089416, 'round_0184.json', 'factorized_expert_topk', '0.22', '0.28626638650894165', '108')
+(0.5160000729560852, 'round_0149.json', 'factorized_expert_topk', '0.23', '0.2860000729560852', '112')
+(0.5205702936649322, 'round_0135.json', 'shared_lowrank_routed_expert_topk', '0.36', '0.16057029366493225', '128')
+(0.5331481444835663, 'round_0134.json', 'shared_lowrank_routed_expert_topk', '0.38', '0.15314814448356628', '128')
+(0.5375249493122101, 'round_0177.json', 'shared_routed_factorized_expert_topk', '0.23', '0.3075249493122101', '108')
+(0.543800106048584, 'round_0142.json', 'shared_routed_factorized_expert_topk', '0.24', '0.303800106048584', '112')
+(0.5497722566127777, 'round_0129.json', 'shared_lowrank_routed_expert_topk', '0.4', '0.1497722566127777', '128')
+(0.5507738280296326, 'round_0127.json', 'shared_routed_factorized_expert_topk', '0.28', '0.27077382802963257', '128')
+(0.5507738280296326, 'round_0128.json', 'shared_routed_factorized_expert_topk', '0.28', '0.27077382802963257', '128')
+(0.555188, 'round_0204.json', 'shared_lowrank_routed_expert_topk', '0.193359', '0.361829', '64')
+(0.5768891370296478, 'round_0185.json', 'factorized_expert_topk', '0.26', '0.3168891370296478', '108')
+(0.5929492318630218, 'round_0133.json', 'factorized_expert_topk', '0.24', '0.35294923186302185', '128')
+(0.6027074575424194, 'round_0193.json', 'factorized_expert_topk', '0.2', '0.40270745754241943', '96')
+(0.6029845440387727, 'round_0090.json', 'factorized_expert_topk', '0.34', '0.2629845440387726', '128')
+(0.6029845440387727, 'round_0091.json', 'factorized_expert_topk', '0.34', '0.2629845440387726', '128')
+
+ succeeded in 13095ms:
+lowrank_expert_topk {'total_accesses': 409600, 'original_matmul_accesses': 4194304, 'ratio': 0.1, 'budget_ratio': 0.07, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 8192, 'shape': '1024x8'}, {'name': 'trunk_decoder', 'accesses': 8192, 'shape': '8x1024'}, {'name': 'router', 'accesses': 65536, 'shape': '1024x64'}, {'name': 'active_expert_encoder', 'accesses': 327680, 'shape': 'active=2×1024x160'}], 'deployment_accesses': 368640, 'deployment_ratio': 0.09, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 40960, 'shape': 'r=8×(d=1024+n=4096)'}, {'name': 'sparse_lookup', 'accesses': 327680, 'shape': 'K=64×(d=1024+n=4096)'}], 'combined_accesses': 778240, 'combined_ratio': 0.19, 'combined_budget_ratio': 0.12, 'combined_feasible': True}
+factorized_expert_topk {'total_accesses': 360448, 'original_matmul_accesses': 4194304, 'ratio': 0.09, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 16384, 'shape': '256x64'}, {'name': 'active_expert_head', 'accesses': 81920, 'shape': 'active=2×256x160'}], 'deployment_accesses': 327680, 'deployment_ratio': 0.08, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 327680, 'shape': 'K=64×(d=1024+n=4096)'}], 'combined_accesses': 688128, 'combined_ratio': 0.16, 'combined_budget_ratio': 0.11, 'combined_feasible': True}
+shared_routed_factorized_expert_topk {'total_accesses': 401408, 'original_matmul_accesses': 4194304, 'ratio': 0.1, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 16384, 'shape': '256x64'}, {'name': 'shared_factorized_head', 'accesses': 40960, 'shape': 'shared=1×256x160'}, {'name': 'active_routed_factorized_head', 'accesses': 81920, 'shape': 'active=2×256x160'}], 'deployment_accesses': 327680, 'deployment_ratio': 0.08, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 327680, 'shape': 'K=64×(d=1024+n=4096)'}], 'combined_accesses': 729088, 'combined_ratio': 0.17, 'combined_budget_ratio': 0.12, 'combined_feasible': True}
+
+ succeeded in 25910ms:
+expert_topk {'total_accesses': 524288, 'original_matmul_accesses': 4194304, 'ratio': 0.12, 'budget_ratio': 0.08, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'active_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 770048, 'combined_ratio': 0.18, 'combined_budget_ratio': 0.12, 'combined_feasible': True}
+factorized_expert_topk {'total_accesses': 393216, 'original_matmul_accesses': 4194304, 'ratio': 0.09, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'active_expert_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 638976, 'combined_ratio': 0.15, 'combined_budget_ratio': 0.1, 'combined_feasible': True}
+shared_routed_factorized_expert_topk {'total_accesses': 442368, 'original_matmul_accesses': 4194304, 'ratio': 0.11, 'budget_ratio': 0.07, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'shared_factorized_head', 'accesses': 49152, 'shape': 'shared=1×256x192'}, {'name': 'active_routed_factorized_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 688128, 'combined_ratio': 0.16, 'combined_budget_ratio': 0.11, 'combined_feasible': True}
+lowrank_expert_topk {'total_accesses': 557056, 'original_matmul_accesses': 4194304, 'ratio': 0.13, 'budget_ratio': 0.09, 'feasible': True, 'breakdown': [{'name': 'trunk_encoder', 'accesses': 16384, 'shape': '1024x16'}, {'name': 'trunk_decoder', 'accesses': 16384, 'shape': '16x1024'}, {'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'active_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 327680, 'deployment_ratio': 0.08, 'deployment_breakdown': [{'name': 'trunk_deploy', 'accesses': 81920, 'shape': 'r=16×(d=1024+n=4096)'}, {'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 884736, 'combined_ratio': 0.21, 'combined_budget_ratio': 0.14, 'combined_feasible': True}
+shared_routed_expert_topk {'total_accesses': 720896, 'original_matmul_accesses': 4194304, 'ratio': 0.17, 'budget_ratio': 0.11, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'shared_expert_encoder', 'accesses': 196608, 'shape': 'shared=1×1024x192'}, {'name': 'active_routed_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 966656, 'combined_ratio': 0.23, 'combined_budget_ratio': 0.15, 'combined_feasible': True}
+shared_two_stage_residual_expert {'total_accesses': 720896, 'original_matmul_accesses': 4194304, 'ratio': 0.17, 'budget_ratio': 0.11, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'shared_expert_encoder', 'accesses': 196608, 'shape': 'shared=1×1024x192'}, {'name': 'active_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 966656, 'combined_ratio': 0.23, 'combined_budget_ratio': 0.15, 'combined_feasible': True}
+
+codex
+批量那组又拖住了；我不再等整包结果，直接单测最可能的两个结构探针：`factorized_expert_topk` 和 `shared_routed_factorized_expert_topk`。它们是仅剩还可能留在目标 cost 带里的结构槽位。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('shared_routed_factorized_expert_topk', k=48, ef=1, d_in=1024, n_output=4096, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('factorized_expert_topk', k=48, ef=1, d_in=1024, n_output=4096, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost
+print(compute_selection_cost('expert_topk', k=40, ef=1, d_in=1024, n_output=4096, extra_config={'active_experts':2,'num_experts':128,'latents_per_expert':192,'factorized_hidden_dim':256,'trunk_rank':16,'stage1_ratio':0.25}))
+PY" in /root/sparsify-ascend
+ succeeded in 4354ms:
+{'total_accesses': 442368, 'original_matmul_accesses': 4194304, 'ratio': 0.11, 'budget_ratio': 0.07, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'shared_factorized_head', 'accesses': 49152, 'shape': 'shared=1×256x192'}, {'name': 'active_routed_factorized_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 688128, 'combined_ratio': 0.16, 'combined_budget_ratio': 0.11, 'combined_feasible': True}
+
+ succeeded in 4426ms:
+{'total_accesses': 393216, 'original_matmul_accesses': 4194304, 'ratio': 0.09, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'factor_encoder', 'accesses': 262144, 'shape': '1024x256'}, {'name': 'router', 'accesses': 32768, 'shape': '256x128'}, {'name': 'active_expert_head', 'accesses': 98304, 'shape': 'active=2×256x192'}], 'deployment_accesses': 245760, 'deployment_ratio': 0.06, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 245760, 'shape': 'K=48×(d=1024+n=4096)'}], 'combined_accesses': 638976, 'combined_ratio': 0.15, 'combined_budget_ratio': 0.1, 'combined_feasible': True}
+
+ succeeded in 4515ms:
+{'total_accesses': 524288, 'original_matmul_accesses': 4194304, 'ratio': 0.12, 'budget_ratio': 0.08, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'active_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 204800, 'deployment_ratio': 0.05, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 204800, 'shape': 'K=40×(d=1024+n=4096)'}], 'combined_accesses': 729088, 'combined_ratio': 0.17, 'combined_budget_ratio': 0.12, 'combined_feasible': True}
+
+codex
+我已经收敛到一个明确候选：相对 r210 只改 `ARCHITECTURE=factorized_expert_topk`。理由是它是当前唯一还能留在 `~0.15x` 成本带、同时正好对应“更轻 scorer / expert 内部 low-rank”优先方向的新结构槽位。下面我只补它在历史 action 里的 stage / expected_win 用法，确保输出跟 runtime 风格一致。
+exec
+/bin/bash -lc "sed -n '1,80p' research/history/round_summaries/round_0204.json" in /root/sparsify-ascend
+exec
+/bin/bash -lc "sed -n '1,80p' research/history/round_summaries/round_0184.json" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 204,
+  "timestamp": 1774988427,
+  "started_at": 1774987818,
+  "ended_at": 1774988427,
+  "duration_sec": 609,
+  "family_name": "shared_lowrank_routed_expert_topk",
+  "family_stage": "prototype",
+  "session_id": "019d4564-994b-7ce3-9b58-09af854c9161",
+  "timeline_event_ids": [
+    "evt_1774987818629755910",
+    "evt_1774987998695994055",
+    "evt_1774988427320863569"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a x_hat = \u03a3_{i\u2208S_sh(h(x))} \u03b1_i^sh(h(x)) u_i + \u03a3_{e\u2208E(h(x))} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d h(x) \u662f\u5171\u4eab low-rank bottleneck\uff0c{u_i} \u662f\u9759\u6001 shared \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 routed expert \u5b50\u5e93\u3002\u5728\u7ebf\u5bfc\u51fa\u65f6\u53ef\u5199\u6210\u201cshared low-rank bottleneck \u6253\u5206/\u67e5\u8868 + \u8f7b\u91cf router \u9009\u5c11\u91cf expert \u5b50\u5e93 + expert \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c + \u9009\u62e9\u6027\u5728\u7ebf\u8865\u507f\u201d\u7684 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u6700\u7ec8\u4ecd\u662f\u82e5\u5e72\u9759\u6001\u5411\u91cf\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64 `shared_lowrank_routed_expert_topk` \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\uff1b`expert_topk` \u4e0e `shared_routed_expert_topk` \u5c5e\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002r203 \u5df2\u7ecf\u628a `shared_routed_expert_topk K=64 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=160` \u5728 0.171875x lane \u4e0a\u7684\u6838\u5fc3\u5931\u8d25\u6a21\u5f0f\u9489\u6e05\u695a\u4e86\uff1acost \u5f88\u4f4e\uff0c\u4f46 exceed \u76f4\u63a5\u8df3\u5230 0.277226\uff0c\u8bf4\u660e\u201c\u5355 active expert + shared full-head\u201d\u8fd9\u6761\u77ed\u8def\u5f84\u672c\u8eab\u4e0d\u591f\u7a33\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r203 \u4ec5\u628a `ARCHITECTURE` \u4ece `shared_routed_expert_topk` \u5207\u5230 `shared_lowrank_routed_expert_topk`\uff0c\u4fdd\u6301 `K=64`\u3001`ACTIVE_EXPERTS=1`\u3001`LATENTS_PER_EXPERT=160`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`NUM_EXPERTS=64`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u6d4b\u8bd5\u201c\u66f4\u4fbf\u5b9c\u7684 shared bottleneck + expert-specific head\u201d\u80fd\u5426\u5728\u4ecd\u5904\u4e8e\u4e3b\u6218\u573a\u7684\u7ea6 0.19x cost lane \u4e0a\uff0c\u663e\u8457\u538b\u56de r203 \u7684 exceed blow-up\uff0c\u5e76\u6bd4 plain shared+routed \u5355\u8def\u7ed3\u6784\u66f4\u63a5\u8fd1 incumbent r199 \u7684 objective\u3002",
+    "summary": "\u5efa\u8bae\u4ee5 r203 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\u3002\u8fd9\u4e0d\u662f\u7ee7\u7eed\u56f4\u7ed5 incumbent \u505a\u5c40\u90e8\u63d2\u503c\uff0c\u800c\u662f\u7528\u540c\u4e00\u4e2a `K=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=160` \u7684 cheap active-path recipe\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u6700\u9ad8\u4f18\u5148\u7ea7\u672a\u51b3\u95ee\u9898\u4e4b\u4e00\uff1a\u628a shared \u5206\u652f\u4ece full-head \u6539\u6210 low-rank bottleneck \u540e\uff0c\u662f\u5426\u80fd\u8ba9\u5355\u8def routed \u7ed3\u6784\u5728 `~0.19x` lane \u91cc\u4e0d\u518d\u56e0\u4e3a exceed \u5931\u63a7\u800c\u5931\u8d25\u3002",
+    "change_type": "param_only",
+    "expected_win": "explore_unknown",
+    "family_name": "shared_lowrank_routed_expert_topk",
+    "family_stage": "prototype",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r203 \u53ea\u6539 `ARCHITECTURE`\u3002\u4e4b\u6240\u4ee5\u4e0d\u7ee7\u7eed\u56f4\u7ed5 r199 \u505a `K/TRUNK_RANK/LATENTS_PER_EXPERT` \u7ec6\u626b\uff0c\u662f\u56e0\u4e3a r202 \u4e0e r203 \u5df2\u7ecf\u63d0\u4f9b\u4e86\u66f4\u91cd\u8981\u7684\u7ed3\u6784\u8bc1\u636e\u7f3a\u53e3\uff1a\u5f53\u524d\u771f\u6b63\u672a\u77e5\u7684\u4e0d\u662f incumbent \u90bb\u57df\u8fd8\u80fd\u4e0d\u80fd\u62a0\u51fa 0.00x\uff0c\u800c\u662f\u201c\u5355\u8def\u77ed active path\u201d\u662f\u5426\u53ea\u6709 plain shared+routed \u5931\u8d25\uff0c\u8fd8\u662f\u8fde\u66f4\u8f7b\u7684 shared bottleneck \u7248\u672c\u4e5f\u4e00\u8d77\u5931\u8d25\u3002\u786e\u5b9e\u5b58\u5728\u5386\u53f2\u8d1f\u4fe1\u53f7\uff1a`shared_lowrank_routed_expert_topk` \u5728 r172/r174/r179 \u7684\u66f4\u9ad8 cost \u5e26\uff08\u7ea6 0.25x-0.29x\uff09\u8868\u73b0\u504f\u5f31\uff1b\u4f46\u5f53\u524d `K=64, ACTIVE_EXPERTS=1` \u7684\u7ea6 0.19x matched lane \u4ecd\u672a\u88ab\u5e72\u51c0\u9a8c\u8bc1\uff0c\u800c\u4e14\u5b83\u6b63\u597d\u5bf9\u5e94 prompt \u91cc\u4f18\u5148\u7ea7\u5f88\u9ad8\u7684 `shared bottleneck + expert-specific head` \u69fd\u4f4d\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u4e5f\u65e0\u6cd5\u4fee\u590d r203 \u66b4\u9732\u51fa\u7684 exceed \u7206\u70b8\uff1b\u4f46\u5982\u679c\u5982\u6b64\uff0c\u5c31\u53ef\u4ee5\u66f4\u679c\u65ad\u5730\u4e0b\u8c03\u8fd9\u6761 single-active shared-bottleneck \u7ebf\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u5b83\u5468\u56f4\u6d88\u8017\u9884\u7b97\u3002",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "shared_lowrank_routed_expert_topk"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "r203 \u5df2\u660e\u786e\u5426\u5b9a\u5f53\u524d target \u4e0a `shared_routed_expert_topk K=64 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=160` \u7684 cheap single-route \u5047\u8bbe\uff1aobjective=0.449101\uff0ccost=0.171875x\uff0c\u4f46 exceed=0.277226\uff0c\u95ee\u9898\u4e3b\u8981\u6765\u81ea exceed \u5931\u63a7\u800c\u4e0d\u662f cost\u3002",
+      "`shared_lowrank_routed_expert_topk` \u5728\u672c\u4ed3\u5e93\u5185\u5df2\u6ce8\u518c\u4e14 override allowlist \u5df2\u63a5\u901a\uff1b\u672c\u8f6e\u4ec5\u6539 `ARCHITECTURE`\uff0c\u4e0d\u6d89\u53ca\u65b0 env key\uff0c\u4e5f\u4e0d\u9700\u8981\u6539 `sparsify/` \u4e4b\u5916\u7684\u63a5\u7ebf\u3002",
+      "\u5386\u53f2\u540c family \u7684 current-target \u8d1f\u4fe1\u53f7\u4e3b\u8981\u4f4d\u4e8e\u66f4\u9ad8 cost \u5e26\uff0c\u800c\u4e0d\u662f\u672c\u8f6e\u8981\u6d4b\u7684 A1/K64 \u4f4e\u6210\u672c\u4f4d\u70b9\uff1ar172 objective=0.467198 cost=0.27x exceed=0.197198\uff0cr174 objective=0.445105 cost=0.25x exceed=0.195105\uff0cr179 objective=0.482816 cost=0.29x exceed=0.192816\u3002",
+      "\u672c\u8f6e\u7684\u4ef7\u503c\u4e0d\u5728\u4e8e\u590d\u6d3b\u65e7 family \u6392\u540d\uff0c\u800c\u5728\u4e8e\u505a\u4e00\u4e2a\u5f52\u56e0\u975e\u5e38\u5e72\u51c0\u7684 matched probe\uff1a\u540c\u6837\u4fdd\u6301\u5355 active expert \u7684\u77ed\u8def\u5f84\uff0c\u53ea\u66ff\u6362 shared \u5206\u652f\u7ed3\u6784\uff0c\u6d4b\u8bd5 low-rank bottleneck \u662f\u5426\u80fd\u628a total_cost \u7ef4\u6301\u5728\u4e3b\u6218\u573a\u540c\u65f6\u660e\u663e\u538b\u56de exceed\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c\u8be5\u70b9\u76f8\u5bf9 r203 \u660e\u663e\u538b\u56de exceed\uff0c\u4e14 objective \u63a5\u8fd1\u6216\u4f18\u4e8e r199\uff0c\u5219\u4e0b\u4e00\u8f6e\u7ee7\u7eed\u4fdd\u7559 `shared_lowrank_routed_expert_topk`\uff0c\u53ea\u6539 `FACTORIZED_HIDDEN_DIM=192`\uff0c\u6d4b\u8bd5 shared scorer \u518d\u538b\u7f29\u540e\u80fd\u5426\u5728\u4e0d\u660e\u663e\u4f24\u5bb3 exceed \u7684\u524d\u63d0\u4e0b\u7ee7\u7eed\u964d cost\u3002",
+      "\u5982\u679c\u8be5\u70b9\u4f18\u4e8e r203 \u4f46\u4ecd\u660e\u663e\u5f31\u4e8e r199\uff0c\u4e14\u4e3b\u8981\u4ecd\u88ab exceed \u9650\u5236\uff0c\u5219\u4e0b\u4e00\u8f6e\u4ee5\u672c\u8f6e\u4e3a reference \u53ea\u6539 `ACTIVE_EXPERTS=2`\uff0c\u56de\u7b54\u8fd9\u6761 family \u662f\u5426\u5fc5\u987b\u4f9d\u8d56\u53cc expert active path \u624d\u80fd\u7a33\u5b9a tail error\u3002",
+      "\u5982\u679c\u8be5\u70b9\u4ecd\u590d\u73b0 single-route exceed \u7206\u70b8\uff0c\u8bf4\u660e\u5f53\u524d target \u4e0a `ACTIVE_EXPERTS=1` \u7684 shared-bottleneck + routed-expert \u4f4e\u6210\u672c\u7ebf\u5927\u6982\u7387\u4e5f\u4e0d\u6210\u7acb\uff1b\u540e\u7eed\u5e94\u505c\u6b62\u5728\u8fd9\u6761\u69fd\u4f4d\u7ee7\u7eed\u7ec6\u626b\uff0c\u8f6c\u53bb\u522b\u7684\u7ed3\u6784\u65b9\u5411\u3002"
+    ],
+    "reference_round": 203
+  },
+  "result": {
+    "decision": "discard",
+    "status": "ok",
+    "timestamp": "1774988427",
+    "val_fvu": "0.3169121742248535",
+    "exceed_alpha_0_50": "0.361829",
+    "objective_score": "0.555188",
+    "total_cost": "811008.000000",
+    "total_cost_ratio": "0.193359",
+    "selection_cost": "483328.000000",
+    "selection_cost_ratio": "0.115234",
+    "deployment_accesses": "327680.000000",
+    "deployment_ratio": "0.078125",
+    "observed_fvu": "0.316912",
+    "k": "64",
+    "architecture": "shared_lowrank_routed_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111050.117874",
+    "baseline_ratio": "1.333301",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0204/round0204_standard_1774987998_dp2_bs1_ga8_ef1_k64_20260401_041325",
+    "experiment_id": "r204_1774988427",
+    "head_commit": "03a67bf3035263614e6e933cb3188566fad4ab54",
+    "description": "\u5efa\u8bae\u4ee5 r203 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=shared_lowrank_routed_expert_topk`\u3002\u8fd9\u4e0d\u662f\u7ee7\u7eed\u56f4\u7ed5 incumbent \u505a\u5c40\u90e8\u63d2\u503c\uff0c\u800c\u662f\u7528\u540c\u4e00\u4e2a `K=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=160` \u7684 cheap active-path recipe\uff0c\u76f4\u63a5\u56de\u7b54\u5f53\u524d\u6700\u9ad8\u4f18\u5148\u7ea7\u672a\u51b3\u95ee\u9898\u4e4b\u4e00\uff1a\u628a shared \u5206\u652f\u4ece full-head \u6539\u6210 low-rank bottleneck \u540e\uff0c\u662f\u5426\u80fd\u8ba9\u5355\u8def routed \u7ed3\u6784\u5728 `~0.19x` lane \u91cc\u4e0d\u518d\u56e0\u4e3a exceed \u5931\u63a7\u800c\u5931\u8d25\u3002",
+    "self_review": "\u8fd9\u8f6e\u4e25\u683c\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u76f8\u5bf9 r203 \u53ea\u6539 `ARCHITECTURE`\u3002\u4e4b\u6240\u4ee5\u4e0d\u7ee7\u7eed\u56f4\u7ed5 r199 \u505a `K/TRUNK_RANK/LATENTS_PER_EXPERT` \u7ec6\u626b\uff0c\u662f\u56e0\u4e3a r202 \u4e0e r203 \u5df2\u7ecf\u63d0\u4f9b\u4e86\u66f4\u91cd\u8981\u7684\u7ed3\u6784\u8bc1\u636e\u7f3a\u53e3\uff1a\u5f53\u524d\u771f\u6b63\u672a\u77e5\u7684\u4e0d\u662f incumbent \u90bb\u57df\u8fd8\u80fd\u4e0d\u80fd\u62a0\u51fa 0.00x\uff0c\u800c\u662f\u201c\u5355\u8def\u77ed active path\u201d\u662f\u5426\u53ea\u6709 plain shared+routed \u5931\u8d25\uff0c\u8fd8\u662f\u8fde\u66f4\u8f7b\u7684 shared bottleneck \u7248\u672c\u4e5f\u4e00\u8d77\u5931\u8d25\u3002\u786e\u5b9e\u5b58\u5728\u5386\u53f2\u8d1f\u4fe1\u53f7\uff1a`shared_lowrank_routed_expert_topk` \u5728 r172/r174/r179 \u7684\u66f4\u9ad8 cost \u5e26\uff08\u7ea6 0.25x-0.29x\uff09\u8868\u73b0\u504f\u5f31\uff1b\u4f46\u5f53\u524d `K=64, ACTIVE_EXPERTS=1` \u7684\u7ea6 0.19x matched lane \u4ecd\u672a\u88ab\u5e72\u51c0\u9a8c\u8bc1\uff0c\u800c\u4e14\u5b83\u6b63\u597d\u5bf9\u5e94 prompt \u91cc\u4f18\u5148\u7ea7\u5f88\u9ad8\u7684 `shared bottleneck + expert-specific head` \u69fd\u4f4d\u3002\u4e3b\u8981\u98ce\u9669\u662f\u8be5 family \u4e5f\u65e0\u6cd5\u4fee\u590d r203 \u66b4\u9732\u51fa\u7684 exceed \u7206\u70b8\uff1b\u4f46\u5982\u679c\u5982\u6b64\uff0c\u5c31\u53ef\u4ee5\u66f4\u679c\u65ad\u5730\u4e0b\u8c03\u8fd9\u6761 single-active shared-bottleneck \u7ebf\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u5728\u5b83\u5468\u56f4\u6d88\u8017\u9884\u7b97\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0204_standard_1774987998.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0204/round0204_standard_1774987998_dp2_bs1_ga8_ef1_k64_20260401_041325/metrics.jsonl",
+    "curve_start_fvu": "0.358595",
+    "curve_mid_fvu": "0.321929",
+    "curve_end_fvu": "0.316912",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+
+ succeeded in 0ms:
+{
+  "round": 184,
+  "timestamp": 1774885780,
+  "started_at": 1774885166,
+  "ended_at": 1774885780,
+  "duration_sec": 614,
+  "family_name": "factorized_expert_topk",
+  "family_stage": "probe",
+  "session_id": "019d3f57-1c0d-7690-9d10-1e6c7bb2f6d9",
+  "timeline_event_ids": [
+    "evt_1774885166693300151",
+    "evt_1774885471306962198",
+    "evt_1774885780266517702"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l10-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "候选 family 设为 `factorized_expert_topk`。最终重构公式为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维投影，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 有限加权求和”的 LUTurbo/Lottable 推理链路，静态库不随样本动态生成，因此兼容性判断为 `扩展兼容`。`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍是 `不兼容`，只能作历史参考，不能驱动当前 frontier。r183 的新 family `shared_two_stage_residual_expert` 在约 `0.24x` 下仅做到 `FVU=0.1411`，说明“shared coarse trunk + routed residual cleanup”这条 two-stage 变体没有打败现有 low-cost anchor；因此下一步更高信息量的问题不是继续在 shared/coarse 线上补参数，而是转向当前高优先级但尚未在这条 exact low-cost recipe 上 fresh 验证的“expert 内部 low-rank / small head”槽位。相对 r176 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `K=108`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“把 routed-only expert 的 full-dim 局部 scorer 换成 shared bottleneck + expert-specific small head，能否在更低总成本下修复 r176 的质量缺口”。，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。",
+    "summary": "以 r176 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`，做一轮新的 `<0.25x` low-cost architecture probe。目标是在约 `0.19x` 总成本下直接判断：把 routed-only `expert_topk` 换成“shared bottleneck + expert-specific small head”的 expert-internal low-rank 变体，是否能比 r176 更接近当前 `shared_routed_expert_topk` low-cost anchors。",
+    "change_type": "param_only",
+    "expected_win": "explore_unknown",
+    "family_name": "factorized_expert_topk",
+    "family_stage": "probe",
+    "self_review": "这轮严格遵守 param_only 单变量约束：相对 r176 只改 `ARCHITECTURE`。选择 r176 而不是 r165，是为了把比较聚焦在最新的 routed-only 负信号上，直接回答“expert path 太短的问题，是否能靠 expert 内部 low-rank / small head 修复”，而不是重新把问题混到 shared branch 是否存在。选择 `factorized_expert_topk` 而不是继续回到 `shared_lowrank_*` 或 `shared_two_stage_*`，是因为后两条线在当前 target 上刚给出更直接的负信号；当前更值得补的是尚未在这条 exact low-cost recipe 上 fresh 验证的 routed-only small-head 槽位。主要风险是该 family 的旧轮次先验偏弱；但这些都属于旧位置、旧 recipe 的弱先验，不足以替代当前 target 上这次更干净的 matched-cost architecture probe。",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "factorized_expert_topk"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "`factorized_expert_topk` 的 LUTurbo 导出形式仍是静态 expert 子库上的有限加权和，应按 `扩展兼容` 处理。",
+      "这轮是 architecture-level low-cost probe：相对 r176 只改 `ARCHITECTURE`，直接隔离“expert 内部 low-rank / small head”是否能修复 routed-only `expert_topk` 的质量缺口。",
+      "，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。",
+      "r183 的 `shared_two_stage_residual_expert` 已在约 `0.24x` 失败并归档，当前不应继续沿 shared-coarse two-stage 线做局部参数补点。"
+    ],
+    "next_hypotheses": [
+      "如果 `factorized_expert_topk@K108` 明显优于 r176 的 `expert_topk@K108`，则说明当前 low-cost gap 里“expert 内部 low-rank / small head”确有价值；下一轮保持 family 不变，只改 `FACTORIZED_HIDDEN_DIM`，确认共享 bottleneck 的最小有效宽度。",
+      "如果该点仍明显弱于 `shared_routed_expert_topk` anchors，且也没有优于 r176，则可更明确下调 routed-only small-head 这条 low-cost MoE-like 方向的优先级，把预算转向新的 hetero/shared-expert 结构槽位，而不是继续复验同线 family。"
+    ],
+    "reference_round": 176
+  },
+  "result": {
+    "decision": "keep",
+    "status": "ok",
+    "timestamp": "1774885780",
+    "val_fvu": "0.2466985583305359",
+    "observed_fvu": "0.246699",
+    "k": "108",
+    "architecture": "factorized_expert_topk",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "111049.363590",
+    "baseline_ratio": "0.999998",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0184/round0184_standard_1774885471_dp2_bs1_ga8_ef1_k108_20260330_234437",
+    "experiment_id": "r184_1774885780",
+    "head_commit": "15d048628e7471c29b394c165767bea3a0a23f44",
+    "description": "以 r176 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`，做一轮新的 `<0.25x` low-cost architecture probe。目标是在约 `0.19x` 总成本下直接判断：把 routed-only `expert_topk` 换成“shared bottleneck + expert-specific small head”的 expert-internal low-rank 变体，是否能比 r176 更接近当前 `shared_routed_expert_topk` low-cost anchors。",
+    "self_review": "这轮严格遵守 param_only 单变量约束：相对 r176 只改 `ARCHITECTURE`。选择 r176 而不是 r165，是为了把比较聚焦在最新的 routed-only 负信号上，直接回答“expert path 太短的问题，是否能靠 expert 内部 low-rank / small head 修复”，而不是重新把问题混到 shared branch 是否存在。选择 `factorized_expert_topk` 而不是继续回到 `shared_lowrank_*` 或 `shared_two_stage_*`，是因为后两条线在当前 target 上刚给出更直接的负信号；当前更值得补的是尚未在这条 exact low-cost recipe 上 fresh 验证的 routed-only small-head 槽位。主要风险是该 family 的旧轮次先验偏弱；但这些都属于旧位置、旧 recipe 的弱先验，不足以替代当前 target 上这次更干净的 matched-cost architecture probe。",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0184_standard_1774885471.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0184/round0184_standard_1774885471_dp2_bs1_ga8_ef1_k108_20260330_234437/metrics.jsonl",
+    "curve_start_fvu": "0.323665",
+    "curve_mid_fvu": "0.262974",
+    "curve_end_fvu": "0.246699",
+    "curve_late_slope": "0.000000",
+    "curve_still_improving": "false",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "50000000",
+    "final_total_tokens": "49979392",
+    "resume_stage_count": "3",
+    "continuation_stop_reason": "plateau",
+    "continued_from_checkpoint": "true",
+    "exceed_alpha_0_50": "0.28626638650894165",
+    "selection_cost": "360448.0",
+    "selection_cost_ratio": "0.09",
+    "deployment_accesses": "552960.0",
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+print(validate_env_overrides([{'key':'ARCHITECTURE','value':'factorized_expert_topk'}], fallback_architecture='expert_topk'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+[]
+
+codex
+{"command":"run","hypothesis":"候选 family 设为 `factorized_expert_topk`。最终重构公式写为 `x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(h(x))} α_{e,i}(h(x)) b_{e,i}`，其中 `h(x)=ReLU(Bx)` 是共享低维 bottleneck，`E(h(x))` 是轻量 router 选出的少量 active experts，`{b_{e,i}}` 是各 expert 的静态子库原子；在线侧可直接导出为“shared low-rank projection + 轻量 expert 路由 + expert 子库查表 + 加权求和 + 选择性补偿”的 LUTurbo/Lottable 推理链路，最终仍是静态向量库上的有限加权和，因此兼容性判断为 `扩展兼容`。`expert_topk`、`shared_routed_expert_topk` 属于直接兼容；`batch_topk`、`adaptive_budget_topk` 这类 batch/sample-coupled family 仍属 `不兼容`，不能驱动当前 objective leaderboard。本轮唯一主假设是：r209→r210 已证明“更大总静态 expert bank + 更小 K”能把 routed-only direct-compatible 主线压到 `objective≈0.365`，但当前缺口仍主要在 exceed 而不是纯 deploy cost；因此下一步最有信息量的问题不是继续在 `expert_topk` 上做第三轮局部 K 插值，而是测试更轻 scorer / router 是否能在保持 `K=48`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 的短 active path 结构下，把 encoder 选择成本明显压低而不把 exceed 拉坏。相对 r210 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `factorized_expert_topk`，保持 `EXPANSION_FACTOR=1`、`K=48`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`FACTORIZED_HIDDEN_DIM=256`、`adam`、`LR=8e-4` 与其余训练配方不变，直接回答“expert 内部 low-rank / shared bottleneck + expert-specific small head”这条结构槽位，是否能在当前 small-K 成本带内换回更低 objective。本地成本复核显示该点的 selection_accesses=393216、deployment_accesses=245760、combined_accesses=638976，对当前 1024x4096 fused-QKV proxy 的 exact total_cost_ratio=0.15234375；相对 r210 的 exact 0.18359375 释放出 0.03125 的 objective 空间，因此只要 exceed 保持在约 0.21298 以下，就能刷新当前 incumbent。","summary":"建议以 r210 为 reference，只改 `ARCHITECTURE=factorized_expert_topk`。这是一轮新的 matched-objective architecture probe，目标是在保持 `K=48` 和大静态 expert bank 的前提下，用更轻 scorer / router 直接测试“expert 内部 low-rank”能否把当前 routed-only 主线从 `objective≈0.365` 再明显推低，而不是继续围绕 incumbent 做第三轮局部 K 打磨。","change_type":"param_only","expected_win":"explore_unknown","family_name":"factorized_expert_topk","family_stage":"probe","self_review":"这轮严格满足单变量原则：相对 r210 只改 `ARCHITECTURE`。选择 `factorized_expert_topk` 而不是继续把 `expert_topk K=48` 压到 `K=40`，是因为当前连续两轮已经在同一 routed-only family 上拿到清晰正信号；继续压 K 虽可能再拿到 0.00x 级别改进，但信息增量已明显下降，不符合本轮“优先结构槽位”的要求。相反，`factorized_expert_topk` 正好对应 operator guide 当前高优先级的“更轻 scorer / router、expert 内部 low-rank”方向，而且本地成本复核表明它仍处在当前主战场甚至更左的位置。主要风险是这条 family 在当前 target 上有明确负先验：r184 在 `K=108` 时 objective=0.506266、exceed=0.286266，r193 在 `K=96` 时 objective=0.602707、exceed=0.402707；但这些旧点的 `K`、`NUM_EXPERTS`、`LATENTS_PER_EXPERT` 与当前 `K=48, NUM_EXPERTS=128, LATENTS_PER_EXPERT=192` 的 matched recipe 差异很大，尚不足以替代这次更干净的 fresh revalidation。若本轮仍失败，就可以更果断地下调 routed-only small-head 这条线的优先级。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"factorized_expert_topk"}],"touched_files":[],"notes_to_memory":["`factorized_expert_topk` 的 LUTurbo 导出形式仍是静态 expert 子库上的有限加权和，按当前 runtime registry 应视为 `扩展兼容`；本轮不会把任何不兼容 family 带回 objective leaderboard 主线。","本轮不是继续围绕 `expert_topk` 做第三轮局部 K 插值，而是利用 r209/r210 刚建立起来的 `small-K + large bank` 配方，做一轮更高信息量的 matched-cost architecture probe。","本地 allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: factorized_expert_topk}], fallback_architecture='expert_topk')` 返回空列表。","本地成本复核：`factorized_expert_topk K=48 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192 FACTORIZED_HIDDEN_DIM=256` 的 selection_accesses=393216、deployment_accesses=245760、combined_accesses=638976、exact total_cost_ratio=0.15234375，明显低于 r210 的 0.18359375。","当前 target 上这条 family 仍有负先验需要正视：r184 `factorized_expert_topk K=108` 的 objective=0.506266、exceed=0.286266，r193 `factorized_expert_topk K=96` 的 objective=0.602707、exceed=0.402707；因此本轮的价值首先在于 revalidate 当前新 recipe，而不是预设其必然成为新主线。"],"next_hypotheses":["如果 `factorized_expert_topk@K48` 在当前 `NUM_EXPERTS=128` recipe 下把 exceed 控到约 0.21 以下并刷新 r210，下一轮保持该 family 不变，只改 `K=64`，测试它是否能用仍低于 incumbent 的总成本换回更低 exceed，形成新的 objective 段。","如果 `factorized_expert_topk@K48` 的 objective 接近但未能赢过 r210，且主要败在 exceed 而不是 cost，下一轮保持 family 不变，只改 `FACTORIZED_HIDDEN_DIM=192` 或 `K=64` 二选一，确认 bottleneck 宽度与 sparse lookup 哪个才是主瓶颈。","如果该点复现当前 target 上 factorized family 的旧负信号，说明 routed-only small-head 这条线在当前 hookpoint 上大概率仍不成立；后续应停止让它主导预算，转向 shared/coarse 吃主干、routed experts 做 residual cleanup 的不对称结构槽位。"],"reference_round":210}
+tokens used
+1,043,431
