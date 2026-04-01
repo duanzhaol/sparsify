@@ -1,0 +1,96 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_stacked_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
++            "shared_product_key_expert_jumprelu_residual",
+             "shared_adaptive_active_product_key_expert_residual",
+             "shared_stacked_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+         return SharedProductKeyExpertResidualSparseCoder
++    if architecture == "shared_product_key_expert_jumprelu_residual":
++        return SharedProductKeyExpertJumpReLUResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_residual":
+         return SharedAdaptiveActiveProductKeyExpertResidualSparseCoder
+     if architecture == "shared_stacked_product_key_expert_jumprelu":
+@@ -2988,6 +2990,62 @@
+         )
+ 
+ 
++class SharedProductKeyExpertJumpReLUResidualSparseCoder(
++    SharedProductKeyExpertResidualSparseCoder
++):
++    """Shared coarse stage, PK cleanup, then JumpReLU-gated factorized tail cleanup."""
++
++    architecture_name = "shared_product_key_expert_jumprelu_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        param_dtype = self.residual_head_bias.dtype
++        threshold = torch.full(
++            (self.residual_num_latents,),
++            cfg.jumprelu_init_threshold,
++            device=self.residual_head_bias.device,
++            dtype=param_dtype,
++        ).clamp_min(torch.finfo(param_dtype).tiny)
++        self.residual_log_threshold = nn.Parameter(torch.log(torch.expm1(threshold)))
++
++    @property
++    def residual_threshold(self) -> Tensor:
++        return F.softplus(self.residual_log_threshold)
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - self.residual_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        residual_acts = positive * gate
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            pre_acts.reshape(acts_shape),
++        )
++
++
+ class SharedAdaptiveActiveProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertResidualSparseCoder
+ ):

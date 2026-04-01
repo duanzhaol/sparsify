@@ -457,6 +457,8 @@ def _get_sae_class(architecture: str) -> type:
         return SharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_expert_residual":
         return SharedProductKeyExpertResidualSparseCoder
+    if architecture == "shared_product_key_expert_jumprelu_residual":
+        return SharedProductKeyExpertJumpReLUResidualSparseCoder
     if architecture == "shared_adaptive_active_product_key_expert_residual":
         return SharedAdaptiveActiveProductKeyExpertResidualSparseCoder
     if architecture == "shared_stacked_product_key_expert_jumprelu":
@@ -2985,6 +2987,62 @@ class SharedProductKeyExpertResidualSparseCoder(
             combined_indices,
             fvu,
             auxk_loss,
+        )
+
+
+class SharedProductKeyExpertJumpReLUResidualSparseCoder(
+    SharedProductKeyExpertResidualSparseCoder
+):
+    """Shared coarse stage, PK cleanup, then JumpReLU-gated factorized tail cleanup."""
+
+    architecture_name = "shared_product_key_expert_jumprelu_residual"
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        param_dtype = self.residual_head_bias.dtype
+        threshold = torch.full(
+            (self.residual_num_latents,),
+            cfg.jumprelu_init_threshold,
+            device=self.residual_head_bias.device,
+            dtype=param_dtype,
+        ).clamp_min(torch.finfo(param_dtype).tiny)
+        self.residual_log_threshold = nn.Parameter(torch.log(torch.expm1(threshold)))
+
+    @property
+    def residual_threshold(self) -> Tensor:
+        return F.softplus(self.residual_log_threshold)
+
+    def _encode_residual_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+        hidden = F.relu(self.residual_factor(flat_x))
+        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - self.residual_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        residual_acts = positive * gate
+        top_acts, top_indices = torch.topk(
+            residual_acts, self.residual_stage_k, dim=-1, sorted=False
+        )
+        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
+
+        target_shape = (*original_shape, self.residual_stage_k)
+        acts_shape = (*original_shape, self.residual_num_latents)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            pre_acts.reshape(acts_shape),
         )
 
 
