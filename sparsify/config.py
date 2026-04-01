@@ -237,6 +237,7 @@ class TrainConfig(Serializable):
             "dual_shared_lowrank_product_key_expert_jumprelu",
             "dual_shared_product_key_expert_jumprelu",
             "residual_dual_shared_product_key_expert_jumprelu",
+            "residual_dual_shared_product_key_expert_residual",
             "shared_adaptive_active_product_key_expert_jumprelu",
             "dual_shared_adaptive_active_product_key_expert_jumprelu",
             "shared_product_key_factorized_expert_topk",

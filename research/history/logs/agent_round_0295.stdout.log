@@ -1,0 +1,3503 @@
+{"command":"run","hypothesis":"扩展兼容新结构 probe：`residual_dual_shared_product_key_expert_residual` 的最终重构为 x_hat = Σ_{i∈S_1(x)} α_i^{sh,1} b_i^{sh,1} + Σ_{j∈S_2(r1(x))} α_j^{sh,2} b_j^{sh,2} + Σ_{e∈E_pk(r2(x))} Σ_{m∈S_e^τ(r2(x))} α_{e,m} b_{e,m} + Σ_{u∈S_res(r3(x))} γ_u c_u，其中 r1/r2/r3 是逐级 residual。两层 shared residual coarse stage、PK-routed expert cleanup 与最后的 tiny global residual cleanup 都只访问静态向量库并做有限加权和，因此可导出到 LUTurbo/Lottable 的查表 + 加权求和 + 选择性补偿流水线，兼容性判定为扩展兼容。主假设是：在 r294 已显出较好 exceed 的 dual-shared PK scaffold 上再加一个很小的全局 residual tail-cleanup，能比现有 dual-shared PK 更强地压住 hard-token exceed。","summary":"已实际新增并集成 `residual_dual_shared_product_key_expert_residual`，只修改 `sparsify/config.py` 与 `sparsify/sparse_coder.py`。该 family 是对 r294 `dual_shared_product_key_expert_jumprelu` 的结构升级：保留双 shared coarse + PK cleanup，只再追加一个 tiny factorized residual cleanup。按本地 exact-string smoke 与 cost 估计，在继承 r294 的 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375, FACTORIZED_HIDDEN_DIM=256` 配置下 total_cost_ratio 约 `0.13x`，仍在当前目标带内；因此本轮是一次 matched-cost 附近、明确面向降低 exceed 的 scaffold-upgrade probe。","change_type":"edit_sae_code","expected_win":"lower_objective","family_name":"residual_dual_shared_product_key_expert_residual","family_stage":"prototype","self_review":"风险很直接：`cost≈0.13x` 已经要求 exceed 至少接近 `0.09~0.10` 才有机会逼近阶段目标，交换率门槛很高。如果这轮 exceed 只是比 r294 小幅下降几个点，仍不够支撑主线；但它是当前最贴近 winning scaffold 的高信息增量升级之一，值得用一轮回答。","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"residual_dual_shared_product_key_expert_residual"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["已落盘新增 family：`residual_dual_shared_product_key_expert_residual`，完成了 `sparsify/config.py` whitelist 与 `sparsify/sparse_coder.py` dispatch/class 接线。","本地 exact-string smoke 已通过：`residual_dual_shared_product_key_expert_residual` 在 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375, FACTORIZED_HIDDEN_DIM=256` 下可实例化并 forward/backward。","本地 cost 估计：selection_ratio≈0.09，deployment_ratio≈0.04，total_cost_ratio≈0.13；处于当前允许的 matched-objective 探索带。","该 family 的结构语义是：dual shared residual coarse stage 吃主干，PK experts 做中层 cleanup，tiny factorized residual head 做尾部 cleanup；与 r294 相比，信息增量集中在 hard-token tail-cleanup 机制。"],"next_hypotheses":["若本轮 exceed 明显低于 r294 且 objective 改善，再以该 family 为 anchor 做一次极小幅 knee 校准，例如 `STAGE1_RATIO`。","若本轮 objective 仍无改善，则说明在 dual-shared PK scaffold 上追加 tiny global residual cleanup 的交换率不足，后续应停止继续叠加同类 cleanup 层。","若本轮出现 sanity 或 registration 异常，优先按 exact architecture string 回查 config whitelist / dispatch / class reachable 性，而不要把问题误判成训练质量结论。"],"reference_round":294}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d49b9-ae60-7492-a8ba-f7fe54df0754
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 295。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 295 策略模式：Exceed 探索
+原因：当前 incumbent objective=0.2684，其中 exceed=0.1684 明显高于 cost=0.1000；下一步应优先降 exceed_alpha_0.50。
+当前 objective anchor family：shared_product_key_expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=shared_product_key_expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 首要目标是降低 exceed_alpha_0.50；只要 objective_score 下降，允许适度增加 cost，但必须留在预算内。
+2. FVU 只作诊断：当 exceed 明显下降而 FVU 只小幅波动时，不要被旧的 FVU 直觉误导。
+3. 优先考虑能减少 tail-error / online compensation 需求的结构，而不是只做线性 cost 压缩。
+4. 允许新开 family；但任何新结构都必须仍能导出为静态子库有限加权和。
+5. 如果最近几轮都只是同一 family 上的轻微参数插值且 objective 没有实质下降，应优先换结构槽位。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 19 个，扩展兼容 26 个，不兼容 3 个。
+
+Agent 状态：round=294, consecutive_crashes=0, consecutive_no_improve=4, rounds_since_new_family=1
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.22` 仍差约 0.048；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `shared_product_key_expert_jumprelu` (K=32)，objective≈0.268418 = cost 0.10x + exceed 0.168418。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。
+  如果当前最佳线最近是靠 architecture probe 而不是局部插值取得改进，那么后续默认应把它当对照 scaffold：只保留极少量必要的 knee 校准，其余预算优先投向建立在该 scaffold 之上的新结构升级。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.08~0.14` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。
+  4. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  5. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  6. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。
+  7. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。
+  8. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  9. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  10. 当前最强已验证主线是 `shared_product_key_expert_jumprelu`：它已经说明“shared coarse 主干 + product-key tiny routed cleanup”比 plain PK 更能改善当前目标。后续应把这条线当作 winning scaffold，而不是继续把大部分预算花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性细扫上。当前更高价值的问题是：在近同成本下，什么结构升级能在保留这套 scaffold 的同时，把 low-K exceed 再明显压低。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 在已经出现局部 knee 信号后，继续围绕同一个 scaffold 做 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的多轮近邻扫点。
+  4. 只把 active path、shared split 或 expert 宽度做轻微改动，但没有明确解释为什么会更慢地恶化 exceed 的低信息增量实验。
+  5. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+如何使用这些灵感：
+- 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
+- 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
+- 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r282 objective=0.2684179902076721 = cost 0.1x + exceed 0.16841799020767212 | fvu=0.1521817445755005 | arch=shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r263 objective=0.27600582122802736 = cost 0.08x + exceed 0.19600582122802734 | fvu=0.18039849400520325 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r279 objective=0.2811864471435547 = cost 0.11x + exceed 0.1711864471435547 | fvu=0.15307489037513733 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r274 objective=0.28746201157569884 = cost 0.11x + exceed 0.17746201157569885 | fvu=0.16134148836135864 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r273 objective=0.29641358613967894 = cost 0.11x + exceed 0.18641358613967896 | fvu=0.16774076223373413 | arch=lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r278 objective=0.3017943370342255 = cost 0.08x + exceed 0.22179433703422546 | fvu=0.20013664662837982 | arch=dual_shared_lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r246 objective=0.3143901073932648 = cost 0.14x + exceed 0.17439010739326477 | fvu=0.1560433954000473 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r245 objective=0.3227708184719086 = cost 0.14x + exceed 0.18277081847190857 | fvu=0.16149239242076874 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → shared_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.2684179902076721 = cost 0.1x + exceed 0.16841799020767212 | encoder=0.06x | deploy=0.04x | fvu=0.1521817445755005
+  最低 cost leader → product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.27600582122802736 = cost 0.08x + exceed 0.19600582122802734 | encoder=0.04x | deploy=0.04x | fvu=0.18039849400520325
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.22 以下。
+  当前 incumbent 约为 objective=0.268418 (cost=0.10x, exceed=0.168418)；距离目标仍差 0.048418。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.22 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.08x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.10x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.12x，则 exceed 需压到 ≤0.10
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.08
+  因此：若新结构 cost 升到约 0.14x，却仍无法把 exceed 压到约 0.08 附近，则通常不够支撑 0.22 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，8）：
+  r287 residual_dual_shared_product_key_expert_jumprelu param_only -> archive objective=0.278527 cost=0.115967x exceed=0.162560 fvu=0.14733079075813293 914s
+  r288 shared_product_key_expert_residual edit_sae_code -> archive objective=0.279448 cost=0.116714x exceed=0.162734 fvu=0.14545661211013794 1186s
+  r289 shared_lowrank_two_stage_residual_expert param_only -> discard objective=0.483714 cost=0.257324x exceed=0.226389 fvu=0.20297104120254517 1169s
+  r290 shared_lowrank_two_stage_residual_expert edit_perf_code -> keep objective=0.335600 cost=0.108170x exceed=0.227430 fvu=0.20519573986530304 980s
+  r291 dual_shared_adaptive_active_product_key_expert_jumprelu param_only -> archive objective=0.283281 cost=0.109375x exceed=0.173906 fvu=0.15680032968521118 855s
+  r292 shared_product_key_expert_residual param_only -> archive objective=0.280751 cost=0.116714x exceed=0.164036 fvu=0.1477927267551422 1043s
+  r293 shared_adaptive_active_product_key_expert_residual edit_sae_code -> archive objective=0.281193 cost=0.116714x exceed=0.164479 fvu=0.1473383903503418 1128s
+  r294 dual_shared_product_key_expert_jumprelu param_only -> archive objective=0.276164 cost=0.115967x exceed=0.160198 fvu=0.14354434609413147 912s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。新的阶段目标已经更新为把 objective 压向 `0.22` 以下；以当前 best lane 粗看，这通常要求把 `cost≈0.12~0.14x` 同时配上 `exceed≈0.08~0.10`，明显不是 incumbent 邻域的小步微调能自然得到的。若多轮结果仍停留在 `0.28~0.33` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。
+  2. 当前仍要重点回答“怎样在更小 `K` 下控制 `exceed_alpha_0.50`，并把 objective 真正压向 `0.22`”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。
+  3. 关于 `ACTIVE_EXPERTS` 轴请基于最新真实证据判断，不要继续沿用旧假设。当前 layer3 q_proj 主线里，`product_key_expert_jumprelu` 上把 active path 压到 `ACTIVE_EXPERTS=1` 会让 exceed 明显恶化，而在当前 best PK recipe 上做过的 matched `2 -> 3` probe 也没有赢过 `ACTIVE_EXPERTS=2`。因此在现有 PK / shared+PK many-tiny regime 下，`AE=2` 应视为当前默认工作点；除非新结构改变了 coarse/shared 主干或 cleanup 语义，否则不要再把 `AE=1` 或固定 `AE=3` 当成高优先级主线。
+  4. 当前最有价值的 recent 正信号不是 plain PK，而是 `shared_product_key_expert_jumprelu`：它说明“shared coarse 主干 + product-key tiny routed cleanup”这条分工在当前 hookpoint 上确实优于 plain PK。但后续 `STAGE1_RATIO`、`K` 等局部 follow-up 基本已接近平台，`tiny factorized expert heads` 也给出强负信号。因此后续不应继续让 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的近邻细扫主导预算；更值得优先测试的是建立在这条 shared+PK scaffold 之上的同成本或近同成本结构升级，目标是更强地降低 low-K 条件下的 exceed，例如更好的 hard-token cleanup 机制、shared/coarse 表达方式升级、或真正有差异的 variable-active residual path。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r282 shared_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=2048
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r279 dual_shared_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=dual_shared_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=1024
+  STAGE1_RATIO=0.375
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我准备新增一个真正的 scaffold 升级 family：在 `residual_dual_shared_product_key_expert_jumprelu` 上加一个 tiny global residual cleanup。先按仓库里的 architecture integration 清单把注册链路走完整，再做 exact-string smoke。
+exec
+/bin/bash -lc "sed -n '1,220p' /root/.codex/skills/sae-architecture-integration/SKILL.md" in /root/sparsify-ascend
+ succeeded in 0ms:
+---
+name: sae-architecture-integration
+description: Use when adding a new SAE architecture family in sparsify-ascend, or when a run fails with Unknown architecture, missing factory dispatch, or other architecture-registration issues. This skill gives a repo-specific checklist for wiring new sparse coder families into sparsify/config.py and sparsify/sparse_coder.py, plus the exact smoke-validation sequence to run before declaring the family runnable.
+---
+
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+
+exec
+/bin/bash -lc "sed -n '3470,3675p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            residual, hidden
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
+    SharedLowRankProductKeyExpertJumpReLUSparseCoder
+):
+    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
+
+    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+
+class DualSharedProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Two always-on shared micro-experts plus PK-routed JumpReLU cleanup."""
+
+    architecture_name = "dual_shared_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+
+class ResidualDualSharedProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Two shared residual cleanup stages followed by PK-routed expert cleanup."""
+
+    architecture_name = "residual_dual_shared_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        if self.stage1_k < self.shared_expert_count:
+            raise ValueError(
+                f"{self.architecture_name} requires "
+                "stage1_k >= shared_expert_count so each residual shared stage has "
+                f"at least one active latent; got stage1_k={self.stage1_k}, "
+                f"shared_experts={self.shared_expert_count}"
+            )
+        self.stage1a_k = max(1, self.stage1_k // 2)
+        self.stage1b_k = self.stage1_k - self.stage1a_k
+
+    def _encode_single_shared_bank(
+        self,
+        x_centered: Tensor,
+        *,
+        bank_idx: int,
+        topk: int,
+        index_offset: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = x_centered.shape[:-1]
+        flat_x = x_centered.reshape(-1, self.d_in)
+        shared_pre_acts = (
+            torch.einsum(
+                "bd,ld->bl",
+                flat_x,
+                self.shared_encoders[bank_idx],
+            )
+            + self.shared_encoder_bias[bank_idx].unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+        top_acts, top_indices = torch.topk(shared_acts, topk, dim=-1, sorted=False)
+        if index_offset:
+            top_indices = top_indices + index_offset
+        target_shape = (*original_shape, topk)
+        acts_shape = (*original_shape, self.latents_per_expert)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            shared_acts.reshape(acts_shape),
+        )
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+        return EncoderOutput(combined_acts, combined_indices, combined_full)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+
+codex
+我在新增 `residual_dual_shared_product_key_expert_residual`：两层 shared residual cleanup + PK expert cleanup + tiny global residual cleanup。它是对 r294 scaffold 的直接升级，只改结构槽位，不新增 env key。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/config.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+
+2026-04-01T17:29:11.894190Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /root/sparsify-ascend/sparsify/sparse_coder.py:
+    if architecture == "dual_shared_product_key_expert_jumprelu":
+        return DualSharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+        return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+        return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+        return DualSharedAdaptiveActiveProductKeyExpertJumpReLUSCoder
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+
+exec
+/bin/bash -lc "sed -n '462,478p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    if architecture == "shared_stacked_product_key_expert_jumprelu":
+        return SharedStackedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_lowrank_product_key_expert_jumprelu":
+        return SharedLowRankProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
+        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_product_key_expert_jumprelu":
+        return DualSharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+        return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+        return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+        return DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_product_key_factorized_expert_topk":
+        return SharedProductKeyFactorizedExpertTopKSparseCoder
+    if architecture == "adaptive_active_expert_jumprelu":
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..b6129af17372d11cac925d9d72e1589d5e4dffda
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..b6129af17372d11cac925d9d72e1589d5e4dffda
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+
+exec
+/bin/bash -lc "sed -n '3580,3675p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        target_shape = (*original_shape, topk)
+        acts_shape = (*original_shape, self.latents_per_expert)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            shared_acts.reshape(acts_shape),
+        )
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+        return EncoderOutput(combined_acts, combined_indices, combined_full)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..b6129af17372d11cac925d9d72e1589d5e4dffda
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+
+exec
+/bin/bash -lc "sed -n '3675,3725p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+):
+    """Dual shared coarse banks with adaptive 1-or-2 PK-routed expert cleanup."""
+
+    architecture_name = "dual_shared_adaptive_active_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+
+class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+    """Always-on shared factorized branch plus PK-routed factorized experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_routed_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_shared_experts = 1
+        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+        self.routed_num_latents = (
+            self.num_routed_experts * self.latents_per_expert
+        )
+        self.num_latents = self.shared_num_latents + self.routed_num_latents
+        max_active_latents = (
+            self.num_shared_experts + self.active_experts
+        ) * self.latents_per_expert
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..b6129af17372d11cac925d9d72e1589d5e4dffda
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+
+codex
+我要把全局 residual head 直接接到 r294 的 dual-shared residual scaffold 上，避免重新发明一条完全无关的线。这样改完之后，这轮依然能保持“同一套 shared+PK scaffold，上层 cleanup 语义升级”的归因清晰。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+codex
+代码已落盘。现在按集成清单做 exact-string smoke 和 cost 检查，确认 `ARCHITECTURE=residual_dual_shared_product_key_expert_residual` 在 r294 继承配置下真的能跑。
+exec
+/bin/bash -lc 'git diff -- sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac37..5b399f6 100644
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@ class TrainConfig(Serializable):
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf429..d4d8e4d 100644
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@ def _get_sae_class(architecture: str) -> type:
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@ class DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+arch='residual_dual_shared_product_key_expert_residual'
+cfg = SparseCoderConfig(
+    architecture=arch,
+    k=32,
+    expansion_factor=1,
+    num_experts=2048,
+    active_experts=2,
+    latents_per_expert=56,
+    stage1_ratio=0.375,
+    factorized_hidden_dim=256,
+)
+sae = SparseCoder(1024, cfg, device='cpu', dtype=torch.float32)
+x = torch.randn(4, 1024)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, cfg.k, cfg.expansion_factor)
+print('cost', sae.selection_cost_estimate(4096))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from research.AutoResearch.compatibility import compute_selection_cost
+out=compute_selection_cost('residual_dual_shared_product_key_expert_residual',k=32,ef=1,extra_config={'num_experts':2048,'active_experts':2,'latents_per_expert':56,'stage1_ratio':0.375,'factorized_hidden_dim':256})
+print(json.dumps(out, ensure_ascii=False, indent=2))
+PY" in /root/sparsify-ascend
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+ succeeded in 5218ms:
+{
+  "total_accesses": 383040,
+  "original_matmul_accesses": 4194304,
+  "ratio": 0.09,
+  "budget_ratio": 0.06,
+  "feasible": true,
+  "breakdown": [
+    {
+      "name": "left_router",
+      "accesses": 46080,
+      "shape": "1024x45"
+    },
+    {
+      "name": "right_router",
+      "accesses": 47104,
+      "shape": "1024x46"
+    },
+    {
+      "name": "residual_factor",
+      "accesses": 57344,
+      "shape": "1024x56"
+    },
+    {
+      "name": "shared_expert_encoder",
+      "accesses": 114688,
+      "shape": "shared=2×1024x56"
+    },
+    {
+      "name": "active_expert_encoder",
+      "accesses": 114688,
+      "shape": "active=2×1024x56"
+    },
+    {
+      "name": "factorized_residual_head",
+      "accesses": 3136,
+      "shape": "residual=56x56"
+    }
+  ],
+  "deployment_accesses": 163840,
+  "deployment_ratio": 0.04,
+  "deployment_breakdown": [
+    {
+      "name": "sparse_lookup",
+      "accesses": 163840,
+      "shape": "K=32×(d=1024+n=4096)"
+    }
+  ],
+  "combined_accesses": 546880,
+  "combined_ratio": 0.13,
+  "combined_budget_ratio": 0.09,
+  "combined_feasible": true
+}
+
+ succeeded in 5585ms:
+Using fused decoder on CUDA.
+integration_smoke: OK residual_dual_shared_product_key_expert_residual 32 1
+cost {'total_accesses': 383040, 'original_matmul_accesses': 4194304, 'ratio': 0.09, 'budget_ratio': 0.06, 'feasible': True, 'breakdown': [{'name': 'left_router', 'accesses': 46080, 'shape': '1024x45'}, {'name': 'right_router', 'accesses': 47104, 'shape': '1024x46'}, {'name': 'residual_factor', 'accesses': 57344, 'shape': '1024x56'}, {'name': 'shared_expert_encoder', 'accesses': 114688, 'shape': 'shared=2×1024x56'}, {'name': 'active_expert_encoder', 'accesses': 114688, 'shape': 'active=2×1024x56'}, {'name': 'factorized_residual_head', 'accesses': 3136, 'shape': 'residual=56x56'}], 'deployment_accesses': 163840, 'deployment_ratio': 0.04, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 163840, 'shape': 'K=32×(d=1024+n=4096)'}], 'combined_accesses': 546880, 'combined_ratio': 0.13, 'combined_budget_ratio': 0.09, 'combined_feasible': True}
+
+codex
+落盘 diff 已确认，剩下就是 exact-string smoke 和 cost 是否落在预算带内；如果这一步不过，我不会把它作为本轮 action 返回。
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+codex
+{"command":"run","hypothesis":"扩展兼容新结构 probe：`residual_dual_shared_product_key_expert_residual` 的最终重构为 x_hat = Σ_{i∈S_1(x)} α_i^{sh,1} b_i^{sh,1} + Σ_{j∈S_2(r1(x))} α_j^{sh,2} b_j^{sh,2} + Σ_{e∈E_pk(r2(x))} Σ_{m∈S_e^τ(r2(x))} α_{e,m} b_{e,m} + Σ_{u∈S_res(r3(x))} γ_u c_u，其中 r1/r2/r3 是逐级 residual。两层 shared residual coarse stage、PK-routed expert cleanup 与最后的 tiny global residual cleanup 都只访问静态向量库并做有限加权和，因此可导出到 LUTurbo/Lottable 的查表 + 加权求和 + 选择性补偿流水线，兼容性判定为扩展兼容。主假设是：在 r294 已显出较好 exceed 的 dual-shared PK scaffold 上再加一个很小的全局 residual tail-cleanup，能比现有 dual-shared PK 更强地压住 hard-token exceed。","summary":"已实际新增并集成 `residual_dual_shared_product_key_expert_residual`，只修改 `sparsify/config.py` 与 `sparsify/sparse_coder.py`。该 family 是对 r294 `dual_shared_product_key_expert_jumprelu` 的结构升级：保留双 shared coarse + PK cleanup，只再追加一个 tiny factorized residual cleanup。按本地 exact-string smoke 与 cost 估计，在继承 r294 的 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375, FACTORIZED_HIDDEN_DIM=256` 配置下 total_cost_ratio 约 `0.13x`，仍在当前目标带内；因此本轮是一次 matched-cost 附近、明确面向降低 exceed 的 scaffold-upgrade probe。","change_type":"edit_sae_code","expected_win":"lower_objective","family_name":"residual_dual_shared_product_key_expert_residual","family_stage":"prototype","self_review":"风险很直接：`cost≈0.13x` 已经要求 exceed 至少接近 `0.09~0.10` 才有机会逼近阶段目标，交换率门槛很高。如果这轮 exceed 只是比 r294 小幅下降几个点，仍不够支撑主线；但它是当前最贴近 winning scaffold 的高信息增量升级之一，值得用一轮回答。","needs_sanity":true,"env_overrides":[{"key":"ARCHITECTURE","value":"residual_dual_shared_product_key_expert_residual"}],"touched_files":["sparsify/config.py","sparsify/sparse_coder.py"],"notes_to_memory":["已落盘新增 family：`residual_dual_shared_product_key_expert_residual`，完成了 `sparsify/config.py` whitelist 与 `sparsify/sparse_coder.py` dispatch/class 接线。","本地 exact-string smoke 已通过：`residual_dual_shared_product_key_expert_residual` 在 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375, FACTORIZED_HIDDEN_DIM=256` 下可实例化并 forward/backward。","本地 cost 估计：selection_ratio≈0.09，deployment_ratio≈0.04，total_cost_ratio≈0.13；处于当前允许的 matched-objective 探索带。","该 family 的结构语义是：dual shared residual coarse stage 吃主干，PK experts 做中层 cleanup，tiny factorized residual head 做尾部 cleanup；与 r294 相比，信息增量集中在 hard-token tail-cleanup 机制。"],"next_hypotheses":["若本轮 exceed 明显低于 r294 且 objective 改善，再以该 family 为 anchor 做一次极小幅 knee 校准，例如 `STAGE1_RATIO`。","若本轮 objective 仍无改善，则说明在 dual-shared PK scaffold 上追加 tiny global residual cleanup 的交换率不足，后续应停止继续叠加同类 cleanup 层。","若本轮出现 sanity 或 registration 异常，优先按 exact architecture string 回查 config whitelist / dispatch / class reachable 性，而不要把问题误判成训练质量结论。"],"reference_round":294}
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 4a4ac376bfe2e5088f1e05fb008855d807e0bb9b..5b399f6f9bbee728239b4400ad4315b3574ea67a
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -237,6 +237,7 @@
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "residual_dual_shared_product_key_expert_jumprelu",
++            "residual_dual_shared_product_key_expert_residual",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 8dbf4299defe1e64b4fc36928a1ecbff1a6be6de..d4d8e4df1fb8ad9e159adf2b4190fa451563b5c5
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -469,6 +469,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+         return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "residual_dual_shared_product_key_expert_residual":
++        return ResidualDualSharedProductKeyExpertResidualSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+@@ -3691,6 +3693,282 @@
+     shared_expert_count = 2
+ 
+ 
++class ResidualDualSharedProductKeyExpertResidualSparseCoder(
++    ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Two shared residual stages, PK cleanup, then tiny global residual cleanup."""
++
++    architecture_name = "residual_dual_shared_product_key_expert_residual"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires stage2_k >= 2 so routed "
++                f"expert cleanup keeps at least one slot after reserving a "
++                f"global residual slot; got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_stage_k = max(1, self.stage2_k // 6)
++        self.expert_stage_k = self.stage2_k - self.residual_stage_k
++        if self.expert_stage_k < 1:
++            raise ValueError(
++                f"{self.architecture_name} requires expert_stage_k >= 1, "
++                f"got stage2_k={self.stage2_k}"
++            )
++
++        self.residual_num_latents = self.latents_per_expert
++        hidden_dim = min(
++            self.latents_per_expert,
++            cfg.factorized_hidden_dim or self.latents_per_expert,
++        )
++        self.residual_factor = nn.Linear(
++            d_in, hidden_dim, device=device, dtype=dtype
++        )
++        self.residual_heads = nn.Parameter(
++            torch.empty(
++                self.residual_num_latents,
++                hidden_dim,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_head_bias = nn.Parameter(
++            torch.zeros(
++                self.residual_num_latents,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.residual_factor.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
++
++        if decoder:
++            assert self.W_dec is not None, "Decoder weight was not initialized."
++            residual_decoder = torch.matmul(
++                self.residual_heads.data,
++                self.residual_factor.weight.data,
++            )
++            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++
++        self.num_latents = (
++            self.shared_num_latents
++            + self.expert_num_latents
++            + self.residual_num_latents
++        )
++
++    def _encoder_linear_layers(self):
++        return super()._encoder_linear_layers() + [
++            ("residual_factor", self.residual_factor)
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        hidden_dim = self.residual_factor.out_features
++        base.append(
++            (
++                "factorized_residual_head",
++                hidden_dim * self.residual_num_latents,
++                f"residual={hidden_dim}x{self.residual_num_latents}",
++            )
++        )
++        return base
++
++    def _encode_expert_stage_with_budget(
++        self, residual: Tensor, *, topk: int
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_residual_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++        hidden = F.relu(self.residual_factor(flat_x))
++        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
++        residual_acts = F.relu(pre_acts)
++        top_acts, top_indices = torch.topk(
++            residual_acts, self.residual_stage_k, dim=-1, sorted=False
++        )
++        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
++
++        target_shape = (*original_shape, self.residual_stage_k)
++        acts_shape = (*original_shape, self.residual_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            residual_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++
++        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
++            x_centered,
++            bank_idx=0,
++            topk=self.stage1a_k,
++            index_offset=0,
++        )
++        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
++
++        residual_1 = x_centered - stage1a_out
++        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
++            residual_1,
++            bank_idx=1,
++            topk=self.stage1b_k,
++            index_offset=self.latents_per_expert,
++        )
++        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
++
++        residual_2 = residual_1 - stage1b_out
++        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
++            residual_2,
++            topk=self.expert_stage_k,
++        )
++        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
++
++        residual_3 = residual_2 - stage2_out
++        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
++            residual_3
++        )
++
++        combined_acts = torch.cat(
++            (stage1a_acts, stage1b_acts, stage2_acts, stage3_acts), dim=-1
++        )
++        combined_indices = torch.cat(
++            (stage1a_indices, stage1b_indices, stage2_indices, stage3_indices), dim=-1
++        )
++        combined_full = torch.cat(
++            (stage1a_full, stage1b_full, stage2_full, stage3_full), dim=-1
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
+
+tokens used
+473,468
