@@ -1,0 +1,2136 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E_var(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 {b_{e,i}} 是各 expert 的静态子库原子，expert 内支持集 Ŝ_e(x) 仍由 JumpReLU 门控形成：positive_{e,i}(x)=ReLU(z_{e,i}(x))，gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β)，α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)；但 active expert 集合 E_var(x) 不再固定为 2，而是由 router 置信度自适应决定：若 top1 在 top2 归一化份额中已足够占优，则只激活 1 个 expert，否则激活 2 个 expert。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择少量静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此新 family `adaptive_active_expert_jumprelu` 判定为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能进入当前兼容 leaderboard。本轮唯一主假设是：当前 `expert_jumprelu` 已在 K=32/K=48 两个 matched-cost 点略优于 `expert_topk`，说明改进点可能不是“更软支持”本身，而是应继续缩短容易 token 的 active path；因此相对 r235 只把 `ARCHITECTURE` 从 `expert_jumprelu` 切到新实现的 `adaptive_active_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试“按难度自适应 1-or-2 experts”是否能在不增加 worst-case cost 的前提下进一步压低 exceed_alpha_0.50。按本地 exact 成本复核，该 matched recipe 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与当前 incumbent `expert_jumprelu@K32` 同成本，因此这轮是干净的 matched architecture probe，不混入新的成本轴。",
+  "summary": "已在 `sparsify/` 落盘最小新 family `adaptive_active_expert_jumprelu`。建议以 r235 为 reference，只改 `ARCHITECTURE=adaptive_active_expert_jumprelu`，做一轮新的 matched-objective architecture probe，直接回答 variable-active-path 是否值得继续。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "adaptive_active_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮选择新结构槽位而不是继续在 `expert_jumprelu` 上补局部插值，符合当前 round-238 的运行优先级：r236 与 r237 都没有把 incumbent 再明显压低，继续在同一 family 上做 K 或阈值细扫的信息增量已经下降。新 family 的改动被严格限制在 `sparsify/`，没有新增 env key，也没有动执行层；它与现有 family 的精确差异不是重命名，而是把固定 `ACTIVE_EXPERTS=2` 的 routed path 改成“高置信 token 只走 1 expert，困难 token 仍走 2 experts”，直接对齐当前高优先级的 `variable-active-experts by difficulty` 方向。主要风险是当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这轮若有收益只能来自 exceed 改善而不是被 proxy 直接记到 cost 下降；但这正好让结构判断更干净。如果连这种最小侵入的 variable-active-path 原型都无法在 same-cost K=32 lane 上改善 objective，就可以更明确地下调 Expert-Choice-like 方向的优先级。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "adaptive_active_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py"
+  ],
+  "notes_to_memory": [
+    "已实际新增并注册 `adaptive_active_expert_jumprelu`，真实改动仅落在 `sparsify/config.py` 与 `sparsify/sparse_coder.py`；没有新增 tunable env key，也没有改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。",
+    "`adaptive_active_expert_jumprelu` 的结构语义是“JumpReLU expert family + confidence-based variable active path”：高置信 token 只保留 top1 expert，低置信 token 仍保留 top2 experts，最终重构仍是静态 expert 子库上的有限加权和，因此属直接兼容。",
+    "本地 exact architecture smoke 已通过：`SparseCoderConfig(architecture='adaptive_active_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192, factorized_hidden_dim=256)` 在 CPU 上可成功 instantiate、forward、backward。",
+    "本地 exact 成本复核：`adaptive_active_expert_jumprelu K=32 EF=1 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与 `expert_jumprelu@K32` 同成本。",
+    "本地 allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: adaptive_active_expert_jumprelu}], fallback_architecture='expert_jumprelu')` 返回空列表。"
+  ],
+  "next_hypotheses": [
+    "如果 `adaptive_active_expert_jumprelu@K32` 刷新当前 incumbent，则下一轮保持 family 不变，只改 `K=48`，确认 variable-active-path 是否在更高 deploy budget 下继续保持比 `expert_jumprelu` 更缓的 exceed 退化。",
+    "如果该点与 `expert_jumprelu@K32` 基本持平或更差，则说明仅靠按置信度缩短 active path 还不足以带来 regime shift；下一轮应切换到别的结构槽位，而不是继续在这条线内部细扫。",
+    "如果该点有轻微正信号但不足以形成新主线，后续可考虑补一个更强版本，例如 shared/coarse 分支配合 adaptive active experts，而不是继续围绕当前 routed-only 配方做温和插值。"
+  ],
+  "reference_round": 235
+}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d468f-691a-7cb3-be35-4b56cec90de2
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 238。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 238 策略模式：主线推进
+原因：当前没有连续 crash；主线应继续推进单目标改进，并优先考虑结构性信息增量。
+当前 objective anchor family：expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 当前 mainline 配方首先是 objective anchor / matched baseline，不等于后续必须继续围绕它做局部推进。
+2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，然后优先选择信息增量最大的改动。
+3. 如果最近 2 轮没有把 objective 明显拉低，默认应切换到新的结构槽位；只有在你能明确说明当前 family 仍有高价值未验证假设时，才继续做局部调整。
+4. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。
+5. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+6. 当前已验证最强主线若是更大 expert 池 + 更小 K 的低成本 routed family，则不要假设更复杂结构天然更优；只有当新结构能明确解释 small-K exceed 为何会更慢退化时，才值得挑战 incumbent。
+7. 因此当前优先方向应分成两类：一类是 incumbent 主线附近真正高价值的 knee / 容量点；另一类是 literature-inspired、但与现有 family 明确不同的结构 probe。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。
+
+兼容性注册表：直接兼容 12 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=237, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=2
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.30` 仍差约 0.054；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `expert_jumprelu` (K=32)，objective≈0.354491 = cost 0.16x + exceed 0.194491。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.14~0.20` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  7. 当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。
+  5. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r235 objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | fvu=0.1710990071296692 | arch=expert_jumprelu K=32 EF=1 | FEASIBLE
+  r236 objective=0.36131738901138305 = cost 0.18x + exceed 0.18131738901138306 | fvu=0.1570778787136078 | arch=expert_jumprelu K=48 EF=1 | FEASIBLE
+  r209 objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | fvu=0.14861851930618286 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r199 objective=0.386114 = cost 0.19x + exceed 0.196114 | fvu=0.16656622290611267 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r208 objective=0.3925313973426819 = cost 0.19x + exceed 0.20253139734268188 | fvu=0.1712922751903534 | arch=lowrank_expert_topk K=64 EF=1 | FEASIBLE
+  r196 objective=0.4145242083072662 = cost 0.23x + exceed 0.18452420830726624 | fvu=0.15407827496528625 | arch=expert_topk K=96 EF=1 | FEASIBLE
+  r176 objective=0.4211236047744751 = cost 0.23x + exceed 0.1911236047744751 | fvu=0.15915092825889587 | arch=expert_topk K=108 EF=1 | FEASIBLE
+  r187 objective=0.426606148481369 = cost 0.25x + exceed 0.17660614848136902 | fvu=0.14519497752189636 | arch=lowrank_expert_topk K=96 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → expert_jumprelu (K=32, EF=1):
+    objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | encoder=0.12x | deploy=0.04x | fvu=0.1710990071296692
+  最低 exceed leader → expert_topk (K=64, EF=1):
+    objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | encoder=0.12x | deploy=0.08x | fvu=0.14861851930618286
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.30 以下。
+  当前 incumbent 约为 objective=0.354491 (cost=0.16x, exceed=0.194491)；距离目标仍差 0.054491。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.16
+    - 若 cost≈0.16x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.18x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.20x，则 exceed 需压到 ≤0.10
+  因此：若新结构 cost 升到约 0.20x，却仍无法把 exceed 压到约 0.10 附近，则通常不够支撑 0.30 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，4）：
+  r230 two_stage_residual_expert param_only -> discard objective=0.586051 cost=0.414062x exceed=0.171988 fvu=0.1469648778438568 684s
+  r235 expert_jumprelu param_only -> keep objective=0.358553 cost=0.164062x exceed=0.194491 fvu=0.1710990071296692 772s
+  r236 expert_jumprelu param_only -> keep objective=0.364911 cost=0.183594x exceed=0.181317 fvu=0.1570778787136078 628s
+  r237 expert_jumprelu param_only -> archive objective=0.359437 cost=0.164062x exceed=0.195374 fvu=0.17175798118114471 699s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。全局方向仍是把 objective 压向 `0.30` 以下，但这通常不可能靠 incumbent 邻域的小步微调自然达到；若多轮结果仍停留在 `0.35~0.40` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。
+  2. 当前仍要重点回答“怎样在更小 `K` 下控制 exceed_alpha_0.50”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r235 expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r230 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先核实现有 cost proxy 对 expert 家族怎么计 `ACTIVE_EXPERTS`，以及如果落一个“按难度自适应专家数”的新 family，能否不引入新 env key 就安全接入。这一步决定本轮是走现有 family probe，还是值得直接做一轮最小代码原型。
+exec
+/bin/bash -lc 'rg -n "def compute_selection_cost|active_experts|expert_topk|shared_routed_expert_topk|factorized_router_expert_topk|expert_jumprelu" research/AutoResearch/compatibility.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+research/AutoResearch/compatibility.py:43:        ("active_experts", "active_experts"),
+research/AutoResearch/compatibility.py:50:        ("ACTIVE_EXPERTS", "active_experts"),
+research/AutoResearch/compatibility.py:139:def compute_selection_cost(
+research/AutoResearch/compatibility.py:204:def compute_selection_cost_table(
+sparsify/sparse_coder.py:446:    if architecture == "expert_topk":
+sparsify/sparse_coder.py:448:    if architecture == "expert_jumprelu":
+sparsify/sparse_coder.py:450:    if architecture == "factorized_router_expert_topk":
+sparsify/sparse_coder.py:452:    if architecture == "shared_routed_expert_topk":
+sparsify/sparse_coder.py:456:    if architecture == "factorized_expert_topk":
+sparsify/sparse_coder.py:458:    if architecture == "shared_routed_factorized_expert_topk":
+sparsify/sparse_coder.py:462:    if architecture == "shared_lowrank_routed_expert_topk":
+sparsify/sparse_coder.py:468:    if architecture == "lowrank_expert_topk":
+sparsify/sparse_coder.py:1202:    active_experts = cfg.active_experts or 1
+sparsify/sparse_coder.py:1203:    if active_experts > num_experts:
+sparsify/sparse_coder.py:1205:            "active_experts must be <= num_experts, "
+sparsify/sparse_coder.py:1206:            f"got active_experts={active_experts} and num_experts={num_experts}"
+sparsify/sparse_coder.py:1209:    return base_num_latents, num_experts, latents_per_expert, active_experts
+sparsify/sparse_coder.py:1214:    active_experts: int,
+sparsify/sparse_coder.py:1218:        router_probs, active_experts, dim=-1, sorted=False
+sparsify/sparse_coder.py:1270:            self.active_experts,
+sparsify/sparse_coder.py:1273:        if cfg.k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:1275:                "expert_topk requires k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:1276:                f"got k={cfg.k}, active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:1319:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:1320:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1331:            router_logits, self.active_experts
+sparsify/sparse_coder.py:1389:            router_logits, self.active_experts
+sparsify/sparse_coder.py:1436:            self.active_experts,
+sparsify/sparse_coder.py:1439:        if cfg.k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:1441:                "factorized_router_expert_topk requires "
+sparsify/sparse_coder.py:1442:                "k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:1443:                f"got k={cfg.k}, active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:1504:            router_logits, self.active_experts
+sparsify/sparse_coder.py:1546:            self.active_experts,
+sparsify/sparse_coder.py:1555:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:1559:                "shared_routed_expert_topk requires "
+sparsify/sparse_coder.py:1560:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:1562:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:1638:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:1639:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1657:            router_logits, self.active_experts
+sparsify/sparse_coder.py:1719:            self.active_experts,
+sparsify/sparse_coder.py:1740:        if self.stage2_k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:1743:                "stage2_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:1745:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:1818:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:1819:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:1857:            router_logits, self.active_experts
+sparsify/sparse_coder.py:1968:            self.active_experts,
+sparsify/sparse_coder.py:1971:        if cfg.k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:1973:                "factorized_expert_topk requires k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:1974:                f"got k={cfg.k}, active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:2031:                self.active_experts
+sparsify/sparse_coder.py:2034:                f"active={self.active_experts}×{self.factor_encoder.out_features}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2046:            router_logits, self.active_experts
+sparsify/sparse_coder.py:2088:            self.active_experts,
+sparsify/sparse_coder.py:2097:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:2101:                "shared_routed_factorized_expert_topk requires "
+sparsify/sparse_coder.py:2102:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:2104:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:2193:                self.active_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:2194:                f"active={self.active_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2213:            router_logits, self.active_experts
+sparsify/sparse_coder.py:2275:            self.active_experts,
+sparsify/sparse_coder.py:2284:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:2288:                "shared_lowrank_routed_expert_topk requires "
+sparsify/sparse_coder.py:2289:                "k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:2291:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:2378:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:2379:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2398:            router_logits, self.active_experts
+sparsify/sparse_coder.py:2460:            self.active_experts,
+sparsify/sparse_coder.py:2478:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:2483:                "stage1_k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:2486:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:2591:                self.active_experts * hidden_dim * self.latents_per_expert,
+sparsify/sparse_coder.py:2592:                f"active={self.active_experts}×{hidden_dim}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2625:            router_logits, self.active_experts
+sparsify/sparse_coder.py:2775:            self.active_experts,
+sparsify/sparse_coder.py:2796:        if self.stage2_k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:2799:                "stage2_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:2801:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:2889:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:2890:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:2939:            router_logits, self.active_experts
+sparsify/sparse_coder.py:3053:            self.active_experts,
+sparsify/sparse_coder.py:3071:            self.num_shared_experts + self.active_experts
+sparsify/sparse_coder.py:3076:                "stage1_k <= (shared_experts + active_experts) * latents_per_expert, "
+sparsify/sparse_coder.py:3079:                f"active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:3181:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:3182:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:3215:            router_logits, self.active_experts
+sparsify/sparse_coder.py:3365:            self.active_experts,
+sparsify/sparse_coder.py:3368:        if cfg.k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:3370:                "lowrank_expert_topk requires k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3371:                f"got k={cfg.k}, active_experts={self.active_experts}, "
+sparsify/sparse_coder.py:3430:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:3431:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:3461:            router_logits, self.active_experts
+sparsify/sparse_coder.py:3554:            self.active_experts,
+sparsify/sparse_coder.py:3567:        if self.stage1_k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:3569:                "lowrank_expert_residual requires stage1_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3571:                f"active_experts={self.active_experts} and "
+sparsify/sparse_coder.py:3640:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:3641:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:3675:            router_logits, self.active_experts
+sparsify/sparse_coder.py:3809:            self.active_experts,
+sparsify/sparse_coder.py:3822:        if self.stage2_k > self.active_experts * self.latents_per_expert:
+sparsify/sparse_coder.py:3824:                "two_stage_residual_expert requires stage2_k <= active_experts * latents_per_expert, "
+sparsify/sparse_coder.py:3826:                f"active_experts={self.active_experts} and "
+sparsify/sparse_coder.py:3880:                self.active_experts * self.d_in * self.latents_per_expert,
+sparsify/sparse_coder.py:3881:                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+sparsify/sparse_coder.py:3897:            router_logits, self.active_experts
+
+exec
+/bin/bash -lc "sed -n '1185,1360p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+def _resolve_expert_layout(
+    cfg: SparseCoderConfig,
+    d_in: int,
+) -> tuple[int, int, int, int]:
+    base_num_latents = cfg.num_latents or d_in * cfg.expansion_factor
+    if cfg.num_experts is None:
+        num_experts = 4
+        default_latents_per_expert = math.ceil(base_num_latents / num_experts)
+    else:
+        # Explicit NUM_EXPERTS switches expert families into sparse-capacity
+        # expansion mode. LATENTS_PER_EXPERT can then shrink or expand the
+        # active-path width independently of the routed expert count.
+        num_experts = cfg.num_experts
+        default_latents_per_expert = base_num_latents
+
+    latents_per_expert = cfg.latents_per_expert or default_latents_per_expert
+
+    active_experts = cfg.active_experts or 1
+    if active_experts > num_experts:
+        raise ValueError(
+            "active_experts must be <= num_experts, "
+            f"got active_experts={active_experts} and num_experts={num_experts}"
+        )
+
+    return base_num_latents, num_experts, latents_per_expert, active_experts
+
+
+def _select_active_expert_indices(
+    router_logits: Tensor,
+    active_experts: int,
+) -> tuple[Tensor, Tensor]:
+    router_probs = torch.softmax(router_logits, dim=-1)
+    active_probs, active_indices = torch.topk(
+        router_probs, active_experts, dim=-1, sorted=False
+    )
+    norm = active_probs.sum(dim=-1, keepdim=True).clamp_min(
+        torch.finfo(active_probs.dtype).eps
+    )
+    return active_indices, active_probs / norm
+
+
+def _finalize_routed_expert_acts(
+    acts: Tensor,
+    selected_expert_idx: Tensor,
+    total_k: int,
+    latents_per_expert: int,
+    num_latents: int,
+    *,
+    index_offset: int = 0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    flat_acts = acts.reshape(acts.shape[0], -1)
+    top_acts, top_pos = torch.topk(flat_acts, total_k, dim=-1, sorted=False)
+
+    local_offsets = torch.arange(
+        latents_per_expert, device=acts.device
+    ).view(1, 1, latents_per_expert)
+    flat_indices = (
+        selected_expert_idx.unsqueeze(-1) * latents_per_expert + local_offsets
+    ).reshape(acts.shape[0], -1)
+    top_indices = flat_indices.gather(1, top_pos) + index_offset
+
+    full_acts = acts.new_zeros(acts.shape[0], num_latents)
+    full_acts.scatter_(1, flat_indices, flat_acts)
+    return top_acts, top_indices, full_acts
+
+
+class ExpertTopKSparseCoder(SparseCoder):
+    """Route each token to one expert-local dictionary before local top-k."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "expert_topk requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        self.router = nn.Linear(d_in, self.num_experts, device=device, dtype=dtype)
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("router", self.router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class ExpertJumpReLUSparseCoder(ExpertTopKSparseCoder):
+    """Expert routing with JumpReLU-gated local supports inside selected experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+
+exec
+/bin/bash -lc "sed -n '120,260p' research/AutoResearch/compatibility.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    """Short rules that must appear in every prompt."""
+    profile = default_target_profile()
+    return "\n".join([
+        "LUTurbo 兼容性硬约束：",
+        "1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。",
+        "2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。",
+        "3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。",
+        "4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。",
+        f"当前 target：训练 hookpoint 为 {profile.training_hookpoint}。",
+        f"成本 proxy：{profile.cost_model_label}。",
+        "5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。",
+        "   超过此阈值的配置将被 policy 拦截。",
+        "   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。",
+        "   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。",
+        "   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。",
+        "6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。",
+    ])
+
+
+def compute_selection_cost(
+    architecture: str,
+    k: int = 128,
+    ef: int = 12,
+    d_in: int | None = None,
+    n_output: int | None = None,
+    extra_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute encoder-side selection cost by instantiating the model.
+
+    Uses subprocess to avoid import-time GPU issues, similar to
+    ``policy.behavioral_diff_test()``.
+    """
+    if d_in is None or n_output is None:
+        profile = default_target_profile()
+        if d_in is None:
+            d_in = profile.d_in
+        if n_output is None:
+            n_output = profile.n_output
+
+    cfg_parts = [
+        f"architecture='{architecture}'",
+        f"k={k}",
+        f"expansion_factor={ef}",
+    ]
+    if extra_config:
+        for key, value in extra_config.items():
+            if value is not None:
+                cfg_parts.append(f"{key}={value!r}")
+
+    code = f"""\
+import sys, json; sys.path.insert(0, '.')
+from sparsify.sparse_coder import _get_sae_class
+from sparsify.config import SparseCoderConfig
+cfg = SparseCoderConfig({', '.join(cfg_parts)})
+cls = _get_sae_class('{architecture}')
+m = cls({d_in}, cfg, device='cpu')
+print("COST:" + json.dumps(m.selection_cost_estimate({int(n_output)})))
+"""
+    try:
+        result = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            if line.startswith("COST:"):
+                return json.loads(line[5:])
+        return {"error": "parse_failed", "stderr": result.stderr[-500:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_COST_TABLE_ARCHITECTURES = [
+    "topk", "gated", "factorized_topk",
+    "lowrank_residual", "lowrank_soft_codebook_residual",
+    "lowrank_two_stage_soft_codebook_residual",
+]
+_COST_TABLE_EF_VALUES = [1, 2, 3, 4, 6, 8, 12]
+
+
+def compute_selection_cost_table(
+    architectures: list[str] | None = None,
+    ef_values: list[int] | None = None,
+    k: int = 32,
+    d_in: int | None = None,
+    n_output: int | None = None,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Batch-compute selection costs for (architecture, EF) combinations.
+
+    Uses a single subprocess to avoid N separate invocations.
+    Returns {(arch, ef): cost_dict} where cost_dict has keys:
+    ratio, feasible, total_accesses, etc.
+    """
+    profile = default_target_profile()
+    d_in = profile.d_in if d_in is None else d_in
+    n_output = profile.n_output if n_output is None else n_output
+    archs = architectures or _COST_TABLE_ARCHITECTURES
+    efs = ef_values or _COST_TABLE_EF_VALUES
+
+    combos = [(arch, ef) for arch in archs for ef in efs]
+    if not combos:
+        return {}
+
+    # Build a single subprocess that computes all costs
+    lines = [
+        "import sys, json; sys.path.insert(0, '.')",
+        "from sparsify.sparse_coder import _get_sae_class",
+        "from sparsify.config import SparseCoderConfig",
+    ]
+    for arch, ef in combos:
+        lines.append(f"try:")
+        lines.append(f"    _cfg = SparseCoderConfig(architecture='{arch}', k={k}, expansion_factor={ef})")
+        lines.append(f"    _cls = _get_sae_class('{arch}')")
+        lines.append(f"    _m = _cls({d_in}, _cfg, device='cpu')")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps(_m.selection_cost_estimate({int(n_output)})))")
+        lines.append(f"except Exception as _e:")
+        lines.append(f"    print('COST:{arch}|{ef}|' + json.dumps({{'error': str(_e)}}))")
+
+    code = "\n".join(lines)
+    results: dict[tuple[str, int], dict[str, Any]] = {}
+    try:
+        proc = subprocess.run(
+            ["python", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        for line in (proc.stdout + proc.stderr).splitlines():
+            if not line.startswith("COST:"):
+                continue
+            parts = line[5:].split("|", 2)
+            if len(parts) == 3:
+                arch_name, ef_str, payload = parts
+                try:
+                    results[(arch_name, int(ef_str))] = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+
+codex
+我决定先做一个最小新原型，而不是再在 `expert_jumprelu` 上补局部点：把“按难度自适应激活 1 或 2 个 expert”的机制接到当前最优的 JumpReLU 版 expert family 上，不新增任何 env key，只用现有 `ACTIVE_EXPERTS=2` 作为上限。接下来我会把新 architecture 落到 `sparsify/`，做 exact 字符串 smoke，再返回对应 JSON。
+exec
+/bin/bash -lc 'rg -n "adaptive_active_expert|confidence_routed|variable_active|expert_choice" sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ exited 1 in 0ms:
+exec
+/bin/bash -lc "sed -n '420,455p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+exec
+/bin/bash -lc "sed -n '210,240p' sparsify/config.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+def _get_sae_class(architecture: str) -> type:
+    """Return the SparseCoder subclass for the given architecture string."""
+    if architecture == "topk":
+        return SparseCoder
+    if architecture == "batch_topk":
+        return BatchTopKSparseCoder
+    if architecture == "adaptive_budget_topk":
+        return AdaptiveBudgetTopKSparseCoder
+    if architecture == "bucketed_topk":
+        return BucketedTopKSparseCoder
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "expert_jumprelu":
+        return ExpertJumpReLUSparseCoder
+    if architecture == "factorized_router_expert_topk":
+        return FactorizedRouterExpertTopKSparseCoder
+    if architecture == "shared_routed_expert_topk":
+        return SharedRoutedExpertTopKSparseCoder
+    if architecture == "shared_two_stage_residual_expert":
+        return SharedTwoStageResidualExpertSparseCoder
+
+ succeeded in 0ms:
+                raise ValueError(
+                    f"hadamard_block_size must be a positive power of 2, got {bs}"
+                )
+
+        # Architecture validation
+        valid_archs = (
+            "topk",
+            "batch_topk",
+            "adaptive_budget_topk",
+            "bucketed_topk",
+            "codebook_topk",
+            "residual_vq",
+            "two_code_residual_vq",
+            "lowrank_residual_vq",
+            "jumprelu",
+            "gated",
+            "routed",
+            "expert_topk",
+            "expert_jumprelu",
+            "factorized_router_expert_topk",
+            "shared_routed_expert_topk",
+            "shared_two_stage_residual_expert",
+            "factorized_expert_topk",
+            "shared_routed_factorized_expert_topk",
+            "shared_routed_factorized_expert_residual",
+            "shared_lowrank_routed_expert_topk",
+            "shared_lowrank_two_stage_residual_expert",
+            "shared_lowrank_routed_expert_residual",
+            "lowrank_expert_topk",
+            "lowrank_expert_residual",
+            "two_stage_residual_expert",
+
+codex
+我现在开始落盘一个最小新 family：`adaptive_active_expert_jumprelu`。它保留当前最优的 JumpReLU expert 子库与 cost 配方，只把“每个 token 固定 2 个 expert”改成“高置信 token 用 1 个，低置信 token 用 2 个”，用来直接回答 variable-active-path 是否值得继续。
+2026-04-01T02:22:30.532448Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /root/sparsify-ascend/sparsify/sparse_coder.py:
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "expert_jumprelu":
+        return ExpertJumpReLUSparseCoder
+    if architecture == "factorized_router_expert_topk":
+        return FactorizedRouterExpertTopKSparseCoder
+codex
+补丁定位点有一点偏差，我先读取精确上下文后重打最小 patch，避免碰到用户已有改动。
+exec
+/bin/bash -lc "sed -n '430,470p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    if architecture == "codebook_topk":
+        return CodebookTopKSparseCoder
+    if architecture == "residual_vq":
+        return ResidualVQSparseCoder
+    if architecture == "two_code_residual_vq":
+        return TwoCodeResidualVQSparseCoder
+    if architecture == "lowrank_residual_vq":
+        return LowRankResidualVQSparseCoder
+    if architecture == "whitened_topk":
+        return WhitenedTopKSparseCoder
+    if architecture == "jumprelu":
+        return JumpReLUSparseCoder
+    if architecture == "gated":
+        return GatedSparseCoder
+    if architecture == "routed":
+        return RoutedSparseCoder
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "expert_jumprelu":
+        return ExpertJumpReLUSparseCoder
+    if architecture == "factorized_router_expert_topk":
+        return FactorizedRouterExpertTopKSparseCoder
+    if architecture == "shared_routed_expert_topk":
+        return SharedRoutedExpertTopKSparseCoder
+    if architecture == "shared_two_stage_residual_expert":
+        return SharedTwoStageResidualExpertSparseCoder
+    if architecture == "factorized_expert_topk":
+        return FactorizedExpertTopKSparseCoder
+    if architecture == "shared_routed_factorized_expert_topk":
+        return SharedRoutedFactorizedExpertTopKSparseCoder
+    if architecture == "shared_routed_factorized_expert_residual":
+        return SharedRoutedFactorizedExpertResidualSparseCoder
+    if architecture == "shared_lowrank_routed_expert_topk":
+        return SharedLowRankRoutedExpertTopKSparseCoder
+    if architecture == "shared_lowrank_two_stage_residual_expert":
+        return SharedLowRankTwoStageResidualExpertSparseCoder
+    if architecture == "shared_lowrank_routed_expert_residual":
+        return SharedLowRankRoutedExpertResidualSparseCoder
+    if architecture == "lowrank_expert_topk":
+        return LowRankExpertTopKSparseCoder
+    if architecture == "lowrank_expert_residual":
+
+exec
+/bin/bash -lc "sed -n '1338,1418p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class ExpertJumpReLUSparseCoder(ExpertTopKSparseCoder):
+    """Expert routing with JumpReLU-gated local supports inside selected experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+
+        param_dtype = self.expert_encoder_bias.dtype
+        threshold = torch.full(
+            (self.num_experts, self.latents_per_expert),
+            cfg.jumprelu_init_threshold,
+            device=self.expert_encoder_bias.device,
+            dtype=param_dtype,
+        ).clamp_min(torch.finfo(param_dtype).tiny)
+        init = torch.log(torch.expm1(threshold))
+        self.log_threshold = nn.Parameter(init)
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+    """Expert-local top-k with a low-rank router but full expert heads."""
+
+exec
+/bin/bash -lc "sed -n '1208,1258p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+    return base_num_latents, num_experts, latents_per_expert, active_experts
+
+
+def _select_active_expert_indices(
+    router_logits: Tensor,
+    active_experts: int,
+) -> tuple[Tensor, Tensor]:
+    router_probs = torch.softmax(router_logits, dim=-1)
+    active_probs, active_indices = torch.topk(
+        router_probs, active_experts, dim=-1, sorted=False
+    )
+    norm = active_probs.sum(dim=-1, keepdim=True).clamp_min(
+        torch.finfo(active_probs.dtype).eps
+    )
+    return active_indices, active_probs / norm
+
+
+def _finalize_routed_expert_acts(
+    acts: Tensor,
+    selected_expert_idx: Tensor,
+    total_k: int,
+    latents_per_expert: int,
+    num_latents: int,
+    *,
+    index_offset: int = 0,
+) -> tuple[Tensor, Tensor, Tensor]:
+    flat_acts = acts.reshape(acts.shape[0], -1)
+    top_acts, top_pos = torch.topk(flat_acts, total_k, dim=-1, sorted=False)
+
+    local_offsets = torch.arange(
+        latents_per_expert, device=acts.device
+    ).view(1, 1, latents_per_expert)
+    flat_indices = (
+        selected_expert_idx.unsqueeze(-1) * latents_per_expert + local_offsets
+    ).reshape(acts.shape[0], -1)
+    top_indices = flat_indices.gather(1, top_pos) + index_offset
+
+    full_acts = acts.new_zeros(acts.shape[0], num_latents)
+    full_acts.scatter_(1, flat_indices, flat_acts)
+    return top_acts, top_indices, full_acts
+
+
+class ExpertTopKSparseCoder(SparseCoder):
+    """Route each token to one expert-local dictionary before local top-k."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+
+2026-04-01T02:22:54.751321Z ERROR codex_core::tools::router: error=apply_patch verification failed: Failed to find expected lines in /root/sparsify-ascend/sparsify/sparse_coder.py:
+    if architecture == "expert_topk":
+        return ExpertTopKSparseCoder
+    if architecture == "expert_jumprelu":
+        return ExpertJumpReLUSparseCoder
+    if architecture == "factorized_router_expert_topk":
+        return FactorizedRouterExpertTopKSparseCoder
+codex
+我把修改拆成更小的补丁块，逐段落盘，避免一次性 patch 命中失败。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/config.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..10a7a73867690241e42286058e6bb3f8da4b1f4f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1223,6 +1223,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..10a7a73867690241e42286058e6bb3f8da4b1f4f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1223,6 +1223,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..762ec106a85d0aa4057c530520a80a4664e15aba
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1223,6 +1223,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1444,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..762ec106a85d0aa4057c530520a80a4664e15aba
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1223,6 +1223,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1444,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..d3285702c25700bc4b6893a8a26b2802a2e3e426
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -447,6 +447,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "expert_jumprelu":
+         return ExpertJumpReLUSparseCoder
++    if architecture == "adaptive_active_expert_jumprelu":
++        return AdaptiveActiveExpertJumpReLUSparseCoder
+     if architecture == "factorized_router_expert_topk":
+         return FactorizedRouterExpertTopKSparseCoder
+     if architecture == "shared_routed_expert_topk":
+@@ -1223,6 +1225,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1446,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..d3285702c25700bc4b6893a8a26b2802a2e3e426
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -447,6 +447,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "expert_jumprelu":
+         return ExpertJumpReLUSparseCoder
++    if architecture == "adaptive_active_expert_jumprelu":
++        return AdaptiveActiveExpertJumpReLUSparseCoder
+     if architecture == "factorized_router_expert_topk":
+         return FactorizedRouterExpertTopKSparseCoder
+     if architecture == "shared_routed_expert_topk":
+@@ -1223,6 +1225,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1446,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+codex
+代码已经落盘。现在我在做三件本地自检：新字符串能被 config/dispatch 接受，exact architecture smoke 能过，以及 matched recipe 的 exact cost 是否仍留在当前主战场。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+print(validate_env_overrides([{'key':'ARCHITECTURE','value':'adaptive_active_expert_jumprelu'}], fallback_architecture='expert_jumprelu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+[]
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/timeline.jsonl
+ M sparsify/config.py
+ M sparsify/sparse_coder.py
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+cfg = SparseCoderConfig(
+    architecture='adaptive_active_expert_jumprelu',
+    k=32,
+    expansion_factor=1,
+    num_experts=128,
+    active_experts=2,
+    latents_per_expert=192,
+    factorized_hidden_dim=256,
+)
+sae = SparseCoder(1024, cfg, device='cpu', dtype=torch.float32)
+x = torch.randn(4, 1024)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', cfg.architecture, cfg.k, cfg.expansion_factor, 'cpu')
+print(sae.selection_cost_estimate(n_output=4096))
+PY" in /root/sparsify-ascend
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..d3285702c25700bc4b6893a8a26b2802a2e3e426
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -447,6 +447,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "expert_jumprelu":
+         return ExpertJumpReLUSparseCoder
++    if architecture == "adaptive_active_expert_jumprelu":
++        return AdaptiveActiveExpertJumpReLUSparseCoder
+     if architecture == "factorized_router_expert_topk":
+         return FactorizedRouterExpertTopKSparseCoder
+     if architecture == "shared_routed_expert_topk":
+@@ -1223,6 +1225,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1446,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+ succeeded in 4180ms:
+Using fused decoder on CUDA.
+integration_smoke: OK adaptive_active_expert_jumprelu 32 1 cpu
+{'total_accesses': 524288, 'original_matmul_accesses': 4194304, 'ratio': 0.12, 'budget_ratio': 0.08, 'feasible': True, 'breakdown': [{'name': 'router', 'accesses': 131072, 'shape': '1024x128'}, {'name': 'active_expert_encoder', 'accesses': 393216, 'shape': 'active=2×1024x192'}], 'deployment_accesses': 163840, 'deployment_ratio': 0.04, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 163840, 'shape': 'K=32×(d=1024+n=4096)'}], 'combined_accesses': 688128, 'combined_ratio': 0.16, 'combined_budget_ratio': 0.11, 'combined_feasible': True}
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..d3285702c25700bc4b6893a8a26b2802a2e3e426
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -447,6 +447,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "expert_jumprelu":
+         return ExpertJumpReLUSparseCoder
++    if architecture == "adaptive_active_expert_jumprelu":
++        return AdaptiveActiveExpertJumpReLUSparseCoder
+     if architecture == "factorized_router_expert_topk":
+         return FactorizedRouterExpertTopKSparseCoder
+     if architecture == "shared_routed_expert_topk":
+@@ -1223,6 +1225,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1446,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+codex
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E_var(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 {b_{e,i}} 是各 expert 的静态子库原子，expert 内支持集 Ŝ_e(x) 仍由 JumpReLU 门控形成：positive_{e,i}(x)=ReLU(z_{e,i}(x))，gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β)，α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)；但 active expert 集合 E_var(x) 不再固定为 2，而是由 router 置信度自适应决定：若 top1 在 top2 归一化份额中已足够占优，则只激活 1 个 expert，否则激活 2 个 expert。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择少量静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此新 family `adaptive_active_expert_jumprelu` 判定为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能进入当前兼容 leaderboard。本轮唯一主假设是：当前 `expert_jumprelu` 已在 K=32/K=48 两个 matched-cost 点略优于 `expert_topk`，说明改进点可能不是“更软支持”本身，而是应继续缩短容易 token 的 active path；因此相对 r235 只把 `ARCHITECTURE` 从 `expert_jumprelu` 切到新实现的 `adaptive_active_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试“按难度自适应 1-or-2 experts”是否能在不增加 worst-case cost 的前提下进一步压低 exceed_alpha_0.50。按本地 exact 成本复核，该 matched recipe 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与当前 incumbent `expert_jumprelu@K32` 同成本，因此这轮是干净的 matched architecture probe，不混入新的成本轴。",
+  "summary": "已在 `sparsify/` 落盘最小新 family `adaptive_active_expert_jumprelu`。建议以 r235 为 reference，只改 `ARCHITECTURE=adaptive_active_expert_jumprelu`，做一轮新的 matched-objective architecture probe，直接回答 variable-active-path 是否值得继续。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "adaptive_active_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮选择新结构槽位而不是继续在 `expert_jumprelu` 上补局部插值，符合当前 round-238 的运行优先级：r236 与 r237 都没有把 incumbent 再明显压低，继续在同一 family 上做 K 或阈值细扫的信息增量已经下降。新 family 的改动被严格限制在 `sparsify/`，没有新增 env key，也没有动执行层；它与现有 family 的精确差异不是重命名，而是把固定 `ACTIVE_EXPERTS=2` 的 routed path 改成“高置信 token 只走 1 expert，困难 token 仍走 2 experts”，直接对齐当前高优先级的 `variable-active-experts by difficulty` 方向。主要风险是当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这轮若有收益只能来自 exceed 改善而不是被 proxy 直接记到 cost 下降；但这正好让结构判断更干净。如果连这种最小侵入的 variable-active-path 原型都无法在 same-cost K=32 lane 上改善 objective，就可以更明确地下调 Expert-Choice-like 方向的优先级。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "adaptive_active_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py"
+  ],
+  "notes_to_memory": [
+    "已实际新增并注册 `adaptive_active_expert_jumprelu`，真实改动仅落在 `sparsify/config.py` 与 `sparsify/sparse_coder.py`；没有新增 tunable env key，也没有改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。",
+    "`adaptive_active_expert_jumprelu` 的结构语义是“JumpReLU expert family + confidence-based variable active path”：高置信 token 只保留 top1 expert，低置信 token 仍保留 top2 experts，最终重构仍是静态 expert 子库上的有限加权和，因此属直接兼容。",
+    "本地 exact architecture smoke 已通过：`SparseCoderConfig(architecture='adaptive_active_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192, factorized_hidden_dim=256)` 在 CPU 上可成功 instantiate、forward、backward。",
+    "本地 exact 成本复核：`adaptive_active_expert_jumprelu K=32 EF=1 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与 `expert_jumprelu@K32` 同成本。",
+    "本地 allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: adaptive_active_expert_jumprelu}], fallback_architecture='expert_jumprelu')` 返回空列表。"
+  ],
+  "next_hypotheses": [
+    "如果 `adaptive_active_expert_jumprelu@K32` 刷新当前 incumbent，则下一轮保持 family 不变，只改 `K=48`，确认 variable-active-path 是否在更高 deploy budget 下继续保持比 `expert_jumprelu` 更缓的 exceed 退化。",
+    "如果该点与 `expert_jumprelu@K32` 基本持平或更差，则说明仅靠按置信度缩短 active path 还不足以带来 regime shift；下一轮应切换到别的结构槽位，而不是继续在这条线内部细扫。",
+    "如果该点有轻微正信号但不足以形成新主线，后续可考虑补一个更强版本，例如 shared/coarse 分支配合 adaptive active experts，而不是继续围绕当前 routed-only 配方做温和插值。"
+  ],
+  "reference_round": 235
+}
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 54768b304418a412e718c981a4a73afe30f19d3e..2190c3ac44e1c4daf1afe607152352f4655b8f47
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -226,6 +226,7 @@
+             "routed",
+             "expert_topk",
+             "expert_jumprelu",
++            "adaptive_active_expert_jumprelu",
+             "factorized_router_expert_topk",
+             "shared_routed_expert_topk",
+             "shared_two_stage_residual_expert",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index e161d4435f7d871ee75c3554995f5abdbe3983a2..d3285702c25700bc4b6893a8a26b2802a2e3e426
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -447,6 +447,8 @@
+         return ExpertTopKSparseCoder
+     if architecture == "expert_jumprelu":
+         return ExpertJumpReLUSparseCoder
++    if architecture == "adaptive_active_expert_jumprelu":
++        return AdaptiveActiveExpertJumpReLUSparseCoder
+     if architecture == "factorized_router_expert_topk":
+         return FactorizedRouterExpertTopKSparseCoder
+     if architecture == "shared_routed_expert_topk":
+@@ -1223,6 +1225,36 @@
+     return active_indices, active_probs / norm
+ 
+ 
++def _select_adaptive_active_expert_indices(
++    router_logits: Tensor,
++    active_experts: int,
++    *,
++    easy_share_threshold: float = 0.8,
++) -> tuple[Tensor, Tensor]:
++    """Use one expert for confident tokens, otherwise keep the full routed set."""
++    if active_experts <= 1:
++        return _select_active_expert_indices(router_logits, active_experts)
++
++    router_probs = torch.softmax(router_logits, dim=-1)
++    active_probs, active_indices = torch.topk(
++        router_probs, active_experts, dim=-1, sorted=True
++    )
++    eps = torch.finfo(active_probs.dtype).eps
++    top1 = active_probs[:, :1]
++    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
++    top1_share = top1 / (top1 + tail).clamp_min(eps)
++    use_single = top1_share >= easy_share_threshold
++
++    adaptive_probs = active_probs.clone()
++    adaptive_probs[:, 1:] = torch.where(
++        use_single,
++        torch.zeros_like(adaptive_probs[:, 1:]),
++        adaptive_probs[:, 1:],
++    )
++    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
++    return active_indices, adaptive_probs / norm
++
++
+ def _finalize_routed_expert_acts(
+     acts: Tensor,
+     selected_expert_idx: Tensor,
+@@ -1414,6 +1446,44 @@
+         )
+ 
+ 
++class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
++    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        original_shape = x.shape[:-1]
++        flat_x = x.reshape(-1, self.d_in)
++
++        router_logits = self.router(flat_x)
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            router_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return EncoderOutput(
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+     """Expert-local top-k with a low-rank router but full expert heads."""
+ 
+
+tokens used
+1,031,037

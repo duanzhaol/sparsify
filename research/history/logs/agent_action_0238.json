@@ -1,0 +1,34 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E_var(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 {b_{e,i}} 是各 expert 的静态子库原子，expert 内支持集 Ŝ_e(x) 仍由 JumpReLU 门控形成：positive_{e,i}(x)=ReLU(z_{e,i}(x))，gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β)，α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)；但 active expert 集合 E_var(x) 不再固定为 2，而是由 router 置信度自适应决定：若 top1 在 top2 归一化份额中已足够占优，则只激活 1 个 expert，否则激活 2 个 expert。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择少量静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此新 family `adaptive_active_expert_jumprelu` 判定为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能进入当前兼容 leaderboard。本轮唯一主假设是：当前 `expert_jumprelu` 已在 K=32/K=48 两个 matched-cost 点略优于 `expert_topk`，说明改进点可能不是“更软支持”本身，而是应继续缩短容易 token 的 active path；因此相对 r235 只把 `ARCHITECTURE` 从 `expert_jumprelu` 切到新实现的 `adaptive_active_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试“按难度自适应 1-or-2 experts”是否能在不增加 worst-case cost 的前提下进一步压低 exceed_alpha_0.50。按本地 exact 成本复核，该 matched recipe 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与当前 incumbent `expert_jumprelu@K32` 同成本，因此这轮是干净的 matched architecture probe，不混入新的成本轴。",
+  "summary": "已在 `sparsify/` 落盘最小新 family `adaptive_active_expert_jumprelu`。建议以 r235 为 reference，只改 `ARCHITECTURE=adaptive_active_expert_jumprelu`，做一轮新的 matched-objective architecture probe，直接回答 variable-active-path 是否值得继续。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "adaptive_active_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮选择新结构槽位而不是继续在 `expert_jumprelu` 上补局部插值，符合当前 round-238 的运行优先级：r236 与 r237 都没有把 incumbent 再明显压低，继续在同一 family 上做 K 或阈值细扫的信息增量已经下降。新 family 的改动被严格限制在 `sparsify/`，没有新增 env key，也没有动执行层；它与现有 family 的精确差异不是重命名，而是把固定 `ACTIVE_EXPERTS=2` 的 routed path 改成“高置信 token 只走 1 expert，困难 token 仍走 2 experts”，直接对齐当前高优先级的 `variable-active-experts by difficulty` 方向。主要风险是当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这轮若有收益只能来自 exceed 改善而不是被 proxy 直接记到 cost 下降；但这正好让结构判断更干净。如果连这种最小侵入的 variable-active-path 原型都无法在 same-cost K=32 lane 上改善 objective，就可以更明确地下调 Expert-Choice-like 方向的优先级。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "adaptive_active_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py"
+  ],
+  "notes_to_memory": [
+    "已实际新增并注册 `adaptive_active_expert_jumprelu`，真实改动仅落在 `sparsify/config.py` 与 `sparsify/sparse_coder.py`；没有新增 tunable env key，也没有改 `research/AutoResearch/` 或 `scripts/autoresearch_test.sh`。",
+    "`adaptive_active_expert_jumprelu` 的结构语义是“JumpReLU expert family + confidence-based variable active path”：高置信 token 只保留 top1 expert，低置信 token 仍保留 top2 experts，最终重构仍是静态 expert 子库上的有限加权和，因此属直接兼容。",
+    "本地 exact architecture smoke 已通过：`SparseCoderConfig(architecture='adaptive_active_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192, factorized_hidden_dim=256)` 在 CPU 上可成功 instantiate、forward、backward。",
+    "本地 exact 成本复核：`adaptive_active_expert_jumprelu K=32 EF=1 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与 `expert_jumprelu@K32` 同成本。",
+    "本地 allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: adaptive_active_expert_jumprelu}], fallback_architecture='expert_jumprelu')` 返回空列表。"
+  ],
+  "next_hypotheses": [
+    "如果 `adaptive_active_expert_jumprelu@K32` 刷新当前 incumbent，则下一轮保持 family 不变，只改 `K=48`，确认 variable-active-path 是否在更高 deploy budget 下继续保持比 `expert_jumprelu` 更缓的 exceed 退化。",
+    "如果该点与 `expert_jumprelu@K32` 基本持平或更差，则说明仅靠按置信度缩短 active path 还不足以带来 regime shift；下一轮应切换到别的结构槽位，而不是继续在这条线内部细扫。",
+    "如果该点有轻微正信号但不足以形成新主线，后续可考虑补一个更强版本，例如 shared/coarse 分支配合 adaptive active experts，而不是继续围绕当前 routed-only 配方做温和插值。"
+  ],
+  "reference_round": 235
+}

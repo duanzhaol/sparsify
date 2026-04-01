@@ -226,6 +226,7 @@ class TrainConfig(Serializable):
             "routed",
             "expert_topk",
             "expert_jumprelu",
+            "adaptive_active_expert_jumprelu",
             "factorized_router_expert_topk",
             "shared_routed_expert_topk",
             "shared_two_stage_residual_expert",
