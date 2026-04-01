@@ -449,6 +449,8 @@ def _get_sae_class(architecture: str) -> type:
         return ExpertJumpReLUSparseCoder
     if architecture == "product_key_expert_jumprelu":
         return ProductKeyExpertJumpReLUSparseCoder
+    if architecture == "product_key_factorized_expert_topk":
+        return ProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
         return SharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_factorized_expert_topk":
@@ -2820,6 +2822,145 @@ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
 
         full_acts = flat_acts.new_zeros(batch, self.num_latents)
         full_acts.scatter_(1, flat_indices, flat_acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class ProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+    """PK-routed expert-local top-k head after a shared low-rank projection."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "product_key_factorized_expert_topk requires "
+                "k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+        pair_ids = torch.arange(self.num_experts, device=device)
+        self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+        self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+        self.left_router = nn.Linear(
+            hidden_dim, self.left_keys, device=device, dtype=dtype
+        )
+        self.right_router = nn.Linear(
+            hidden_dim, self.right_keys, device=device, dtype=dtype
+        )
+        self.expert_heads = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.left_router.bias.data.zero_()
+        self.right_router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.left_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.right_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.expert_heads, a=5**0.5)
+
+        if decoder:
+            effective_encoder = torch.einsum(
+                "elh,hd->eld", self.expert_heads.data, self.factor_encoder.weight.data
+            ).reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(effective_encoder.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [
+            ("factor_encoder", self.factor_encoder),
+            ("left_router", self.left_router),
+            ("right_router", self.right_router),
+        ]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_head",
+                self.active_experts
+                * self.factor_encoder.out_features
+                * self.latents_per_expert,
+                f"active={self.active_experts}×{self.factor_encoder.out_features}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        left_logits = self.left_router(hidden)
+        right_logits = self.right_router(hidden)
+        router_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_heads[selected_expert_idx]
+        selected_bias = self.expert_head_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
 
         target_shape = (*original_shape, self.cfg.k)
         acts_shape = (*original_shape, self.num_latents)
