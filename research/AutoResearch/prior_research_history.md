@@ -63,6 +63,7 @@
 | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
 | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
 | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+| `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
 | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
 | `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
 | `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |

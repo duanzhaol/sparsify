@@ -459,6 +459,8 @@ def _get_sae_class(architecture: str) -> type:
         return DualSharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+        return DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_factorized_expert_topk":
         return SharedProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "adaptive_active_expert_jumprelu":
@@ -2736,6 +2738,15 @@ class DualSharedProductKeyExpertJumpReLUSparseCoder(
     """Two always-on shared micro-experts plus PK-routed JumpReLU cleanup."""
 
     architecture_name = "dual_shared_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+
+class DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+):
+    """Dual shared coarse banks with adaptive 1-or-2 PK-routed expert cleanup."""
+
+    architecture_name = "dual_shared_adaptive_active_product_key_expert_jumprelu"
     shared_expert_count = 2
 
 

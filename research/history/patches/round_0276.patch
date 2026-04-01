@@ -1,0 +1,60 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -58,6 +58,7 @@
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "hashed_expert_jumprelu": _EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_routed_expert_topk": _EXPERT_KEYS,
+
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
+ | `whitened_topk` | `x_hat = Σ_i α_i b_i` | candidate | 预处理路径需要在当前 target 单独验证 | 直接兼容 |
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -232,6 +232,7 @@
+             "shared_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
++            "dual_shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+             "adaptive_active_expert_jumprelu",
+             "hashed_expert_jumprelu",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -459,6 +459,8 @@
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
++        return DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_factorized_expert_topk":
+         return SharedProductKeyFactorizedExpertTopKSparseCoder
+     if architecture == "adaptive_active_expert_jumprelu":
+@@ -2739,6 +2741,15 @@
+     shared_expert_count = 2
+ 
+ 
++class DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
++    SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
++):
++    """Dual shared coarse banks with adaptive 1-or-2 PK-routed expert cleanup."""
++
++    architecture_name = "dual_shared_adaptive_active_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
