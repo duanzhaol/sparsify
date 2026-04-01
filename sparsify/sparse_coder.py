@@ -445,6 +445,10 @@ def _get_sae_class(architecture: str) -> type:
         return RoutedSparseCoder
     if architecture == "expert_topk":
         return ExpertTopKSparseCoder
+    if architecture == "expert_jumprelu":
+        return ExpertJumpReLUSparseCoder
+    if architecture == "factorized_router_expert_topk":
+        return FactorizedRouterExpertTopKSparseCoder
     if architecture == "shared_routed_expert_topk":
         return SharedRoutedExpertTopKSparseCoder
     if architecture == "shared_two_stage_residual_expert":
@@ -1323,6 +1327,179 @@ class ExpertTopKSparseCoder(SparseCoder):
         flat_x = x.reshape(-1, self.d_in)
 
         router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class ExpertJumpReLUSparseCoder(ExpertTopKSparseCoder):
+    """Expert routing with JumpReLU-gated local supports inside selected experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+
+        param_dtype = self.expert_encoder_bias.dtype
+        threshold = torch.full(
+            (self.num_experts, self.latents_per_expert),
+            cfg.jumprelu_init_threshold,
+            device=self.expert_encoder_bias.device,
+            dtype=param_dtype,
+        ).clamp_min(torch.finfo(param_dtype).tiny)
+        init = torch.log(torch.expm1(threshold))
+        self.log_threshold = nn.Parameter(init)
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class FactorizedRouterExpertTopKSparseCoder(ExpertTopKSparseCoder):
+    """Expert-local top-k with a low-rank router but full expert heads."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "factorized_router_expert_topk requires "
+                "k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        max_router_hidden = max(32, self.num_experts // 2)
+        requested_hidden = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else max_router_hidden
+        )
+        self.router_hidden_dim = min(d_in, max(1, min(requested_hidden, max_router_hidden)))
+        self.router_down = nn.Linear(
+            d_in, self.router_hidden_dim, device=device, dtype=dtype
+        )
+        self.router = nn.Linear(
+            self.router_hidden_dim, self.num_experts, device=device, dtype=dtype
+        )
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        nn.init.kaiming_uniform_(self.router_down.weight, a=5**0.5)
+        self.router_down.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.router.weight, a=5**0.5)
+        self.router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [("router_down", self.router_down), ("router", self.router)]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_hidden = F.relu(self.router_down(flat_x))
+        router_logits = self.router(router_hidden)
         selected_expert_idx, selected_probs = _select_active_expert_indices(
             router_logits, self.active_experts
         )

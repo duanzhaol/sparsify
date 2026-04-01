@@ -60,6 +60,7 @@
 | `gated` | `x_hat = Σ_i α_i b_i` | candidate | 门控仍导出到同一静态库和 | 直接兼容 |
 | `routed` | `x_hat = Σ_i α_i b_i` | candidate | route 只改 support ranking | 直接兼容 |
 | `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+| `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
 | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
 | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
 | `bucketed_topk` | `x_hat = Σ_i α_i b_i` | candidate | bucket 决策不改变导出形式 | 直接兼容 |
