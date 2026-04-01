@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中各 expert 子库 {b_{e,i}} 都是静态向量库，E_pk(x) 由两路 learned product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部继续用 JumpReLU 形成局部 support S_e^τ(x)。导出到 LUTurbo/Lottable 时，推理链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，不依赖动态生成字典，因此该 family 的兼容性判断为直接兼容。当前 objective leaderboard 只应由兼容 family 驱动；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍只作历史参考，不参与主线决策。相对 r245，本轮只把 `NUM_EXPERTS` 从 `256` 提到 `512`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余 recipe 不变，直接测试 PKM-style compositional routing 是否能在几乎不增加总成本的前提下继续扩大静态 expert bank，并把 `exceed_alpha_0.50` 从 r245 的 `0.182771` 压到约 `0.179353` 以下，从而刷新当前 best objective。该点的本地精确总成本为 `0.14404296875x`，只比 r245 高 `0.00341796875x`，仍远低于 `1.5×h×n` 硬约束。",
+  "summary": "建议以 r245 为 reference，只改 `NUM_EXPERTS=512`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量容量延展 probe，用来判断更大的静态 expert bank 能否在近乎常数成本下继续压低 exceed 并进一步降低 objective。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "继续留在同一 family 这次是有明确依据的：r245 不是小数点级微调，而是一次显著正信号，且其训练曲线仍在改善，说明 PKM-style 路由的核心容量命题尚未被验证完。相对 r245 只改 `NUM_EXPERTS`，归因最干净，也比重新打开 `K` 轴更符合已有证据。主要风险是容量收益开始递减，导致 exceed 改善不足以覆盖新增的 `0.003418x` 成本；如果结果如此，就应停止继续上探 bank 大小，而不是在这条轴上继续消耗轮次。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "512"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "`product_key_expert_jumprelu` 的最终导出仍是静态 expert 子库上的有限加权和，兼容性为直接兼容；不兼容 family 不应驱动当前 objective leaderboard。",
+    "r245 是当前该 family 的最佳兼容点：objective=0.323396，cost=0.140625x，exceed=0.182771，fvu=0.161492，且训练曲线仍在改善。",
+    "本地成本复核：`product_key_expert_jumprelu K=32 NUM_EXPERTS=512 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 exact total_cost_ratio=0.14404296875；要刷新 r245，需 exceed<=0.17935303125。",
+    "override allowlist 自检已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'512'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。"
+  ],
+  "next_hypotheses": [
+    "如果 `NUM_EXPERTS=512` 继续刷新 objective，下一轮保持 family 不变，只改 `LATENTS_PER_EXPERT=160`，测试更细的 micro-expert 宽度能否在更大总 bank 上继续改善 cost/exceed tradeoff。",
+    "如果 `NUM_EXPERTS=512` 只带来很小 exceed 改善且 objective 不再下降，则把 PK family 的 bank-capacity 轴视为接近饱和，停止继续上探 `NUM_EXPERTS`，转去新的结构槽位或 width 轴。",
+    "如果 `NUM_EXPERTS=512` 明显降低 exceed 且曲线仍未收敛，再评估同 family 的后续容量/训练时长跟进，但不要重新打开 `K=48`，除非 exceed 改善已明显覆盖 deploy 成本。"
+  ],
+  "reference_round": 245
+}
