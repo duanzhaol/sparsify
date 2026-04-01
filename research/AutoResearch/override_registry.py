@@ -61,6 +61,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
     "lowrank_residual": _LOWRANK_KEYS,
     "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+    "lowrank_expert_jumprelu": _LOWRANK_EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
     "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
     "two_stage_residual_expert": {
         "STAGE1_RATIO",
