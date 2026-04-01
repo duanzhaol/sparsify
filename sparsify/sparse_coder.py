@@ -455,6 +455,8 @@ def _get_sae_class(architecture: str) -> type:
         return ProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
         return SharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+        return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_factorized_expert_topk":
         return SharedProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "adaptive_active_expert_jumprelu":
@@ -2671,6 +2673,53 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             combined_indices,
             fvu,
             auxk_loss,
+        )
+
+
+class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Shared coarse branch plus adaptive 1-or-2 PK-routed expert cleanup."""
+
+    def _encode_expert_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+            expert_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage2_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+        )
+
+        target_shape = (*original_shape, self.stage2_k)
+        acts_shape = (*original_shape, self.expert_num_latents)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
         )
 
 

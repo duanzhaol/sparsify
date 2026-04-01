@@ -1,0 +1,87 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -56,6 +56,7 @@
+     "adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "hashed_expert_jumprelu": _EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_routed_expert_topk": _EXPERT_KEYS,
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -230,6 +230,7 @@
+             "adaptive_active_product_key_expert_jumprelu",
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
++            "shared_adaptive_active_product_key_expert_jumprelu",
+             "shared_product_key_factorized_expert_topk",
+             "adaptive_active_expert_jumprelu",
+             "hashed_expert_jumprelu",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -455,6 +455,8 @@
+         return ProductKeyFactorizedExpertTopKSparseCoder
+     if architecture == "shared_product_key_expert_jumprelu":
+         return SharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
++        return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_factorized_expert_topk":
+         return SharedProductKeyFactorizedExpertTopKSparseCoder
+     if architecture == "adaptive_active_expert_jumprelu":
+@@ -2674,6 +2676,53 @@
+         )
+ 
+ 
++class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
++    SharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Shared coarse branch plus adaptive 1-or-2 PK-routed expert cleanup."""
++
++    def _encode_expert_stage(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.stage2_k,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, self.stage2_k)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++
+ class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+     """Always-on shared factorized branch plus PK-routed factorized experts."""
+ 
