@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 E(x) 是轻量 router 选出的少量 active experts，{b_{e,i}} 是各 expert 的静态子库原子，expert 内支持集 Ŝ_e(x) 由 JumpReLU 门控的局部激活形成：positive_{e,i}(x)=ReLU(z_{e,i}(x))，gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β)，最终 α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此 `expert_jumprelu` 仍属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能驱动当前兼容 leaderboard。本轮唯一主假设是：r235 在与 r212 完全同成本下仅小幅刷新 objective，说明 JumpReLU 支持规则可能真的在 small-K 区间略微减缓 exceed 退化，但还没有证明它会改变 deployment knee；因此相对 r235 只把 `K` 从 32 提到 48，保持 `ARCHITECTURE=expert_jumprelu`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试这种支持规则替换在更高 lookup budget 下是否仍能优于 matched `expert_topk@K48`，从而回答它究竟是偶然的 K=32 微弱收益，还是一条值得继续推进的 new knee。按本地 exact 成本复核，`expert_jumprelu@K48` 的 selection_accesses=524288、deployment_accesses=245760、combined_accesses=770048、exact total_cost_ratio=0.18359375，与历史 `expert_topk@K48` 同成本，因此这轮仍是干净的 matched-cost knee probe，而不是混入新的 cost 归因。",
+  "summary": "建议以 r235 为 reference，只改 `K=48`，做一轮 `expert_jumprelu` 的 deployment-knee probe。目标是回答 JumpReLU 的 small-K 优势是否在 K=48 仍成立；如果它连 matched `expert_topk@K48` 都无法接近，这条支持规则替换线就不值得继续细扫。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "这轮满足单变量原则：相对 r235 只改 `K`，没有代码改动，也没有新增 tunable key。之所以允许在同一 family 上再做一轮，不是因为 r235 的 0.001 级改善已经足够，而是因为它刚好打开了一个高价值未验证问题：JumpReLU 是否真的改变了 routed family 的 deployment knee，而不是只在 K=32 上偶然略赢。相比直接去调 `JUMPRELU_INIT_THRESHOLD` 这类局部旋钮，`K=48` 更能回答当前主目标相关的结构问题，即“在相同 selection cost 下，增加 deploy lookup 后，支持规则替换是否还能继续回收 exceed”。其风险也很清楚：`expert_jumprelu@K48` 若想至少打平历史 `expert_topk@K48`，需要 exceed 大致降到 0.178 附近；若仍接近或高于 0.18，则说明这条线并没有形成比 `expert_topk` 更好的 knee，只是同成本 K=32 的轻微波动，后续应停止继续消耗预算。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "K",
+      "value": "48"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r235 已确认 `expert_jumprelu@K32` 在当前 target 上是一个真实但很小的正信号：objective=0.358553、exact total_cost_ratio=0.164062、exceed_alpha_0.50=0.194491，相对 matched `expert_topk@K32` 只带来约 0.001 的 objective 改善。",
+    "r235 的关键结论不是已经找到通往 0.30 的主线，而是支持规则替换在同成本下至少没有变差；当前更重要的是确认它是否会改变 deployment knee，而不是立即做 threshold 微调。",
+    "本地 exact 成本复核：`expert_jumprelu K=48 EF=1 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection_accesses=524288、deployment_accesses=245760、combined_accesses=770048、exact total_cost_ratio=0.18359375，与历史 `expert_topk@K48` 同成本。",
+    "本地 override allowlist 已校验：`validate_env_overrides([{key: K, value: 48}], fallback_architecture='expert_jumprelu')` 返回空列表，不存在训练启动前的 Disallowed env override keys 风险。"
+  ],
+  "next_hypotheses": [
+    "如果 `expert_jumprelu@K48` 明显优于历史 `expert_topk@K48`，则下一轮可继续留在该 family，只改 `K=64`，确认它是否在更高 deploy budget 下继续保持更缓的 exceed 退化。",
+    "如果 `expert_jumprelu@K48` 与 `expert_topk@K48` 基本持平或更差，则说明 r235 更像 K=32 的局部微弱收益，而不是新的 knee；下一轮应切换到新的结构槽位，而不是继续在 JumpReLU family 上补阈值插值点。",
+    "如果 `expert_jumprelu@K48` 仍有轻微优势但不足以形成新的主线，下一轮可只改 `JUMPRELU_INIT_THRESHOLD`，测试更强初始阈值是否能进一步压 small-K tail error。"
+  ],
+  "reference_round": 235
+}
