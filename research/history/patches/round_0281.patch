@@ -1,0 +1,220 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -56,6 +56,7 @@
+     "adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_stacked_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -62,6 +62,8 @@
+ | `expert_topk` | `x_hat = Σ_e Σ_{i∈S_e(x)} α_{e,i} b_{e,i}` | candidate | 轻量 router 只选择静态子库；激活路径仍是子库上的有限加权和 | 直接兼容 |
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
++| `shared_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_sh(x)} α_i^sh b_i^sh + Σ_{e∈E_pk(r_1(x))} Σ_{j∈S_e^τ(r_1(x))} α_{e,j} b_{e,j}` | candidate | always-on shared 静态子库先吸收 coarse 主干，product-key router 再在 residual 上选择静态 expert 子库做 JumpReLU cleanup；最终仍是静态库有限加权和 | 直接兼容 |
++| `shared_stacked_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_sh(x)} α_i^sh b_i^sh + Σ_{e∈E_pk(r_1(x))} Σ_{j∈S_e^τ(r_1(x))} β_{e,j} b_{e,j} + Σ_{e∈E_pk(r_1(x))} Σ_{m∈S_e^τ(r_2(x))} γ_{e,m} b_{e,m}` | candidate | shared coarse 子库后接两次 residual PK expert cleanup；第二次 cleanup 复用同一批静态 expert 子库，只增加 expert-local 残差求系数，不引入动态字典，最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -230,6 +230,7 @@
+             "adaptive_active_product_key_expert_jumprelu",
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
++            "shared_stacked_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -455,6 +455,8 @@
+         return ProductKeyFactorizedExpertTopKSparseCoder
+     if architecture == "shared_product_key_expert_jumprelu":
+         return SharedProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_stacked_product_key_expert_jumprelu":
++        return SharedStackedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
+@@ -2738,6 +2740,174 @@
+         )
+ 
+ 
++class SharedStackedProductKeyExpertJumpReLUSparseCoder(
++    SharedProductKeyExpertJumpReLUSparseCoder
++):
++    """Shared coarse branch plus two residual PK cleanup passes on one expert set."""
++
++    architecture_name = "shared_stacked_product_key_expert_jumprelu"
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
++        if self.stage2_k < 2:
++            raise ValueError(
++                f"{self.architecture_name} requires "
++                "at least two routed cleanup latents so the residual pass is non-empty; "
++                f"got stage2_k={self.stage2_k}"
++            )
++        self.stage2a_k = max(1, self.stage2_k // 2)
++        self.stage2b_k = self.stage2_k - self.stage2a_k
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        base = super()._extra_encode_accesses()
++        base.append(
++            (
++                "stacked_active_expert_encoder",
++                self.active_experts * self.d_in * self.latents_per_expert,
++                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
++            )
++        )
++        return base
++
++    def _select_expert_set(self, residual: Tensor) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_active_expert_indices(expert_logits, self.active_experts)
++
++    def _encode_fixed_expert_stage(
++        self,
++        residual: Tensor,
++        selected_expert_idx: Tensor,
++        selected_probs: Tensor,
++        *,
++        topk: int,
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            topk,
++            self.latents_per_expert,
++            self.expert_num_latents,
++            index_offset=self.shared_num_latents,
++        )
++
++        target_shape = (*original_shape, topk)
++        acts_shape = (*original_shape, self.expert_num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def _encode_stacked(
++        self, x_centered: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
++            x_centered
++        )
++        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
++
++        residual = x_centered - stage1_out
++        # Reuse one PK-routed expert set across both residual passes so the router
++        # cost stays flat while the hard-token cleanup gets a second chance.
++        selected_expert_idx, selected_probs = self._select_expert_set(residual)
++        stage2a_acts, stage2a_indices, stage2a_full = self._encode_fixed_expert_stage(
++            residual,
++            selected_expert_idx,
++            selected_probs,
++            topk=self.stage2a_k,
++        )
++        stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
++
++        residual_2 = residual - stage2a_out
++        stage2b_acts, stage2b_indices, stage2b_full = self._encode_fixed_expert_stage(
++            residual_2,
++            selected_expert_idx,
++            selected_probs,
++            topk=self.stage2b_k,
++        )
++
++        combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
++        combined_indices = torch.cat(
++            (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
++        )
++        combined_full = torch.cat((stage1_full, stage2a_full + stage2b_full), dim=-1)
++        return combined_acts, combined_indices, combined_full
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x_centered = x - self.b_dec
++        combined_acts, combined_indices, combined_full = self._encode_stacked(
++            x_centered
++        )
++        return EncoderOutput(combined_acts, combined_indices, combined_full)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        combined_acts, combined_indices, combined_full = self._encode_stacked(
++            x_centered
++        )
++
++        sparse_out = self._decode_sparse(combined_acts, combined_indices)
++        sae_out = sparse_out + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            combined_acts,
++            combined_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
