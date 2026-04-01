@@ -228,6 +228,7 @@ class TrainConfig(Serializable):
             "expert_jumprelu",
             "product_key_expert_jumprelu",
             "shared_product_key_expert_jumprelu",
+            "shared_product_key_factorized_expert_topk",
             "adaptive_active_expert_jumprelu",
             "hashed_expert_jumprelu",
             "factorized_router_expert_topk",

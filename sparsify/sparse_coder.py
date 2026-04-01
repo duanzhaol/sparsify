@@ -451,6 +451,8 @@ def _get_sae_class(architecture: str) -> type:
         return ProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
         return SharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_product_key_factorized_expert_topk":
+        return SharedProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "adaptive_active_expert_jumprelu":
         return AdaptiveActiveExpertJumpReLUSparseCoder
     if architecture == "hashed_expert_jumprelu":
@@ -2620,6 +2622,211 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             combined_indices,
             fvu,
             auxk_loss,
+        )
+
+
+class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
+    """Always-on shared factorized branch plus PK-routed factorized experts."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_routed_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_shared_experts = 1
+        self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+        self.routed_num_latents = (
+            self.num_routed_experts * self.latents_per_expert
+        )
+        self.num_latents = self.shared_num_latents + self.routed_num_latents
+        max_active_latents = (
+            self.num_shared_experts + self.active_experts
+        ) * self.latents_per_expert
+        if cfg.k > max_active_latents:
+            raise ValueError(
+                "shared_product_key_factorized_expert_topk requires "
+                "k <= (shared_experts + active_experts) * latents_per_expert, "
+                f"got k={cfg.k}, shared_experts={self.num_shared_experts}, "
+                f"active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        hidden_dim = (
+            cfg.factorized_hidden_dim
+            if cfg.factorized_hidden_dim is not None
+            else min(self.latents_per_expert, max(d_in // 2, cfg.k * 4))
+        )
+        self.factor_encoder = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.left_keys, self.right_keys = _product_key_pair_grid(self.num_routed_experts)
+        pair_ids = torch.arange(self.num_routed_experts, device=device)
+        self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+        self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+        self.left_router = nn.Linear(
+            hidden_dim, self.left_keys, device=device, dtype=dtype
+        )
+        self.right_router = nn.Linear(
+            hidden_dim, self.right_keys, device=device, dtype=dtype
+        )
+        self.shared_heads = nn.Parameter(
+            torch.empty(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.shared_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_shared_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_heads = nn.Parameter(
+            torch.empty(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.routed_head_bias = nn.Parameter(
+            torch.zeros(
+                self.num_routed_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.factor_encoder.bias.data.zero_()
+        self.left_router.bias.data.zero_()
+        self.right_router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.factor_encoder.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.left_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.right_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.shared_heads, a=5**0.5)
+        nn.init.kaiming_uniform_(self.routed_heads, a=5**0.5)
+
+        if decoder:
+            shared_decoder = torch.einsum(
+                "slh,hd->sld",
+                self.shared_heads.data,
+                self.factor_encoder.weight.data,
+            ).reshape(self.shared_num_latents, d_in)
+            routed_decoder = torch.einsum(
+                "elh,hd->eld",
+                self.routed_heads.data,
+                self.factor_encoder.weight.data,
+            ).reshape(self.routed_num_latents, d_in)
+            decoder_init = torch.cat((shared_decoder, routed_decoder), dim=0)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    def _encoder_linear_layers(self):
+        return [
+            ("factor_encoder", self.factor_encoder),
+            ("left_router", self.left_router),
+            ("right_router", self.right_router),
+        ]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        hidden_dim = self.factor_encoder.out_features
+        return [
+            (
+                "shared_factorized_head",
+                self.num_shared_experts * hidden_dim * self.latents_per_expert,
+                f"shared={self.num_shared_experts}×{hidden_dim}x{self.latents_per_expert}",
+            ),
+            (
+                "active_routed_factorized_head",
+                self.active_experts * hidden_dim * self.latents_per_expert,
+                f"active={self.active_experts}×{hidden_dim}x{self.latents_per_expert}",
+            ),
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+        batch = flat_x.shape[0]
+
+        hidden = F.relu(self.factor_encoder(flat_x))
+        shared_pre_acts = (
+            torch.einsum("bh,slh->bsl", hidden, self.shared_heads)
+            + self.shared_head_bias.unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+
+        left_logits = self.left_router(hidden)
+        right_logits = self.right_router(hidden)
+        router_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.routed_heads[selected_expert_idx]
+        selected_bias = self.routed_head_bias[selected_expert_idx]
+        routed_pre_acts = (
+            torch.einsum("bh,balh->bal", hidden, selected_weight) + selected_bias
+        )
+        routed_acts = F.relu(routed_pre_acts) * selected_probs.unsqueeze(-1)
+
+        flat_shared_acts = shared_acts.reshape(batch, -1)
+        flat_routed_acts = routed_acts.reshape(batch, -1)
+        flat_acts = torch.cat((flat_shared_acts, flat_routed_acts), dim=-1)
+
+        shared_offsets = torch.arange(
+            self.shared_num_latents, device=flat_x.device
+        ).view(1, -1)
+        local_offsets = torch.arange(
+            self.latents_per_expert, device=flat_x.device
+        ).view(1, 1, self.latents_per_expert)
+        routed_offsets = (
+            self.shared_num_latents
+            + selected_expert_idx.unsqueeze(-1) * self.latents_per_expert
+            + local_offsets
+        ).reshape(batch, -1)
+        flat_indices = torch.cat(
+            (shared_offsets.expand(batch, -1), routed_offsets), dim=-1
+        )
+
+        top_acts, top_pos = torch.topk(flat_acts, self.cfg.k, dim=-1, sorted=False)
+        top_indices = flat_indices.gather(1, top_pos)
+
+        full_acts = flat_acts.new_zeros(batch, self.num_latents)
+        full_acts.scatter_(1, flat_indices, flat_acts)
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
         )
 
 
