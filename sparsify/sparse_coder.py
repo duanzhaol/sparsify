@@ -457,6 +457,8 @@ def _get_sae_class(architecture: str) -> type:
         return SharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_lowrank_product_key_expert_jumprelu":
         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
+        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
     if architecture == "dual_shared_product_key_expert_jumprelu":
         return DualSharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
@@ -2737,6 +2739,9 @@ class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
 class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
 
+    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
+    shared_expert_count = 1
+
     def __init__(
         self,
         d_in: int,
@@ -2755,7 +2760,7 @@ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             self.latents_per_expert,
             self.active_experts,
         ) = _resolve_expert_layout(cfg, d_in)
-        self.num_shared_experts = 1
+        self.num_shared_experts = self.shared_expert_count
         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.num_latents = self.shared_num_latents + self.expert_num_latents
@@ -2768,7 +2773,7 @@ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
 
         if self.stage1_k > self.shared_num_latents:
             raise ValueError(
-                "shared_lowrank_product_key_expert_jumprelu requires "
+                f"{self.architecture_name} requires "
                 "stage1_k <= shared_experts * latents_per_expert, "
                 f"got stage1_k={self.stage1_k}, "
                 f"shared_experts={self.num_shared_experts}, "
@@ -2776,7 +2781,7 @@ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             )
         if self.stage2_k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "shared_lowrank_product_key_expert_jumprelu requires "
+                f"{self.architecture_name} requires "
                 "stage2_k <= active_experts * latents_per_expert, "
                 f"got stage2_k={self.stage2_k}, "
                 f"active_experts={self.active_experts}, "
@@ -3033,6 +3038,15 @@ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             fvu,
             auxk_loss,
         )
+
+
+class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
+    SharedLowRankProductKeyExpertJumpReLUSparseCoder
+):
+    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
+
+    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
+    shared_expert_count = 2
 
 
 class DualSharedProductKeyExpertJumpReLUSparseCoder(

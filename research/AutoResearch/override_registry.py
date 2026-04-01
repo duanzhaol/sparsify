@@ -57,6 +57,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},

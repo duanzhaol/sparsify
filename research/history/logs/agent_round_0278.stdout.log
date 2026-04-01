@@ -1,0 +1,2071 @@
+{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"dual_shared_lowrank_product_key_expert_jumprelu"}],"expected_win":"lower_objective","family_name":"dual_shared_lowrank_product_key_expert_jumprelu","family_stage":"prototype","hypothesis":"最终重构公式设为 x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^{sh}(h(x)) b_{s,i}^{sh} + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j}(r_sh(x)) b_{e,j}，其中 h(x)=ReLU(Bx) 是低秩 shared bottleneck，{b_{s,i}^{sh}} 是两个静态 shared coarse 子库，r_sh(x)=x-Σ_sΣ_i α_{s,i}^{sh}b_{s,i}^{sh}，{B_e} 是静态 PK-routed expert 子库，E_pk(·) 由 low-rank hidden 上的 left/right product-key 路由选出少量 experts，JumpReLU 只改变 expert 内局部 support。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared coarse 子库查表 + PK expert 选择 + expert 子库查表 + 有限加权和 + 选择性补偿”流水线，不依赖动态字典，因此该 family 判定为直接兼容。本轮唯一主假设是：相对 r263 仅把 `ARCHITECTURE` 从 `product_key_expert_jumprelu` 切到新 family `dual_shared_lowrank_product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=1024`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=56`、`STAGE1_RATIO=0.25`、`FACTORIZED_HIDDEN_DIM=256`、`OPTIMIZER=adam`、`LR=8e-4` 与其余 recipe 不变，用极轻的 dual low-rank shared coarse branch 替代 plain PK 的无主干设置，同时保留 full-expert PK cleanup，能够在 exact `total_cost_ratio=0.082427978515625` 的近同成本档位比 r277 的 single-shared lowrank 变体显著更稳住 exceed，并争取在保持低成本的同时压低 exceed_alpha_0.50 到 `0.19357784271240236` 以下以击败 r263。","needs_sanity":true,"next_hypotheses":["如果该 family 在约 `0.08243x` 下明显优于 r263，并接近或击败 r266，则下一轮应留在该 family，只改 `STAGE1_RATIO=0.125`，测试更轻 shared split 是否能进一步提升 low-cost objective。","如果该 family 只比 r277 好、但仍明显输给 plain PK 或 incumbent，则记录为“dual low-rank shared coarse 修复了 single-shared lowrank 的容量不足，但 lowrank shared family 仍不够强”，后续不要继续在这条线做低信息细扫。","如果该 family 仍明显失败，则可更果断地下调“lowrank shared coarse + PK cleanup”整条方向优先级，把预算转向其他真正改变 cleanup 语义的新结构槽位。"],"notes_to_memory":["已实际落盘新 family `dual_shared_lowrank_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`、`research/AutoResearch/prior_research_history.md`。","该 family 与 `shared_lowrank_product_key_expert_jumprelu` 的精确差异是：low-rank shared coarse 子库从 1 个扩到 2 个；与 `dual_shared_product_key_expert_jumprelu` 的精确差异是：shared coarse 分支改为 low-rank bottleneck 上的 factorized heads，而 routed cleanup 仍保留 full-expert PK JumpReLU encoders。","exact-string smoke 已通过：`SparseCoderConfig(architecture='dual_shared_lowrank_product_key_expert_jumprelu', k=32, expansion_factor=1, stage1_ratio=0.25, factorized_hidden_dim=256, num_experts=1024, active_experts=2, latents_per_expert=56)` 可成功 instantiate、forward、backward。","本地 allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'dual_shared_lowrank_product_key_expert_jumprelu'}], fallback_architecture='shared_lowrank_product_key_expert_jumprelu')` 返回 `[]`。","实现中继续将实际 shared hidden 维度限制为 `min(FACTORIZED_HIDDEN_DIM, LATENTS_PER_EXPERT)`；在当前 recipe 下实际 hidden_dim=56，因此新增第二个 shared lowrank head 的成本很低。","本地 exact 成本复核：selection_accesses=181888 (`0.043365478515625x`)、deployment_accesses=163840 (`0.0390625x`)、combined_accesses=345728 (`0.082427978515625x`)；这比 r277 的 single-shared lowrank 变体仅高 `0.0007476806640625x`，但 shared coarse 容量翻倍。","兼容性注册表已补充该 family，当前解析结果为 `direct_compatible`；更新后本地计数为直接兼容 16 个、扩展兼容 25 个、不兼容 3 个。","r277 已给出强负信号：`shared_lowrank_product_key_expert_jumprelu` 在 `0.081680x` 下 exceed 达到 `0.223148`，说明 single-shared lowrank coarse 明显容量不足；本轮新 family 正是最小成本地测试这个结论是否能通过双 shared heads 被修复。"],"reference_round":263,"self_review":"这轮符合当前阶段优先级。r274-r277 已连续探索了 dual-shared、adaptive、single-shared-lowrank 三个不同槽位，其中只有 dual-shared 给出一定正向 exceed 信号，而最新 r277 证明“single lowrank shared coarse + PK cleanup”虽然极便宜，但 exceed 崩得太厉害。选择 `dual_shared_lowrank_product_key_expert_jumprelu` 的理由不是继续做邻域插值，而是用一个最小新结构直接回答 r277 暴露出的核心问题：失败是来自 lowrank shared 表达本身，还是来自 shared coarse 容量太薄。相对 r263 只改 `ARCHITECTURE`，满足单变量规则；代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke。主要风险是即便 shared coarse 翻倍，lowrank shared 表达仍可能不够，导致 exceed 仍远高于 target；但这轮会以很低的额外成本给出一个高信息量结论。","summary":"已新增并接通 `dual_shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚的 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08243x` 的低成本档位修复 r277 的 exceed 崩塌。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py","research/AutoResearch/override_registry.py","research/AutoResearch/prior_research_history.md"]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d48c7-e204-7f60-85b6-368414181e7d
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 278。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 278 策略模式：Exceed 探索
+原因：当前 incumbent objective=0.2760，其中 exceed=0.1960 明显高于 cost=0.0800；下一步应优先降 exceed_alpha_0.50。
+当前 objective anchor family：shared_product_key_expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=shared_product_key_expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 首要目标是降低 exceed_alpha_0.50；只要 objective_score 下降，允许适度增加 cost，但必须留在预算内。
+2. FVU 只作诊断：当 exceed 明显下降而 FVU 只小幅波动时，不要被旧的 FVU 直觉误导。
+3. 优先考虑能减少 tail-error / online compensation 需求的结构，而不是只做线性 cost 压缩。
+4. 允许新开 family；但任何新结构都必须仍能导出为静态子库有限加权和。
+5. 如果最近几轮都只是同一 family 上的轻微参数插值且 objective 没有实质下降，应优先换结构槽位。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 15 个，扩展兼容 25 个，不兼容 3 个。
+
+Agent 状态：round=277, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=0
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.22` 仍差约 0.055；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `shared_product_key_expert_jumprelu` (K=32)，objective≈0.275001 = cost 0.10x + exceed 0.179298。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。
+  如果当前最佳线最近是靠 architecture probe 而不是局部插值取得改进，那么后续默认应把它当对照 scaffold：只保留极少量必要的 knee 校准，其余预算优先投向建立在该 scaffold 之上的新结构升级。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.08~0.14` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。
+  4. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  5. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  6. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。
+  7. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。
+  8. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  9. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  10. 当前最强已验证主线是 `shared_product_key_expert_jumprelu`：它已经说明“shared coarse 主干 + product-key tiny routed cleanup”比 plain PK 更能改善当前目标。后续应把这条线当作 winning scaffold，而不是继续把大部分预算花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性细扫上。当前更高价值的问题是：在近同成本下，什么结构升级能在保留这套 scaffold 的同时，把 low-K exceed 再明显压低。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 在已经出现局部 knee 信号后，继续围绕同一个 scaffold 做 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的多轮近邻扫点。
+  4. 只把 active path、shared split 或 expert 宽度做轻微改动，但没有明确解释为什么会更慢地恶化 exceed 的低信息增量实验。
+  5. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+如何使用这些灵感：
+- 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
+- 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
+- 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r266 objective=0.275001 = cost 0.095703x + exceed 0.179298 | fvu=0.16146668791770935 | arch=shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE | source=recent_summary
+  r263 objective=0.27600582122802736 = cost 0.08x + exceed 0.19600582122802734 | fvu=0.18039849400520325 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r269 objective=0.28146726489067075 = cost 0.1x + exceed 0.18146726489067078 | fvu=0.16496148705482483 | arch=shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r274 objective=0.28746201157569884 = cost 0.11x + exceed 0.17746201157569885 | fvu=0.16134148836135864 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r273 objective=0.29641358613967894 = cost 0.11x + exceed 0.18641358613967896 | fvu=0.16774076223373413 | arch=lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r277 objective=0.3031478989124298 = cost 0.08x + exceed 0.2231478989124298 | fvu=0.20129787921905518 | arch=shared_lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r246 objective=0.3143901073932648 = cost 0.14x + exceed 0.17439010739326477 | fvu=0.1560433954000473 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r245 objective=0.3227708184719086 = cost 0.14x + exceed 0.18277081847190857 | fvu=0.16149239242076874 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r242 objective=0.34023226737976076 = cost 0.14x + exceed 0.20023226737976074 | fvu=0.17636975646018982 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → shared_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.275001 = cost 0.095703x + exceed 0.179298 | encoder=0.056641x | deploy=0.039062x | fvu=0.16146668791770935
+  最低 cost leader → product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.27600582122802736 = cost 0.08x + exceed 0.19600582122802734 | encoder=0.04x | deploy=0.04x | fvu=0.18039849400520325
+  最低 exceed leader → product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.3143901073932648 = cost 0.14x + exceed 0.17439010739326477 | encoder=0.1x | deploy=0.04x | fvu=0.1560433954000473
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.22 以下。
+  当前 incumbent 约为 objective=0.275001 (cost=0.10x, exceed=0.179298)；距离目标仍差 0.055001。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.22 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.08x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.10x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.12x，则 exceed 需压到 ≤0.10
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.08
+  因此：若新结构 cost 升到约 0.14x，却仍无法把 exceed 压到约 0.08 附近，则通常不够支撑 0.22 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，8）：
+  r270 shared_product_key_factorized_expert_topk param_only -> discard objective=0.500349 cost=0.115723x exceed=0.384626 fvu=0.37430089712142944 738s
+  r271 shared_product_key_expert_jumprelu param_only -> archive objective=0.280450 cost=0.115234x exceed=0.165215 fvu=0.14792293310165405 774s
+  r272 shared_adaptive_active_product_key_expert_jumprelu edit_sae_code -> archive objective=0.276662 cost=0.095703x exceed=0.180959 fvu=0.16397443413734436 856s
+  r273 lowrank_product_key_expert_jumprelu edit_sae_code -> keep objective=0.295789 cost=0.109375x exceed=0.186414 fvu=0.16774076223373413 1588s
+  r274 dual_shared_product_key_expert_jumprelu edit_sae_code -> keep objective=0.286837 cost=0.109375x exceed=0.177462 fvu=0.16134148836135864 1003s
+  r275 dual_shared_product_key_expert_jumprelu param_only -> archive objective=0.281434 cost=0.109375x exceed=0.172059 fvu=0.15469904243946075 827s
+  r276 dual_shared_adaptive_active_product_key_expert_jumprelu edit_sae_code -> archive objective=0.284106 cost=0.109375x exceed=0.174731 fvu=0.1581931710243225 891s
+  r277 shared_lowrank_product_key_expert_jumprelu edit_sae_code -> keep objective=0.304828 cost=0.081680x exceed=0.223148 fvu=0.20129787921905518 1081s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。新的阶段目标已经更新为把 objective 压向 `0.22` 以下；以当前 best lane 粗看，这通常要求把 `cost≈0.12~0.14x` 同时配上 `exceed≈0.08~0.10`，明显不是 incumbent 邻域的小步微调能自然得到的。若多轮结果仍停留在 `0.28~0.33` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。
+  2. 当前仍要重点回答“怎样在更小 `K` 下控制 `exceed_alpha_0.50`，并把 objective 真正压向 `0.22`”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。
+  3. 关于 `ACTIVE_EXPERTS` 轴请基于最新真实证据判断，不要继续沿用旧假设。当前 layer3 q_proj 主线里，`product_key_expert_jumprelu` 上把 active path 压到 `ACTIVE_EXPERTS=1` 会让 exceed 明显恶化，而在当前 best PK recipe 上做过的 matched `2 -> 3` probe 也没有赢过 `ACTIVE_EXPERTS=2`。因此在现有 PK / shared+PK many-tiny regime 下，`AE=2` 应视为当前默认工作点；除非新结构改变了 coarse/shared 主干或 cleanup 语义，否则不要再把 `AE=1` 或固定 `AE=3` 当成高优先级主线。
+  4. 当前最有价值的 recent 正信号不是 plain PK，而是 `shared_product_key_expert_jumprelu`：它说明“shared coarse 主干 + product-key tiny routed cleanup”这条分工在当前 hookpoint 上确实优于 plain PK。但后续 `STAGE1_RATIO`、`K` 等局部 follow-up 基本已接近平台，`tiny factorized expert heads` 也给出强负信号。因此后续不应继续让 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的近邻细扫主导预算；更值得优先测试的是建立在这条 shared+PK scaffold 之上的同成本或近同成本结构升级，目标是更强地降低 low-K 条件下的 exceed，例如更好的 hard-token cleanup 机制、shared/coarse 表达方式升级、或真正有差异的 variable-active residual path。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r263 product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=1024
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r269 shared_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=1024
+  STAGE1_RATIO=0.125
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我准备新增一个更轻的升级槽位：`dual_shared_lowrank_product_key_expert_jumprelu`。它把 r274/r275 的“dual shared coarse”正信号，和 r277 里的“low-rank shared coarse 很便宜”组合起来，但继续保留 PK full-expert cleanup 语义。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/config.py
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+apply patch
+patch: completed
+/root/sparsify-ascend/research/AutoResearch/override_registry.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+apply patch
+patch: completed
+/root/sparsify-ascend/research/AutoResearch/prior_research_history.md
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..5792a2491637e80afff9059c64ba1e1b65365091
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..5792a2491637e80afff9059c64ba1e1b65365091
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..0c72abe649170c34dad511ea6e171306562437a6
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..0c72abe649170c34dad511ea6e171306562437a6
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+新 family 已落盘。现在做四项硬校验：py_compile、override allowlist、exact-string smoke、兼容性解析，再看 exact cost 是否仍在 `0.08~0.10x` 主战场。
+exec
+/bin/bash -lc "python - <<'PY'
+import sys, json
+sys.path.insert(0, '.')
+from research.AutoResearch.override_registry import validate_env_overrides
+errs = validate_env_overrides(
+    [{'key': 'ARCHITECTURE', 'value': 'dual_shared_lowrank_product_key_expert_jumprelu'}],
+    fallback_architecture='shared_lowrank_product_key_expert_jumprelu',
+)
+print(json.dumps(errs))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+[]
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+from pathlib import Path
+from research.AutoResearch.compatibility import parse_compatibility_registry
+registry = parse_compatibility_registry(Path('research/AutoResearch/prior_research_history.md').read_text())
+print(registry.get('dual_shared_lowrank_product_key_expert_jumprelu'))
+print(sum(v=='direct_compatible' for v in registry.values()), sum(v=='extended_compatible' for v in registry.values()), sum(v=='incompatible' for v in registry.values()))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+direct_compatible
+16 25 3
+
+exec
+/bin/bash -lc 'python -m py_compile sparsify/config.py sparsify/sparse_coder.py research/AutoResearch/override_registry.py research/AutoResearch/compatibility.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = 'dual_shared_lowrank_product_key_expert_jumprelu'
+cfg = SparseCoderConfig(
+    architecture=arch,
+    k=32,
+    expansion_factor=1,
+    stage1_ratio=0.25,
+    factorized_hidden_dim=256,
+    num_experts=1024,
+    active_experts=2,
+    latents_per_expert=56,
+)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, 32, 1, device)
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import sys, json
+sys.path.insert(0, '.')
+from research.AutoResearch.compatibility import compute_selection_cost
+cfg = dict(stage1_ratio=0.25, factorized_hidden_dim=256, num_experts=1024, active_experts=2, latents_per_expert=56)
+res = compute_selection_cost('dual_shared_lowrank_product_key_expert_jumprelu', k=32, ef=1, extra_config=cfg)
+print(json.dumps(res, indent=2, sort_keys=True))
+PY" in /root/sparsify-ascend
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+ succeeded in 4893ms:
+{
+  "breakdown": [
+    {
+      "accesses": 57344,
+      "name": "factor_encoder",
+      "shape": "1024x56"
+    },
+    {
+      "accesses": 1792,
+      "name": "left_router",
+      "shape": "56x32"
+    },
+    {
+      "accesses": 1792,
+      "name": "right_router",
+      "shape": "56x32"
+    },
+    {
+      "accesses": 6272,
+      "name": "shared_lowrank_head",
+      "shape": "shared=2\u00d756x56"
+    },
+    {
+      "accesses": 114688,
+      "name": "active_expert_encoder",
+      "shape": "active=2\u00d71024x56"
+    }
+  ],
+  "budget_ratio": 0.03,
+  "combined_accesses": 345728,
+  "combined_budget_ratio": 0.05,
+  "combined_feasible": true,
+  "combined_ratio": 0.08,
+  "deployment_accesses": 163840,
+  "deployment_breakdown": [
+    {
+      "accesses": 163840,
+      "name": "sparse_lookup",
+      "shape": "K=32\u00d7(d=1024+n=4096)"
+    }
+  ],
+  "deployment_ratio": 0.04,
+  "feasible": true,
+  "original_matmul_accesses": 4194304,
+  "ratio": 0.04,
+  "total_accesses": 181888
+}
+
+ succeeded in 5286ms:
+Using fused decoder on CUDA.
+integration_smoke: OK dual_shared_lowrank_product_key_expert_jumprelu 32 1 cuda
+
+codex
+我在等 cost 结果；如果 dual-shared lowrank 仍落在 `~0.08x`，这轮就是一个明确优于 r277 的 matched structure repair，而不是继续在 shared_lowrank family 上补无意义局部点。
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+exec
+/bin/bash -lc "python - <<'PY'
+orig = 4194304
+for x in [345728,181888,163840]:
+    print(x/orig)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+0.082427978515625
+0.043365478515625
+0.0390625
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+exec
+/bin/bash -lc "python - <<'PY'
+print(0.27600582122802736-0.082427978515625)
+print(0.275001-0.082427978515625)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+0.19357784271240236
+0.192573021484375
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"dual_shared_lowrank_product_key_expert_jumprelu"}],"expected_win":"lower_objective","family_name":"dual_shared_lowrank_product_key_expert_jumprelu","family_stage":"prototype","hypothesis":"最终重构公式设为 x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^{sh}(h(x)) b_{s,i}^{sh} + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j}(r_sh(x)) b_{e,j}，其中 h(x)=ReLU(Bx) 是低秩 shared bottleneck，{b_{s,i}^{sh}} 是两个静态 shared coarse 子库，r_sh(x)=x-Σ_sΣ_i α_{s,i}^{sh}b_{s,i}^{sh}，{B_e} 是静态 PK-routed expert 子库，E_pk(·) 由 low-rank hidden 上的 left/right product-key 路由选出少量 experts，JumpReLU 只改变 expert 内局部 support。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared coarse 子库查表 + PK expert 选择 + expert 子库查表 + 有限加权和 + 选择性补偿”流水线，不依赖动态字典，因此该 family 判定为直接兼容。本轮唯一主假设是：相对 r263 仅把 `ARCHITECTURE` 从 `product_key_expert_jumprelu` 切到新 family `dual_shared_lowrank_product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=1024`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=56`、`STAGE1_RATIO=0.25`、`FACTORIZED_HIDDEN_DIM=256`、`OPTIMIZER=adam`、`LR=8e-4` 与其余 recipe 不变，用极轻的 dual low-rank shared coarse branch 替代 plain PK 的无主干设置，同时保留 full-expert PK cleanup，能够在 exact `total_cost_ratio=0.082427978515625` 的近同成本档位比 r277 的 single-shared lowrank 变体显著更稳住 exceed，并争取在保持低成本的同时压低 exceed_alpha_0.50 到 `0.19357784271240236` 以下以击败 r263。","needs_sanity":true,"next_hypotheses":["如果该 family 在约 `0.08243x` 下明显优于 r263，并接近或击败 r266，则下一轮应留在该 family，只改 `STAGE1_RATIO=0.125`，测试更轻 shared split 是否能进一步提升 low-cost objective。","如果该 family 只比 r277 好、但仍明显输给 plain PK 或 incumbent，则记录为“dual low-rank shared coarse 修复了 single-shared lowrank 的容量不足，但 lowrank shared family 仍不够强”，后续不要继续在这条线做低信息细扫。","如果该 family 仍明显失败，则可更果断地下调“lowrank shared coarse + PK cleanup”整条方向优先级，把预算转向其他真正改变 cleanup 语义的新结构槽位。"],"notes_to_memory":["已实际落盘新 family `dual_shared_lowrank_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`、`research/AutoResearch/prior_research_history.md`。","该 family 与 `shared_lowrank_product_key_expert_jumprelu` 的精确差异是：low-rank shared coarse 子库从 1 个扩到 2 个；与 `dual_shared_product_key_expert_jumprelu` 的精确差异是：shared coarse 分支改为 low-rank bottleneck 上的 factorized heads，而 routed cleanup 仍保留 full-expert PK JumpReLU encoders。","exact-string smoke 已通过：`SparseCoderConfig(architecture='dual_shared_lowrank_product_key_expert_jumprelu', k=32, expansion_factor=1, stage1_ratio=0.25, factorized_hidden_dim=256, num_experts=1024, active_experts=2, latents_per_expert=56)` 可成功 instantiate、forward、backward。","本地 allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'dual_shared_lowrank_product_key_expert_jumprelu'}], fallback_architecture='shared_lowrank_product_key_expert_jumprelu')` 返回 `[]`。","实现中继续将实际 shared hidden 维度限制为 `min(FACTORIZED_HIDDEN_DIM, LATENTS_PER_EXPERT)`；在当前 recipe 下实际 hidden_dim=56，因此新增第二个 shared lowrank head 的成本很低。","本地 exact 成本复核：selection_accesses=181888 (`0.043365478515625x`)、deployment_accesses=163840 (`0.0390625x`)、combined_accesses=345728 (`0.082427978515625x`)；这比 r277 的 single-shared lowrank 变体仅高 `0.0007476806640625x`，但 shared coarse 容量翻倍。","兼容性注册表已补充该 family，当前解析结果为 `direct_compatible`；更新后本地计数为直接兼容 16 个、扩展兼容 25 个、不兼容 3 个。","r277 已给出强负信号：`shared_lowrank_product_key_expert_jumprelu` 在 `0.081680x` 下 exceed 达到 `0.223148`，说明 single-shared lowrank coarse 明显容量不足；本轮新 family 正是最小成本地测试这个结论是否能通过双 shared heads 被修复。"],"reference_round":263,"self_review":"这轮符合当前阶段优先级。r274-r277 已连续探索了 dual-shared、adaptive、single-shared-lowrank 三个不同槽位，其中只有 dual-shared 给出一定正向 exceed 信号，而最新 r277 证明“single lowrank shared coarse + PK cleanup”虽然极便宜，但 exceed 崩得太厉害。选择 `dual_shared_lowrank_product_key_expert_jumprelu` 的理由不是继续做邻域插值，而是用一个最小新结构直接回答 r277 暴露出的核心问题：失败是来自 lowrank shared 表达本身，还是来自 shared coarse 容量太薄。相对 r263 只改 `ARCHITECTURE`，满足单变量规则；代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke。主要风险是即便 shared coarse 翻倍，lowrank shared 表达仍可能不够，导致 exceed 仍远高于 target；但这轮会以很低的额外成本给出一个高信息量结论。","summary":"已新增并接通 `dual_shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚的 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08243x` 的低成本档位修复 r277 的 exceed 崩塌。","touched_files":["sparsify/config.py","sparsify/sparse_coder.py","research/AutoResearch/override_registry.py","research/AutoResearch/prior_research_history.md"]}
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index c244d1b6936852d90eddccf86e2b0e42b99f680d..39c2289e3e21a98c7a116a720dded08e0cce7f5d
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "dual_shared_lowrank_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "dual_shared_adaptive_active_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/research/AutoResearch/prior_research_history.md b/research/AutoResearch/prior_research_history.md
+index ed309117495106895ae0c9ba7370d61ed95df063..e7862645fc68a602764bbd21914c96e0942519cb
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -63,6 +63,7 @@
+ | `expert_jumprelu` | `x_hat = Σ_e Σ_{i∈S_e^τ(x)} α_{e,i} b_{e,i}` | candidate | router 仍只选择静态 expert 子库，JumpReLU 只改变 expert 内局部 support 形成；decoder 仍是静态子库有限加权和 | 直接兼容 |
+ | `shared_routed_expert_topk` | `x_hat = Σ_{i∈S_shared(x)} α_i^sh b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j} b_{e,j}` | candidate | shared 子库始终激活，routed experts 只在静态子库间选择；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | low-rank shared bottleneck 只改变 shared coarse 与 PK routing 的打分链路，expert cleanup 仍落在静态 expert 子库上；最终仍是静态库有限加权和 | 直接兼容 |
++| `dual_shared_lowrank_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 low-rank shared coarse 子库负责更厚的主干，PK router 仍只在静态 expert 子库间选择，expert cleanup 保持 full-expert JumpReLU；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责更厚的 coarse 主干，product-key router 只在静态 expert 子库间选择，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `dual_shared_adaptive_active_product_key_expert_jumprelu` | `x_hat = Σ_{s=1..2} Σ_{i∈S_s(x)} α_{s,i}^sh b_{s,i}^sh + Σ_{e∈E_pk^*(r_sh(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j} b_{e,j}` | candidate | 两个 always-on shared 静态子库负责 coarse 主干，PK router 按 token 难度自适应地启用 1 或 2 个静态 expert 子库，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 直接兼容 |
+ | `shared_routed_factorized_expert_topk` | `x_hat = Σ_{i∈S_shared(h(x))} α_i^sh b_i^sh + Σ_{e∈E(h(x))} Σ_{j∈S_e(h(x))} α_{e,j} b_{e,j}` | candidate | factorized / low-rank basis 只改变 shared+routed 的打分链路，decoder 仍是静态子库有限加权和 | 直接兼容 |
+diff --git a/sparsify/config.py b/sparsify/config.py
+index bd6c568a89eb2c3531660a0a67363fae7af6ee0a..b3c64b49ae95a3270ffb36299148e100b6aec717
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_lowrank_product_key_expert_jumprelu",
++            "dual_shared_lowrank_product_key_expert_jumprelu",
+             "dual_shared_product_key_expert_jumprelu",
+             "shared_adaptive_active_product_key_expert_jumprelu",
+             "dual_shared_adaptive_active_product_key_expert_jumprelu",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index fa3344f7a91b3594a7a0a9f517193e385045e18f..4a0d3af068709b9cf0e950a84e7184159854eb2f
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_lowrank_product_key_expert_jumprelu":
+         return SharedLowRankProductKeyExpertJumpReLUSparseCoder
++    if architecture == "dual_shared_lowrank_product_key_expert_jumprelu":
++        return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "dual_shared_product_key_expert_jumprelu":
+         return DualSharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+@@ -2737,6 +2739,9 @@
+ class SharedLowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+     """Low-rank shared coarse branch plus PK-routed full-expert JumpReLU cleanup."""
+ 
++    architecture_name = "shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 1
++
+     def __init__(
+         self,
+         d_in: int,
+@@ -2755,7 +2760,7 @@
+             self.latents_per_expert,
+             self.active_experts,
+         ) = _resolve_expert_layout(cfg, d_in)
+-        self.num_shared_experts = 1
++        self.num_shared_experts = self.shared_expert_count
+         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
+         self.expert_num_latents = self.num_experts * self.latents_per_expert
+         self.num_latents = self.shared_num_latents + self.expert_num_latents
+@@ -2768,7 +2773,7 @@
+ 
+         if self.stage1_k > self.shared_num_latents:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage1_k <= shared_experts * latents_per_expert, "
+                 f"got stage1_k={self.stage1_k}, "
+                 f"shared_experts={self.num_shared_experts}, "
+@@ -2776,7 +2781,7 @@
+             )
+         if self.stage2_k > self.active_experts * self.latents_per_expert:
+             raise ValueError(
+-                "shared_lowrank_product_key_expert_jumprelu requires "
++                f"{self.architecture_name} requires "
+                 "stage2_k <= active_experts * latents_per_expert, "
+                 f"got stage2_k={self.stage2_k}, "
+                 f"active_experts={self.active_experts}, "
+@@ -3035,6 +3040,15 @@
+         )
+ 
+ 
++class DualSharedLowRankProductKeyExpertJumpReLUSparseCoder(
++    SharedLowRankProductKeyExpertJumpReLUSparseCoder
++):
++    """Two low-rank shared coarse banks plus PK-routed full-expert cleanup."""
++
++    architecture_name = "dual_shared_lowrank_product_key_expert_jumprelu"
++    shared_expert_count = 2
++
++
+ class DualSharedProductKeyExpertJumpReLUSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+tokens used
+1,509,341
