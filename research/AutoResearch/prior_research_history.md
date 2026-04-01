@@ -68,6 +68,7 @@
 | `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
 | `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
 | `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
+| `lowrank_product_key_expert_jumprelu` | `x_hat = Σ_r β_r u_r + Σ_{e∈E_pk(r(x))} Σ_{i∈S_e^τ(r(x))} α_{e,i} b_{e,i}` | candidate | low-rank trunk 负责主干，product-key router 只在静态 expert 子库间做组合式选址，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 扩展兼容 |
 | `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
 | `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
 | `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |

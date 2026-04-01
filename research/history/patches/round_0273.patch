@@ -1,0 +1,276 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -69,6 +69,7 @@
+     "lowrank_residual": _LOWRANK_KEYS,
+     "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
+     "lowrank_expert_jumprelu": _LOWRANK_EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "lowrank_product_key_expert_jumprelu": _LOWRANK_EXPERT_KEYS | {"JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "lowrank_expert_residual": _LOWRANK_EXPERT_RESIDUAL_KEYS,
+     "two_stage_residual_expert": {
+         "STAGE1_RATIO",
+
+--- a/research/AutoResearch/prior_research_history.md
++++ b/research/AutoResearch/prior_research_history.md
+@@ -68,6 +68,7 @@
+ | `batch_topk` | batch-coupled | blocked | 依赖 batch 共享预算 | 不兼容 |
+ | `adaptive_budget_topk` | batch-coupled / sample-coupled quota | blocked | 当前实现不是单样本静态导出 | 不兼容 |
+ | `lowrank_expert_topk` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i}` | candidate | low-rank trunk 吃掉平滑主干，router 只选择静态 expert 子库，最终仍是静态库上的有限加权和 | 扩展兼容 |
++| `lowrank_product_key_expert_jumprelu` | `x_hat = Σ_r β_r u_r + Σ_{e∈E_pk(r(x))} Σ_{i∈S_e^τ(r(x))} α_{e,i} b_{e,i}` | candidate | low-rank trunk 负责主干，product-key router 只在静态 expert 子库间做组合式选址，JumpReLU 只改变 expert 内局部 support；最终仍是静态库有限加权和 | 扩展兼容 |
+ | `lowrank_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | trunk + sparse residual | 扩展兼容 |
+ | `lowrank_expert_residual` | `x_hat = Σ_r β_r u_r + Σ_{i∈S_{e(x)}(x)} α_{e,i} b_{e,i} + Σ_j γ_j c_j` | candidate | trunk + expert 子库 + 全局 residual 补偿都落在静态向量库上 | 扩展兼容 |
+ | `lowrank_factorized_residual` | `x_hat = Σ_r β_r u_r + Σ_i α_i b_i` | candidate | 低秩 trunk + factorized residual scorer | 扩展兼容 |
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -245,6 +245,7 @@
+             "shared_lowrank_routed_expert_residual",
+             "lowrank_expert_topk",
+             "lowrank_expert_jumprelu",
++            "lowrank_product_key_expert_jumprelu",
+             "lowrank_expert_residual",
+             "two_stage_residual_expert",
+             "group_topk",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -485,6 +485,8 @@
+         return LowRankExpertTopKSparseCoder
+     if architecture == "lowrank_expert_jumprelu":
+         return LowRankExpertJumpReLUSparseCoder
++    if architecture == "lowrank_product_key_expert_jumprelu":
++        return LowRankProductKeyExpertJumpReLUSparseCoder
+     if architecture == "lowrank_expert_residual":
+         return LowRankExpertResidualSparseCoder
+     if architecture == "two_stage_residual_expert":
+@@ -4717,6 +4719,231 @@
+         )
+ 
+ 
++class LowRankProductKeyExpertJumpReLUSparseCoder(SparseCoder):
++    """Low-rank trunk plus product-key-routed JumpReLU expert cleanup."""
++
++    def __init__(
++        self,
++        d_in: int,
++        cfg: SparseCoderConfig,
++        device: str | torch.device = "cpu",
++        dtype: torch.dtype | None = None,
++        *,
++        decoder: bool = True,
++    ):
++        nn.Module.__init__(self)
++        self.cfg = cfg
++        self.d_in = d_in
++        (
++            _base_num_latents,
++            self.num_experts,
++            self.latents_per_expert,
++            self.active_experts,
++        ) = _resolve_expert_layout(cfg, d_in)
++        self.num_latents = self.num_experts * self.latents_per_expert
++        if cfg.k > self.active_experts * self.latents_per_expert:
++            raise ValueError(
++                "lowrank_product_key_expert_jumprelu requires "
++                "k <= active_experts * latents_per_expert, "
++                f"got k={cfg.k}, active_experts={self.active_experts}, "
++                f"latents_per_expert={self.latents_per_expert}"
++            )
++
++        trunk_rank = (
++            cfg.trunk_rank
++            if cfg.trunk_rank is not None
++            else min(d_in, max(cfg.k * 2, d_in // 4))
++        )
++        self.trunk_encoder = nn.Linear(
++            d_in, trunk_rank, bias=False, device=device, dtype=dtype
++        )
++        self.trunk_decoder = nn.Linear(
++            trunk_rank, d_in, bias=False, device=device, dtype=dtype
++        )
++        self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
++        self.register_buffer("pair_left_index", pair_ids // self.right_keys)
++        self.register_buffer("pair_right_index", pair_ids % self.right_keys)
++        self.left_router = nn.Linear(
++            d_in, self.left_keys, device=device, dtype=dtype
++        )
++        self.right_router = nn.Linear(
++            d_in, self.right_keys, device=device, dtype=dtype
++        )
++        self.expert_encoders = nn.Parameter(
++            torch.empty(
++                self.num_experts,
++                self.latents_per_expert,
++                d_in,
++                device=device,
++                dtype=dtype,
++            )
++        )
++        self.expert_encoder_bias = nn.Parameter(
++            torch.zeros(
++                self.num_experts,
++                self.latents_per_expert,
++                device=device,
++                dtype=dtype,
++            )
++        )
++
++        nn.init.kaiming_uniform_(self.left_router.weight, a=5**0.5)
++        nn.init.kaiming_uniform_(self.right_router.weight, a=5**0.5)
++        self.left_router.bias.data.zero_()
++        self.right_router.bias.data.zero_()
++        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
++
++        param_dtype = self.expert_encoder_bias.dtype
++        threshold = torch.full(
++            (self.num_experts, self.latents_per_expert),
++            cfg.jumprelu_init_threshold,
++            device=self.expert_encoder_bias.device,
++            dtype=param_dtype,
++        ).clamp_min(torch.finfo(param_dtype).tiny)
++        self.log_threshold = nn.Parameter(torch.log(torch.expm1(threshold)))
++
++        if decoder:
++            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
++            self.W_dec = nn.Parameter(decoder_init.clone())
++            if self.cfg.normalize_decoder:
++                self.set_decoder_norm_to_unit_norm()
++        else:
++            self.W_dec = None
++
++        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
++
++    @property
++    def threshold(self) -> Tensor:
++        return F.softplus(self.log_threshold)
++
++    def _encoder_linear_layers(self):
++        return [
++            ("trunk_encoder", self.trunk_encoder),
++            ("trunk_decoder", self.trunk_decoder),
++            ("left_router", self.left_router),
++            ("right_router", self.right_router),
++        ]
++
++    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
++        return [
++            (
++                "active_expert_encoder",
++                self.active_experts * self.d_in * self.latents_per_expert,
++                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
++            )
++        ]
++
++    def _deployment_lookup_accesses(self, n_output):
++        return [
++            (
++                "trunk_deploy",
++                self._deploy_library_accesses(self.trunk_encoder.out_features, n_output),
++                self._deploy_library_shape(
++                    self.trunk_encoder.out_features,
++                    n_output,
++                    label=f"r={self.trunk_encoder.out_features}",
++                ),
++            ),
++            (
++                "sparse_lookup",
++                self._deploy_library_accesses(self.cfg.k, n_output),
++                self._deploy_library_shape(self.cfg.k, n_output, label=f"K={self.cfg.k}"),
++            ),
++        ]
++
++    def _encode_residual(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor, Tensor]:
++        original_shape = residual.shape[:-1]
++        flat_x = residual.reshape(-1, self.d_in)
++
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        selected_expert_idx, selected_probs = _select_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++        selected_weight = self.expert_encoders[selected_expert_idx]
++        selected_bias = self.expert_encoder_bias[selected_expert_idx]
++        selected_threshold = self.threshold[selected_expert_idx]
++        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
++        positive = F.relu(pre_acts)
++        gate = torch.sigmoid(
++            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
++        )
++        acts = positive * gate * selected_probs.unsqueeze(-1)
++        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
++            acts,
++            selected_expert_idx,
++            self.cfg.k,
++            self.latents_per_expert,
++            self.num_latents,
++        )
++
++        target_shape = (*original_shape, self.cfg.k)
++        acts_shape = (*original_shape, self.num_latents)
++        return (
++            top_acts.reshape(target_shape),
++            top_indices.reshape(target_shape),
++            full_acts.reshape(acts_shape),
++        )
++
++    def encode(self, x: Tensor) -> EncoderOutput:
++        x = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x))
++        residual = x - trunk
++        return EncoderOutput(*self._encode_residual(residual))
++
++    def decode_residual(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
++        assert self.W_dec is not None, "Decoder weight was not initialized."
++        return decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
++
++    @device_autocast
++    def forward(
++        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
++    ) -> ForwardOutput:
++        x_centered = x - self.b_dec
++        trunk = self.trunk_decoder(self.trunk_encoder(x_centered))
++        residual = x_centered - trunk
++        top_acts, top_indices, full_acts = self._encode_residual(residual)
++
++        sparse_residual = self.decode_residual(top_acts, top_indices)
++        sae_out = trunk + sparse_residual + self.b_dec
++
++        if y is None:
++            y = x
++
++        e = y - sae_out
++        total_variance = (y - y.mean(0)).pow(2).sum()
++
++        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
++            k_aux = y.shape[-1] // 2
++            scale = min(num_dead / k_aux, 1.0)
++            k_aux = min(k_aux, num_dead)
++            auxk_latents = torch.where(dead_mask[None], full_acts, -torch.inf)
++            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
++            e_hat = trunk + self.decode_residual(auxk_acts, auxk_indices) + self.b_dec
++            auxk_loss = (e_hat - e.detach()).pow(2).sum()
++            auxk_loss = scale * auxk_loss / total_variance
++        else:
++            auxk_loss = sae_out.new_tensor(0.0)
++
++        l2_loss = e.pow(2).sum()
++        fvu = l2_loss / total_variance
++
++        return ForwardOutput(
++            sae_out,
++            top_acts,
++            top_indices,
++            fvu,
++            auxk_loss,
++        )
++
++
+ class LowRankExpertResidualSparseCoder(SparseCoder):
+     """Low-rank trunk, expert-local sparse pass, then global residual cleanup."""
+ 
