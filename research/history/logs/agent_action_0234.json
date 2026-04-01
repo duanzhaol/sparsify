@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E(h(x))} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}，其中 h(x)=ReLU(R_down x) 仅用于低秩 router 选择少量 active experts，{b_{e,i}} 是各 expert 的静态子库原子，expert 内系数 α_{e,i}(x) 仍由 full-dim local head 直接从输入 x 计算。导出到 LUTurbo/Lottable 的在线链路仍是“低秩 router 投影 -> 选择静态 expert 子库 -> 子库内 local top-k -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此 factorized_router_expert_topk 判定为直接兼容；batch_topk、adaptive_budget_topk 等 batch/sample-coupled family 仍属不兼容，不能驱动当前兼容 leaderboard。本轮唯一主假设是：r233 已证明该 family 在 K=32 时 exact total_cost_ratio 降到 0.150391，但 exceed_alpha_0.50 升到 0.217719，说明当前 small-K 失利更像是 lookup budget 不足，而不只是 router 过重；因此相对 r233 只把 K 从 32 提到 48，保持 ARCHITECTURE=factorized_router_expert_topk、EXPANSION_FACTOR=1、OPTIMIZER=adam、LR=8e-4、NUM_EXPERTS=128、ACTIVE_EXPERTS=2、LATENTS_PER_EXPERT=192 与其余主 recipe 不变，直接测试把省下的 selection 成本回投到 deploy lookup 后，是否能在 exact total_cost_ratio 仅升到 0.169921875 的情况下把 exceed 明显拉回，从而把 objective 拉回到当前 0.17x~0.18x 主战场并判断这条 family 是否值得继续。",
+  "summary": "建议以 r233 为 reference，只改 K=48，做一轮 factorized_router_expert_topk 的 deploy-knee probe。目标不是继续证明“router 更轻”本身，而是回答这条 family 能否把已验证的 cost 优势换成足够的 exceed 回收；如果连 K=48 仍守不住 objective，这条线就应及时降级。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "factorized_router_expert_topk",
+  "family_stage": "prototype",
+  "self_review": "这轮满足单变量原则：相对 r233 只改 K，一个 env 参数，没有代码改动，也没有新增 tunable key。之所以没有立刻再开全新结构槽位，是因为 r233 虽然输给 incumbent，但它已经给出了很干净的分解信号：selection cost 确实降下来了，失败点集中在 exceed；因此当前最高信息量的 follow-up 不是再换一个名字，而是验证“把节省的 router 成本回投到 lookup budget”后，这个 family 是否还能形成可竞争 knee。其风险也很清楚：从 r233 到 K=48，objective 想至少打平 r210 需要 exceed 大约再降 0.022 以上，想真正挑战当前 incumbent 则需要降到高 0.18x 区间；如果这一轮做不到，就可以更有把握地结束这条 router-only 低秩化分支。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "K",
+      "value": "48"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r233 已确认 factorized_router_expert_topk 真正进入训练配置并完成实跑：runtime config 与 round config 都是 ARCHITECTURE=factorized_router_expert_topk, K=32, NUM_EXPERTS=128, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192。",
+    "r233 的关键结论不是 cost 不够低，而是 exact total_cost_ratio=0.150391 已经比 expert_topk@K32 更低，但 exceed_alpha_0.50=0.217719 明显回退，objective=0.368110，说明当前瓶颈在 small-K 下的选择质量或 lookup budget，而不是接线问题。",
+    "按当前 cost proxy 复核，若保持 r233 其余配置不变仅把 K 提到 48，则 factorized_router_expert_topk 的 projected exact total_cost_ratio 为 0.169921875，仍处于当前主战场。",
+    "本地 override allowlist 已校验：validate_env_overrides([{key: K, value: 48}], fallback_architecture='factorized_router_expert_topk') 返回空列表，不存在训练启动前的 Disallowed env override keys 风险。"
+  ],
+  "next_hypotheses": [
+    "如果 factorized_router_expert_topk@K48 仍然无法至少接近 expert_topk@K48 的 objective，且 exceed 仍明显高于约 0.195，则应停止继续消耗这条 router-only 低秩化分支的预算，下一轮切回新的结构槽位。",
+    "如果 K=48 明显改善 objective 但仍略输给当前 incumbent，下一轮可继续留在该 family，只改 K=64，确认它是否存在比 expert_topk 更有利的 deployment knee。",
+    "如果 K=48 已经证明这条 family 在回投 lookup 预算后具备竞争力，下一轮再只改 FACTORIZED_HIDDEN_DIM=48，测试 router 是否还能继续压缩而不重新拉高 exceed。"
+  ],
+  "reference_round": 233
+}
