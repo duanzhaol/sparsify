@@ -455,6 +455,8 @@ def _get_sae_class(architecture: str) -> type:
         return ProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
         return SharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "dual_shared_product_key_expert_jumprelu":
+        return DualSharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_factorized_expert_topk":
@@ -2397,6 +2399,9 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
 class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
     """Shared sparse coarse stage followed by PK-routed JumpReLU expert cleanup."""
 
+    architecture_name = "shared_product_key_expert_jumprelu"
+    shared_expert_count = 1
+
     def __init__(
         self,
         d_in: int,
@@ -2415,7 +2420,7 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             self.latents_per_expert,
             self.active_experts,
         ) = _resolve_expert_layout(cfg, d_in)
-        self.num_shared_experts = 1
+        self.num_shared_experts = self.shared_expert_count
         self.shared_num_latents = self.num_shared_experts * self.latents_per_expert
         self.expert_num_latents = self.num_experts * self.latents_per_expert
         self.num_latents = self.shared_num_latents + self.expert_num_latents
@@ -2428,7 +2433,7 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
 
         if self.stage1_k > self.shared_num_latents:
             raise ValueError(
-                "shared_product_key_expert_jumprelu requires "
+                f"{self.architecture_name} requires "
                 "stage1_k <= shared_experts * latents_per_expert, "
                 f"got stage1_k={self.stage1_k}, "
                 f"shared_experts={self.num_shared_experts}, "
@@ -2436,7 +2441,7 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             )
         if self.stage2_k > self.active_experts * self.latents_per_expert:
             raise ValueError(
-                "shared_product_key_expert_jumprelu requires "
+                f"{self.architecture_name} requires "
                 "stage2_k <= active_experts * latents_per_expert, "
                 f"got stage2_k={self.stage2_k}, "
                 f"active_experts={self.active_experts}, "
@@ -2723,6 +2728,15 @@ class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
             top_indices.reshape(target_shape),
             full_acts.reshape(acts_shape),
         )
+
+
+class DualSharedProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Two always-on shared micro-experts plus PK-routed JumpReLU cleanup."""
+
+    architecture_name = "dual_shared_product_key_expert_jumprelu"
+    shared_expert_count = 2
 
 
 class SharedProductKeyFactorizedExpertTopKSparseCoder(SparseCoder):
