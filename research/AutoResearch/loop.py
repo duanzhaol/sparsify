@@ -27,6 +27,7 @@ from .git_ops import (
     build_patch,
     capture_before_files,
     cleanup_round_snapshots,
+    commit_history_only,
     commit_round_state,
     ensure_clean_worktree_for_auto_commit,
     init_tracked_paths,
@@ -107,6 +108,8 @@ def run(config: LoopConfig) -> int:
         except Exception as exc:
             print(f"Round {round_id}: unhandled error: {exc}")
             state.append_timeline_event("round_error", round=round_id, error=str(exc))
+            if config.auto_commit:
+                _commit_early_history_only(round_id, "round_error")
 
     state.append_timeline_event("loop_finished")
     state.write_status("loop_finished")
@@ -132,6 +135,8 @@ def run_one_round(config: LoopConfig, *, loop_start_time: float) -> int:
     except Exception as exc:
         print(f"Round {round_id}: unhandled error: {exc}")
         state.append_timeline_event("round_error", round=round_id, error=str(exc))
+        if config.auto_commit:
+            _commit_early_history_only(round_id, "round_error")
 
     return 0
 
@@ -182,6 +187,8 @@ def _run_round(
     except Exception as exc:
         print(f"Round {round_id}: agent invocation failed: {exc}")
         state.log_round_event(ctx, "agent_failed", error=str(exc))
+        if config.auto_commit:
+            _commit_early_history_only(round_id, "agent_failed")
         return
 
     # 4. Coerce stop -> run
@@ -199,8 +206,15 @@ def _run_round(
             assert_allowed_changes(changed)
         except RuntimeError as exc:
             print(f"Round {round_id}: disallowed changes: {exc}")
-            state.record_round_outcome(round_id, action, Result.policy_reject(str(exc)), [], None, ctx)
-            cleanup_round_snapshots(round_id)
+            _finalize_early_round_exit(
+                round_id,
+                action,
+                Result.policy_reject(str(exc)),
+                ctx,
+                state,
+                config,
+                changed=[],
+            )
             return
     ctx.touched_files = changed
     ctx.patch_path = build_patch(before, changed, round_id) if changed else None
@@ -218,8 +232,15 @@ def _run_round(
     action, rejection = validate_action(action, state)
     if rejection:
         print(f"Round {round_id}: policy rejected: {rejection}")
-        state.record_round_outcome(round_id, action, Result.policy_reject(rejection), changed, ctx.patch_path, ctx)
-        cleanup_round_snapshots(round_id)
+        _finalize_early_round_exit(
+            round_id,
+            action,
+            Result.policy_reject(rejection),
+            ctx,
+            state,
+            config,
+            changed=changed,
+        )
         return
 
     # 7. Behavioral diff test (for code edits with architecture changes)
@@ -235,8 +256,15 @@ def _run_round(
             if diff_result.get("identical") and action.family_stage != "prototype":
                 msg = f"Behavioral diff: {arch} encode() identical to topk — blocked"
                 print(f"Round {round_id}: {msg}")
-                state.record_round_outcome(round_id, action, Result.policy_reject(msg), changed, ctx.patch_path, ctx)
-                cleanup_round_snapshots(round_id)
+                _finalize_early_round_exit(
+                    round_id,
+                    action,
+                    Result.policy_reject(msg),
+                    ctx,
+                    state,
+                    config,
+                    changed=changed,
+                )
                 return
 
     # 8. Train with repair loop
@@ -302,6 +330,29 @@ def _run_round(
         f"objective={result.objective_score} cost={result.total_cost_ratio} "
         f"exceed={result.exceed_alpha_0_50} fvu={result.val_fvu}"
     )
+
+
+def _finalize_early_round_exit(
+    round_id: int,
+    action: Action,
+    result: Result,
+    ctx: RoundContext,
+    state: StateManager,
+    config: LoopConfig,
+    *,
+    changed: list[str],
+) -> None:
+    state.record_round_outcome(round_id, action, result, changed, ctx.patch_path, ctx)
+    if config.auto_commit:
+        _commit_round(round_id, action, result, ctx, state)
+    cleanup_round_snapshots(round_id)
+
+
+def _commit_early_history_only(round_id: int, label: str) -> None:
+    try:
+        commit_history_only(f"experiment: round {round_id:04d} standard {label}")
+    except Exception as exc:
+        print(f"Round {round_id}: git history-only commit failed: {exc}")
 
 
 def _bootstrap_runtime(

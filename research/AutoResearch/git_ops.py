@@ -142,6 +142,21 @@ def commit_round_state(
     return current_git_commit(), current_git_branch()
 
 
+def commit_history_only(
+    message: str,
+    extra_paths: list[Path] | None = None,
+) -> tuple[str | None, str]:
+    """Commit tracked history files for early-exit paths with no round commit."""
+    paths = list(TRACKED_HISTORY_PATHS)
+    if extra_paths:
+        paths.extend(extra_paths)
+    stage_paths(paths)
+    if git(["diff", "--cached", "--quiet"], check=False).returncode == 0:
+        return None, current_git_branch()
+    git(["commit", "-m", message])
+    return current_git_commit(), current_git_branch()
+
+
 def snapshot_paths() -> dict[str, str]:
     snapshots: dict[str, str] = {}
     for root in SNAPSHOT_ROOTS:
