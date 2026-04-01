@@ -1,0 +1,718 @@
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中各 expert 子库 {b_{e,i}} 都是静态向量库，E_pk(x) 由两路 learned product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部继续用 JumpReLU 形成局部 support S_e^τ(x)。导出到 LUTurbo/Lottable 时，推理链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，不依赖动态生成字典，因此该 family 的兼容性判断为直接兼容。当前 objective leaderboard 只应由兼容 family 驱动；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍只作历史参考，不参与主线推进。r247 已把 objective 压到 0.307648，其中 cost=0.128418x、exceed=0.179230，说明当前缺口已主要转成 exceed 而不是 cost；因此下一步不应继续向更低 width 压缩，而应在保持当前低成本小 K 路径不变的前提下，测试更大静态 bank 是否能把 exceed 拉回去并冲击 0.30。相对 r247，本轮只把 `NUM_EXPERTS` 从 `512` 提到 `1024`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余 recipe 不变，直接测试“更窄 micro-expert + 更大总 bank”能否在几乎不增加总成本的前提下显著压低 exceed。该点本地精确成本为 `selection_accesses=393216`、`deployment_accesses=163840`、`combined_accesses=557056`、`exact total_cost_ratio=0.1328125`；因此只要 `exceed_alpha_0.50 <= 0.1748355` 就能刷新 r247，而若 `exceed_alpha_0.50 <= 0.1671875`，则 objective 将首次压到 `0.30` 以下。考虑到 `NUM_EXPERTS=256->512` 在同 family 上曾以极小成本增量换回了明显 exceed 改善，这一 probe 是当前最接近 0.30 目标、且仍保持单变量归因清晰的主线动作。","summary":"建议以 r247 为 reference，只改 `NUM_EXPERTS=1024`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量容量延展 probe，目标是在保留 `K=32` 与 `LATENTS_PER_EXPERT=160` 的低成本路径下，用更大的静态 expert bank 进一步压低 exceed，并尝试把 objective 直接推到 0.30 以下。","change_type":"param_only","expected_win":"lower_objective","family_name":"product_key_expert_jumprelu","family_stage":"mainline","self_review":"继续留在同一 family 这次仍有明确的高价值未验证假设，不属于被 prompt 下调优先级的低信息细扫：r245、r246、r247 三轮都是真实 objective 刷新，而且每一步都在回答 PKM/compositional-capacity 这条主线到底能走多远。r247 的 objective 已经降到 0.307648，距离 0.30 只差 0.007648；在这种情况下，最合理的单变量动作不是切到全新结构槽位重置证据，而是做当前 family 最有机会完成临门一脚的容量 probe。相对 r247 只改 `NUM_EXPERTS`，归因非常干净；相比重新打开 `K=48` 或把 `LATENTS_PER_EXPERT` 加回 192，这一步的新增成本更小、所需 exceed 改善门槛也更现实。主要风险是 bank 扩容收益开始递减，导致 exceed 改善不足以覆盖新增的 `0.0043945x` 成本；如果结果如此，就应把当前 PK family 记为接近饱和，并在下一轮优先切回新的 matched-objective architecture probe。","needs_sanity":false,"env_overrides":[{"key":"NUM_EXPERTS","value":"1024"}],"touched_files":[],"notes_to_memory":["`product_key_expert_jumprelu` 继续满足 LUTurbo 导出契约：静态 expert 子库上的有限加权和，兼容性为直接兼容；不兼容 family 不应进入当前 objective leaderboard 主线。","r247 已刷新当前 best compatible point：objective=0.307648，cost=0.128418x，selection=0.089355x，deploy=0.039062x，exceed=0.179230，fvu=0.1605985164642334；曲线为 start=0.227149 -> mid=0.183319 -> end=0.160599，`curve_still_improving=false`。","本地精确成本复核：`product_key_expert_jumprelu K=32 NUM_EXPERTS=1024 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 的 selection_accesses=393216、deployment_accesses=163840、combined_accesses=557056、exact total_cost_ratio=0.1328125。","门槛复核：该点只需 `exceed_alpha_0.50 <= 0.1748355` 就能刷新 r247；若 `exceed_alpha_0.50 <= 0.1671875`，则 objective 将低于 0.30。override allowlist 自检已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'1024'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。"],"next_hypotheses":["如果 `NUM_EXPERTS=1024` 把 objective 压到 0.30 以下或至少继续明显刷新 r247，则下一轮优先停在该 family，改做一次 very-light deployment knee 验证，例如只改 `K=48`，确认是否存在 cost 略升但 exceed 更大幅下降的更优点。","如果 `NUM_EXPERTS=1024` 继续降低 exceed 但不足以覆盖新增 cost，则把结论记为“PK family 的 bank-capacity 轴接近饱和”；后续停止继续堆 bank，转去新的 matched-objective architecture probe。","如果 `NUM_EXPERTS=1024` 没有带来明显 exceed 改善或 objective 反弹，则说明当前最优 tradeoff 已在 `NUM_EXPERTS=512, LATENTS_PER_EXPERT=160` 附近形成 knee；下一轮应优先切换到新的结构槽位，而不是继续在 PK family 内扫 `K` 或 width。"],"reference_round":247}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d46fe-4475-7653-bb51-2d8a8fd9398d
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 248。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 248 策略模式：主线推进
+原因：当前没有连续 crash；主线应继续推进单目标改进，并优先考虑结构性信息增量。
+当前 objective anchor family：expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 当前 mainline 配方首先是 objective anchor / matched baseline，不等于后续必须继续围绕它做局部推进。
+2. 优先保持归因清晰：先确认当前 incumbent 的 objective 主要受 cost 还是 exceed 主导，然后优先选择信息增量最大的改动。
+3. 如果最近 2 轮没有把 objective 明显拉低，默认应切换到新的结构槽位；只有在你能明确说明当前 family 仍有高价值未验证假设时，才继续做局部调整。
+4. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。
+5. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。
+6. 当前已验证最强主线若是更大 expert 池 + 更小 K 的低成本 routed family，则不要假设更复杂结构天然更优；只有当新结构能明确解释 small-K exceed 为何会更慢退化时，才值得挑战 incumbent。
+7. 因此当前优先方向应分成两类：一类是 incumbent 主线附近真正高价值的 knee / 容量点；另一类是 literature-inspired、但与现有 family 明确不同的结构 probe。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+降低选择成本的手段：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES，使用低秩 scorer 等。
+
+兼容性注册表：直接兼容 12 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=247, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=6
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.30` 仍差约 0.054；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `expert_jumprelu` (K=32)，objective≈0.354491 = cost 0.16x + exceed 0.194491。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.14~0.20` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  7. 当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。
+  5. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r235 objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | fvu=0.1710990071296692 | arch=expert_jumprelu K=32 EF=1 | FEASIBLE
+  r236 objective=0.36131738901138305 = cost 0.18x + exceed 0.18131738901138306 | fvu=0.1570778787136078 | arch=expert_jumprelu K=48 EF=1 | FEASIBLE
+  r209 objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | fvu=0.14861851930618286 | arch=expert_topk K=64 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → expert_jumprelu (K=32, EF=1):
+    objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | encoder=0.12x | deploy=0.04x | fvu=0.1710990071296692
+  最低 exceed leader → expert_topk (K=64, EF=1):
+    objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | encoder=0.12x | deploy=0.08x | fvu=0.14861851930618286
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.30 以下。
+  当前 incumbent 约为 objective=0.354491 (cost=0.16x, exceed=0.194491)；距离目标仍差 0.054491。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.16
+    - 若 cost≈0.16x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.18x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.20x，则 exceed 需压到 ≤0.10
+  因此：若新结构 cost 升到约 0.20x，却仍无法把 exceed 压到约 0.10 附近，则通常不够支撑 0.30 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构）：
+  （最近没有兼容 family 的新结果）
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。全局方向仍是把 objective 压向 `0.30` 以下，但这通常不可能靠 incumbent 邻域的小步微调自然达到；若多轮结果仍停留在 `0.35~0.40` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。
+  2. 当前仍要重点回答“怎样在更小 `K` 下控制 exceed_alpha_0.50”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r235 expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r230 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先读取 r247 的真实结果和曲线信号，再决定是继续 PK family 的 width/capacity 轴，还是按策略切去新结构槽位。
+exec
+/bin/bash -lc 'tail -n 8 research/history/results.tsv' in /root/sparsify-ascend
+ succeeded in 0ms:
+r240_1775012556	1775012556	ok	discard	0.2754603326320648	0.297997	0.434227	571392.000000	0.136230	407552.000000	0.097168	163840.000000	0.039062	32	hashed_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0240/round0240_standard_1775012007_dp2_bs1_ga8_ef1_k32_20260401_105333	b5ec714fc48472595b0dbc50ffb922ddfc04c01b			已实际落盘最小新 family `hashed_expert_jumprelu`，并补齐 whitelist、factory dispatch 与 override wiring。建议以 r235 为 reference，只改 `ARCHITECTURE=hashed_expert_jumprelu`，做一轮 Hash-Layers-inspired 的 matched structure probe；本地 exact smoke、allowlist 校验和成本复核均已通过。	这轮没有继续在 `expert_jumprelu`、`adaptive_active_expert_jumprelu` 或 `lowrank_expert_jumprelu` 上做局部补点，而是按当前 `consecutive_no_improve=3` 切到新的高信息增量结构槽位，符合当前主线策略。之所以选择 `hashed_expert_jumprelu`，是因为它同时满足当前 prompt 的两个高优先级条件：一是直接对应 `Hash Layers` 方向，二是保留 full-dim expert heads 与 JumpReLU local support，只替换 router，因此比 `factorized_expert_topk` 那种同时压缩 scorer 和 local head 的方案更贴近“只缩短/简化 active path 成本”的问题拆解。与 r239 的 `lowrank_expert_jumprelu` 相比，它把 exact total_cost_ratio 从 0.19140625 压到 0.13623046875，释放出约 0.055176 的 objective 空间；要打赢当前 incumbent 只需 exceed 不高于约 0.21826，这个门槛明显比 lowrank 线现实。主要风险是固定哈希路由可能破坏 expert 选择质量；但如果连这种低成本、full-head、same-K 的 hash-router 变体都守不住 objective，就可以更果断地下调 Hash-Layers-like 路线优先级。	/root/sparsify-ascend/research/history/logs/round0240_standard_1775012007.log
+r241_1775012910	1775012910	crash	crash				580608.000000	0.138428	416768.000000	0.099365	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802	551dc6190ec01eb6e5c93031c767d626dc3d6513			已落盘并自检新的 `product_key_expert_jumprelu` 原型。建议以 r235 为 reference，只改 `ARCHITECTURE=product_key_expert_jumprelu`，做一轮 PKM-style matched architecture probe，直接判断 compositional coarse-to-fine expert routing 能否在 0.1384x 的更低总成本下保住足够的 exceed 表现。 [MISSING OBJECTIVE METRIC]	这轮满足单变量原则：运行动作相对 r235 只改 `ARCHITECTURE`。之所以值得做代码原型而不是继续在 `expert_jumprelu` 上微调，是因为 current-target 上现有 matched K=32 probes 已基本把 shared/coarse、factorized-router、hash-router、lowrank-trunk 等相邻结构槽位裁了一遍，而 PKM-style compositional routing 仍是 prompt 明确点名、且与已有 family 不同的新槽位。代码改动保持在最小范围，没有引入新 env key；新增 family 复用了已有 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/JUMPRELU_*` 语义，并完成 whitelist、dispatch、allowlist、smoke 的闭环。主要风险是 product-key 的可分解 expert logits 仍可能像 hash/factorized router 一样伤害选择质量；但这正是当前最值得被干净回答的问题。	/root/sparsify-ascend/research/history/logs/round0241_standard_1775012876.log
+r242_1775013596	1775013596	ok	keep	0.17636975646018982	0.200232	0.338660	580608.000000	0.138428	416768.000000	0.099365	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0242/round0242_standard_1775013042_dp2_bs1_ga8_ef1_k32_20260401_111048	54f895389fd16bcdb43be4cdd68f51fe8e07392f			建议先用已修复的 `product_key_expert_jumprelu` 重新执行同一轮 matched architecture probe。r241 的 crash 来自 DDP 设备放置 bug，不是结构结论；现在 blocker 已被最小化修复并通过了精确架构与 DDP 本地 smoke。	这轮优先修 blocker 而不是再开新 architecture slot，符合当前运行时优先级。虽然 Round 242 的模式是 matched architecture probe，但 r241 的 probe 事实上无效，因为它在 DDP 初始化阶段就崩了；若不先修复，就会把实现问题误判成结构负信号。修复范围严格限制在 `sparsify/` 单文件，没有新增 tunable，也没有改变训练语义。运行动作仍然满足 matched-probe 约束：相对 r235 只改 `ARCHITECTURE`，保持 K、EF、OPTIMIZER、LR 与主要 recipe 不变。	/root/sparsify-ascend/research/history/logs/round0242_standard_1775013042.log
+r243_1775014254	1775014254	ok	keep	0.16264957189559937	0.186960	0.344919	662528.000000	0.157959	416768.000000	0.099365	245760.000000	0.058594	48	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0243/round0243_standard_1775013701_dp2_bs1_ga8_ef1_k48_20260401_112147	9499b83fe109164bbca2b67dd608ecdcb55af153			建议以 r242 为 reference，只改 `K=48`。这是对当前新主线 `product_key_expert_jumprelu` 的单变量 deploy-knee probe，目的是判断它是否不仅能把 cost 压低，还能把省下来的成本重新投入 lookup 后进一步压低 exceed，从而继续降低 objective。	这轮继续留在同一 family 不是低信息量微调，而是对刚形成的新最优结构点做一次非常明确的 knee 测试。r242 已经证明 `product_key_expert_jumprelu` 不是一次性偶然点，因为它在更低 cost 下真实刷新了 objective；当前最需要回答的问题不再是“这个结构值不值得测”，而是“它的优势是否只来自更轻 router，还是还能把省下来的成本有效换成更低 exceed”。相对 r242 只改 `K`，归因清晰，且不会引入新的接线风险。主要风险也很清楚：`K=32->48` 需要约 0.0195 的 exceed 改善才能继续刷新当前 best objective，这个门槛不低；但如果这一步都换不回收益，就能更有把握地结束这条 family 的 deploy-side 扫描。	/root/sparsify-ascend/research/history/logs/round0243_standard_1775013701.log
+r244_1775014718	1775014718	ok	keep	0.27498143911361694	0.295356	0.386909	384000.000000	0.091553	220160.000000	0.052490	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0244/round0244_standard_1775014346_dp2_bs1_ga8_ef1_k32_20260401_113232	b303a7f8ed3b2d498439475fde401c17d1adbf28			建议以 r242 为 reference，只改 `ACTIVE_EXPERTS=1`。这是对当前新主线 `product_key_expert_jumprelu` 的单变量 short-active-path probe，用来判断 product-key 路由是否强到足以在更低总成本下仍维持可竞争的 exceed，从而继续降低 objective。	这轮继续留在同一 family 仍然符合主线推进要求，因为这里存在一个尚未验证、且信息增量明显高于继续扫 `K` 的 family 内核心假设：`product_key_expert_jumprelu` 是否能把 active path 从 2 个 experts 压到 1 个而不丢掉太多 exceed。r243 已经基本结束了继续向右加 deploy budget 的必要性，因此此时切到 `ACTIVE_EXPERTS` 轴比再做 `K=64` 更清晰、更符合 prompt 中“very short active path”和“小 K lane”优先级。相对 r242 只改一个 env 参数，归因干净，没有新增接线风险。主要风险是单 expert path 会让 exceed 回弹明显；但由于成本下降空间很大，这一轮即使失败也能高质量裁决这条新主线到底是靠路由质量还是靠双 expert 容量在工作。	/root/sparsify-ascend/research/history/logs/round0244_standard_1775014346.log
+r245_1775015632	1775015632	ok	keep	0.16149239242076874	0.182771	0.323396	589824.000000	0.140625	425984.000000	0.101562	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0245/round0245_standard_1775014808_dp2_bs1_ga8_ef1_k32_20260401_114015	27da1267871a382a6fec1cf10aa510fbef20dbfd			建议以 r242 为 reference，只改 `NUM_EXPERTS=256`。这是对当前 `product_key_expert_jumprelu` 主线的单变量容量 probe，目的是验证 PKM-style 路由是否真能在几乎不增加总成本的前提下，通过更大的静态 expert bank 进一步压低 exceed 并继续降低 objective。	这轮继续留在同一 family 不是低信息量细扫，而是对 `product_key_expert_jumprelu` 最关键、且尚未被回答的结构命题做一次单变量容量验证。r243 和 r244 已经把最直接的局部轴 `K` 与 `ACTIVE_EXPERTS` 裁掉了；如果此时立刻再换结构槽位，会留下一个和 PKM 本意直接相关的空白：它是否真的能用近乎常数成本扩大全局静态子库容量。相对 r242 只改 `NUM_EXPERTS`，归因清晰，且成本几乎不变，因此能比再扫别的局部轴更干净地判断这条新主线的可延展性。主要风险是更大总 bank 依然不能有效降低 exceed；但如果结果如此，就可以更果断地结束这条容量支线，而不是继续消耗预算在同 family 上。	/root/sparsify-ascend/research/history/logs/round0245_standard_1775014808.log
+r246_1775016829	1775016829	ok	keep	0.1560433954000473	0.174390	0.318433	604160.000000	0.144043	440320.000000	0.104980	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0246/round0246_standard_1775015795_dp2_bs1_ga8_ef1_k32_20260401_115642	661f1b4d8b83b1a30d48e4e9bd4e6d8c195942a2			建议以 r245 为 reference，只改 `NUM_EXPERTS=512`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量容量延展 probe，用来判断更大的静态 expert bank 能否在近乎常数成本下继续压低 exceed 并进一步降低 objective。	继续留在同一 family 这次是有明确依据的：r245 不是小数点级微调，而是一次显著正信号，且其训练曲线仍在改善，说明 PKM-style 路由的核心容量命题尚未被验证完。相对 r245 只改 `NUM_EXPERTS`，归因最干净，也比重新打开 `K` 轴更符合已有证据。主要风险是容量收益开始递减，导致 exceed 改善不足以覆盖新增的 `0.003418x` 成本；如果结果如此，就应停止继续上探 bank 大小，而不是在这条轴上继续消耗轮次。	/root/sparsify-ascend/research/history/logs/round0246_standard_1775015795.log
+r247_1775017837	1775017837	ok	keep	0.1605985164642334	0.179230	0.307648	538624.000000	0.128418	374784.000000	0.089355	163840.000000	0.039062	32	product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0247/round0247_standard_1775016982_dp2_bs1_ga8_ef1_k32_20260401_121629	3aa25bde9aa91e5137df08d5a2c0b98ad558f012			建议以 r246 为 reference，只改 `LATENTS_PER_EXPERT=160`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量 micro-expert width knee probe，目标是在保持 small-K 与短 active path 不变的前提下，进一步压低总成本并尽量守住 exceed。	这轮继续留在同一 family 是有充分依据的，不违背“最近 2 轮未明显改进才切结构”的策略：r245 和 r246 都是真正的 objective 刷新，而且 improvement 主要来自 prompt 明确鼓励验证的 PKM/compositional-capacity 命题。相对 r246 只改 `LATENTS_PER_EXPERT`，比继续加 `NUM_EXPERTS=1024`、重新打开 `K=48`、或把 latent 加宽到 `224` 都更像当前的高价值 knee，因为它的新增 cost 最低且容错最大。主要风险是单个 expert 过窄后 exceed 回弹过多；但由于该点的成本窗口足够大，即使 exceed 略有恶化仍可能继续降低 objective，因此它比继续右移 deploy 成本或继续堆 bank 容量更适合本轮。	/root/sparsify-ascend/research/history/logs/round0247_standard_1775016982.log
+
+exec
+/bin/bash -lc 'rg -n "r247|round0247|objective=|curve_" research/history -S | tail -n 80' in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/logs/agent_round_0209.stdout.log:24970:research/history/round_summaries/round_0139.json-72-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:24971:research/history/round_summaries/round_0139.json-73-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:24995:research/history/round_summaries/round_0105.json-84-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:24996:research/history/round_summaries/round_0105.json-85-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25020:research/history/round_summaries/round_0070.json-69-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25021:research/history/round_summaries/round_0070.json-70-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25045:research/history/round_summaries/round_0143.json-69-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25046:research/history/round_summaries/round_0143.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25070:research/history/round_summaries/round_0187.json-69-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25071:research/history/round_summaries/round_0187.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25095:research/history/round_summaries/round_0168.json-70-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25096:research/history/round_summaries/round_0168.json-71-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25120:research/history/round_summaries/round_0104.json-69-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25121:research/history/round_summaries/round_0104.json-70-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25145:research/history/round_summaries/round_0031.json-68-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25146:research/history/round_summaries/round_0031.json-69-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25170:research/history/round_summaries/round_0024.json-69-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25171:research/history/round_summaries/round_0024.json-70-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25195:research/history/round_summaries/round_0096.json-70-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25196:research/history/round_summaries/round_0096.json-71-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25270:research/history/round_summaries/round_0099.json-70-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25271:research/history/round_summaries/round_0099.json-71-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:25325:research/history/round_summaries/round_0118.json-69-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25326:research/history/round_summaries/round_0118.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25350:research/history/round_summaries/round_0115.json-69-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25351:research/history/round_summaries/round_0115.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25375:research/history/round_summaries/round_0164.json-69-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25376:research/history/round_summaries/round_0164.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25400:research/history/round_summaries/round_0178.json-69-    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:25401:research/history/round_summaries/round_0178.json-70-    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:25475:research/history/round_summaries/round_0098.json-70-    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:25476:research/history/round_summaries/round_0098.json-71-    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:30718:research/history/round_summaries/round_0201.json-19-    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(r(x))} \u03a3_{j\u2208S_e(r(x))} \u03b3_{e,j}(r(x)) b_{e,j}\uff0c\u5176\u4e2d r(x)=x-\u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i\uff1b{u_i} \u662f\u9759\u6001 shared coarse \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert residual \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + expert residual \u5b50\u5e93\u67e5\u8868 + \u9009\u62e9\u6027\u8865\u507f\u201d\u6d41\u6c34\u7ebf\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u6269\u5c55\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u7531 cost=0.19x \u4e0e exceed=0.196114 \u8fd1\u4e4e\u5bf9\u534a\u6784\u6210\uff0c\u800c r200 \u8bf4\u660e cheap trunk \u53ea\u628a exceed \u538b\u5230 0.188 \u4ecd\u4e0d\u591f\uff1b\u76f8\u6bd4\u7ee7\u7eed\u5728 incumbent \u90bb\u57df\u505a\u5c0f\u63d2\u503c\uff0c\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\uff1a\u663e\u5f0f\u201cshared \u4e3b\u5e72 + residual experts\u201d\u8fd9\u6761\u7ed3\u6784\u7ebf\u80fd\u5426\u5728 small-K \u4e3b\u6218\u573a\u91cc\u6bd4 routed-only \u66f4\u6162\u9000\u5316\u3002r183/r191 \u5df2\u5728\u540c family \u7684 K=108/96 \u4e0a\u7ed9\u51fa exceed\u22480.1715/0.1759\uff0c\u660e\u663e\u4f18\u4e8e routed-only small-K \u70b9\uff1b\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r191 \u4ec5\u628a K \u4ece 96 \u538b\u5230 64\uff0c\u6d4b\u8bd5\u8fd9\u6761 shared-coarse + expert-residual \u7ed3\u6784\u80fd\u5426\u628a total_cost_ratio \u4ece 0.25x \u62c9\u56de\u7ea6 0.21x\uff0c\u540c\u65f6\u628a exceed \u7ef4\u6301\u5728\u63a5\u8fd1 0.18 \u751a\u81f3\u66f4\u4f4e\uff0c\u4ece\u800c\u903c\u8fd1\u6216\u5237\u65b0\u5f53\u524d objective anchor\u3002",
+research/history/logs/agent_round_0209.stdout.log:30824:research/history/round_summaries/round_0205.json-19-    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(r(x))} \u03a3_{j\u2208S_e(r(x))} \u03b3_{e,j}(r(x)) b_{e,j}\uff0c\u5176\u4e2d r(x)=x-\u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i\uff1b{u_i} \u662f\u9759\u6001 shared/coarse \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 routed residual expert \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared/coarse \u67e5\u8868 + routed residual expert \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u548c + \u5fc5\u8981\u65f6\u9009\u62e9\u6027\u5728\u7ebf\u8865\u507f\u201d\u94fe\u8def\uff0c\u6700\u7ec8\u4ecd\u662f\u9759\u6001\u5411\u91cf\u5e93\u4e0a\u7684\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64 `shared_two_stage_residual_expert` \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\uff1b`expert_topk`\u3001`shared_routed_expert_topk` \u5c5e\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002\u5f53\u524d\u6700\u503c\u5f97\u7ee7\u7eed\u56de\u7b54\u7684\u95ee\u9898\uff0c\u4e0d\u518d\u662f `ACTIVE_EXPERTS=1` \u7684\u66f4\u77ed\u8def\u5f84\u80fd\u5426\u6210\u7acb\uff0c\u56e0\u4e3a r203 \u4e0e r204 \u5df2\u7ecf\u628a\u8fd9\u6761 single-route shared \u7cfb\u5217\u5728\u5f53\u524d target \u4e0a\u5e72\u51c0\u5426\u5b9a\uff1b\u76f8\u53cd\uff0cr201 `shared_two_stage_residual_expert K=64 LATENTS_PER_EXPERT=160 STAGE1_RATIO=0.25` \u4ee5 objective=0.398672\u3001cost=0.210938x\u3001exceed=0.187735 \u6210\u4e3a\u5f53\u524d\u6700\u63a5\u8fd1 incumbent \u7684\u65b0\u7ed3\u6784\u70b9\uff0c\u800c r202 \u628a `LATENTS_PER_EXPERT` \u63d0\u5230 192 \u540e exceed \u8fdb\u4e00\u6b65\u964d\u5230 0.178402\uff0c\u8bf4\u660e\u8fd9\u6761 family \u7684\u74f6\u9888\u66f4\u50cf residual cleanup \u5bb9\u91cf\u800c\u4e0d\u662f\u517c\u5bb9\u6027\u672c\u8eab\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r201 \u4ec5\u628a `STAGE1_RATIO` \u4ece 0.25 \u964d\u5230 0.125\uff0c\u4fdd\u6301 `ARCHITECTURE=shared_two_stage_residual_expert`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=160`\u3001`NUM_EXPERTS=64`\u3001`TRUNK_RANK=16`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u914d\u65b9\u4e0d\u53d8\uff0c\u6d4b\u8bd5\u628a\u66f4\u591a\u56fa\u5b9a K \u9884\u7b97\u4ece coarse stage \u8ba9\u7ed9 residual experts\uff0c\u662f\u5426\u80fd\u5728 exact total_cost \u4e0d\u53d8\u7684\u524d\u63d0\u4e0b\u663e\u8457\u538b\u4f4e exceed_alpha_0.50\uff0c\u5e76\u628a objective \u4ece r201 \u7684 0.398672 \u63a8\u8fd1\u751a\u81f3\u538b\u8fc7 r199\u3002",
+research/history/logs/agent_round_0209.stdout.log:30902:research/AutoResearch/policy.py:347:            f"当前 incumbent objective={objective:.4f}，其中 cost={total_cost_ratio:.4f} "
+research/history/logs/agent_round_0209.stdout.log:30906:research/AutoResearch/policy.py:359:            f"当前 incumbent objective={objective:.4f}，cost={total_cost_ratio:.4f} "
+research/history/logs/agent_round_0209.stdout.log:31019:research/AutoResearch/loop.py:302:        f"objective={result.objective_score} cost={result.total_cost_ratio} "
+research/history/logs/agent_round_0209.stdout.log:31246:research/history/memory.json:944:      "design_hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_r \u03b2_r(x) u_r + \u03a3_{j\u2208S_{e(x-t(x))}(x-t(x))} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d t(x)=\u03a3_r \u03b2_r(x) u_r\uff1b{u_r} \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201ctrunk \u67e5\u8868/\u52a0\u6743\u548c + \u8f7b\u91cf router \u9009\u5c11\u91cf expert \u5b50\u5e93 + expert \u5b50\u5e93\u67e5\u8868/\u52a0\u6743\u548c + \u5fc5\u8981\u65f6\u9009\u62e9\u6027\u5728\u7ebf\u8865\u507f\u201d\u94fe\u8def\uff0c\u56e0\u6b64 `lowrank_expert_topk` \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\uff1b`expert_topk`\u3001`shared_routed_expert_topk` \u5c5e\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002r207 \u5df2\u7ecf\u628a `lowrank_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160 TRUNK_RANK=16` \u63a8\u5230 objective=0.396871\u3001cost=0.199219x\u3001exceed=0.197653\uff0c\u8fd9\u4e2a\u70b9\u4e0e incumbent r199 \u7684\u5dee\u8ddd 0.010757 \u91cc\uff0c\u7edd\u5927\u90e8\u5206\u6765\u81ea cost \u800c\u4e0d\u662f exceed\uff1b\u540c\u65f6 family \u5185\u5df2\u6709\u65c1\u8bc1 r175 vs r170 \u8868\u660e\u5728\u66f4\u9ad8 K\u3001\u66f4\u5bbd latent \u7684 recipe \u4e0a\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8 \u80fd\u4ee5\u66f4\u4f4e cost \u6362\u6765\u66f4\u4f4e objective\uff0c\u800c\u4e0d\u662f\u5fc5\u7136\u9020\u6210 tail error \u7206\u70b8\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r207 \u4ec5\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8\uff0c\u4fdd\u6301 `ARCHITECTURE=lowrank_expert_topk`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=160`\u3001`NUM_EXPERTS=64`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u914d\u65b9\u4e0d\u53d8\uff0c\u6d4b\u8bd5\u662f\u5426\u80fd\u7528\u66f4\u4fbf\u5b9c\u7684 trunk \u76f4\u63a5\u62b9\u6389\u5f53\u524d\u4e3b\u8981\u7531 encoder cost \u5e26\u6765\u7684 objective \u7f3a\u53e3\u3002\u57fa\u4e8e\u672c\u5730 exact cost \u590d\u6838\uff0c`TRUNK_RANK=16 -> 8` \u4f1a\u628a combined_accesses \u4ece 835584 \u964d\u5230 778240\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 actual total_cost_ratio \u4ece\u7ea6 0.199219x \u964d\u5230\u7ea6 0.185547x\uff1b\u8fd9\u610f\u5473\u7740\u53ea\u8981 exceed \u7684\u56de\u5f39\u4e0d\u8d85\u8fc7\u7ea6 0.0137\uff0c\u672c\u8f6e\u5c31\u4f1a\u4f18\u4e8e r207\uff0c\u800c\u53ea\u8981 exceed \u4e0d\u9ad8\u4e8e\u7ea6 0.2006\uff0c\u5c31\u6709\u673a\u4f1a\u76f4\u63a5\u8d8a\u8fc7 incumbent r199\u3002",
+research/history/logs/agent_round_0209.stdout.log:31311:research/history/memory.json:1711:      "design_hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d B^sh \u4e0e {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u4ecd\u662f\u201cshared \u5b50\u5e93\u67e5\u8868 + \u5c11\u91cf routed expert \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c + \u5fc5\u8981\u65f6\u5728\u7ebf\u8865\u507f\u201d\u7684 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u5904\u4e8e cost=0.19x\u3001exceed=0.196114 \u7684\u5e73\u8861\u5e26\uff0c\u800c recent \u4e24\u4e2a\u7ed3\u6784 probe\uff08r200 lowrank_expert_topk\u3001r202 shared_two_stage_residual_expert\uff09\u90fd\u6ca1\u628a objective \u62c9\u4e0b\u53bb\uff0c\u8bf4\u660e\u7ee7\u7eed\u5728\u8fd9\u4e9b\u7ed3\u6784\u4e0a\u52a0\u4e00\u70b9 shared/coarse \u8fd8\u4e0d\u591f\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r159 \u4ec5\u628a ACTIVE_EXPERTS \u4ece 2 \u964d\u5230 1\uff0c\u76f4\u63a5\u6d4b\u8bd5 shared+routed \u5bb6\u65cf\u6700\u5173\u952e\u3001\u4e14\u5f53\u524d target \u8fd8\u6ca1\u5728\u8fd9\u6761 low-cost lane \u4e0a\u56de\u7b54\u7684\u95ee\u9898: \u5982\u679c shared \u5206\u652f\u771f\u7684\u80fd\u5403\u6389\u5e73\u6ed1\u4e3b\u5e72\uff0c\u90a3\u4e48 routed path \u538b\u6210\u5355 expert \u540e\uff0ctotal_cost_ratio \u53ef\u4ece\u7ea6 0.21x \u8fdb\u4e00\u6b65\u964d\u5230\u7ea6 0.17x\uff0c\u540c\u65f6 exceed \u4e0d\u5e94\u50cf\u65e7\u7684\u9ad8\u5bbd\u5ea6\u5355\u8def probe \u90a3\u6837\u660e\u663e\u5931\u63a7\u3002\u82e5\u8be5\u5047\u8bbe\u6210\u7acb\uff0c\u8fd9\u4f1a\u5f62\u6210\u4e00\u4e2a\u65b0\u7684\u66f4\u9760\u5de6 objective \u6bb5\uff1b\u82e5\u4e0d\u6210\u7acb\uff0c\u5219\u53ef\u66f4\u5e72\u51c0\u5730\u5224\u5b9a\u5f53\u524d target \u4e0a shared+routed \u7684\u6536\u76ca\u4ecd\u4f9d\u8d56\u53cc expert active path\u3002",
+research/history/logs/agent_round_0209.stdout.log:31370:research/history/memory.json:2507:      "hypothesis": "\u5019\u9009 family \u8bbe\u4e3a `lowrank_expert_topk`\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a `x_hat = \u03a3_r \u03b2_r(x) u_r + \u03a3_{e\u2208E(x)} \u03a3_{i\u2208S_e(x)} \u03b1_{e,i}(x) b_{e,i}`\uff1a\u5176\u4e2d `{u_r}` \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c`{b_{e,i}}` \u662f\u9759\u6001 expert \u5b50\u5e93\u539f\u5b50\uff0c\u5728\u7ebf\u4fa7\u53ea\u9700\u8ba1\u7b97\u5c11\u91cf trunk \u7cfb\u6570\u3001\u8f7b\u91cf router \u9009\u62e9\u5c11\u91cf expert \u5b50\u5e93\u3001\u518d\u505a\u5b50\u5e93\u67e5\u8868\u4e0e\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201ctrunk \u67e5\u8868/\u52a0\u6743\u548c + \u5b50\u5e93\u9009\u62e9 + \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u6d41\u6c34\u7ebf\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a `\u6269\u5c55\u517c\u5bb9`\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u7531 cost=0.19x \u4e0e exceed=0.196114 \u8fd1\u4e4e\u5bf9\u534a\u6784\u6210\uff0c\u5df2\u4e0d\u9002\u5408\u7ee7\u7eed\u53ea\u505a\u540c family \u5c0f\u63d2\u503c\uff1b\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\uff1a\u5728\u540c\u6837 small-K=`64` \u7684 very-short routed path \u4e0b\uff0c\u589e\u52a0\u4e00\u4e2a\u4fbf\u5b9c\u7684 low-rank trunk\uff0c\u80fd\u5426\u7528\u7ea6 +0.02x \u7684\u603b\u6210\u672c\u6362\u56de\u8db3\u591f\u591a\u7684 exceed \u964d\u5e45\u3002\u76f8\u5bf9 r199 \u4ec5\u628a `ARCHITECTURE` \u4ece `expert_topk` \u5207\u5230 `lowrank_expert_topk`\uff0c\u4fdd\u6301 `K=64`\u3001`EXPANSION_FACTOR=1`\u3001`TRUNK_RANK=16`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`NUM_EXPERTS=64`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u201clow-rank trunk \u662f\u5426\u80fd\u8ba9\u66f4\u5c0f K \u4e0b\u7684 exceed_alpha_0.50 \u660e\u663e\u4f4e\u4e8e routed-only incumbent\u201d\u3002\u672c\u5730\u6210\u672c\u81ea\u68c0\u663e\u793a\u8be5\u5019\u9009\u7684 selection_accesses=491520\u3001deployment_accesses=409600\u3001combined_accesses=901120\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 rounded total_cost_ratio=`0.21x`\uff0c\u4ecd\u660e\u663e\u5904\u4e8e `<0.25x` \u4e3b\u6218\u573a\u5185\uff0c\u4e5f\u8fdc\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002\u5386\u53f2\u4e0a\u6700\u63a5\u8fd1\u7684\u540c family \u70b9 r187/197 \u5728\u66f4\u9ad8 `K=96`\u3001\u540c `TRUNK_RANK=16`\u3001\u540c `LATENTS_PER_EXPERT=192` \u4e0b\u5df2\u62ff\u5230 exceed\u22480.1766\uff1b\u56e0\u6b64\u8fd9\u8f6e\u662f\u5f53\u524d\u6700\u5e72\u51c0\u3001\u4e5f\u6700\u6709\u5e0c\u671b\u9a8c\u8bc1\u201c\u7528 cheap trunk \u6362 small-K exceed\u201d\u662f\u5426\u503c\u5f97\u7ee7\u7eed\u7684 matched-objective architecture probe\u3002",
+research/history/logs/agent_round_0209.stdout.log:31372:research/history/memory.json:2528:      "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(r(x))} \u03a3_{j\u2208S_e(r(x))} \u03b3_{e,j}(r(x)) b_{e,j}\uff0c\u5176\u4e2d r(x)=x-\u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i\uff1b{u_i} \u662f\u9759\u6001 shared coarse \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert residual \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + expert residual \u5b50\u5e93\u67e5\u8868 + \u9009\u62e9\u6027\u8865\u507f\u201d\u6d41\u6c34\u7ebf\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u6269\u5c55\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u7531 cost=0.19x \u4e0e exceed=0.196114 \u8fd1\u4e4e\u5bf9\u534a\u6784\u6210\uff0c\u800c r200 \u8bf4\u660e cheap trunk \u53ea\u628a exceed \u538b\u5230 0.188 \u4ecd\u4e0d\u591f\uff1b\u76f8\u6bd4\u7ee7\u7eed\u5728 incumbent \u90bb\u57df\u505a\u5c0f\u63d2\u503c\uff0c\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\uff1a\u663e\u5f0f\u201cshared \u4e3b\u5e72 + residual experts\u201d\u8fd9\u6761\u7ed3\u6784\u7ebf\u80fd\u5426\u5728 small-K \u4e3b\u6218\u573a\u91cc\u6bd4 routed-only \u66f4\u6162\u9000\u5316\u3002r183/r191 \u5df2\u5728\u540c family \u7684 K=108/96 \u4e0a\u7ed9\u51fa exceed\u22480.1715/0.1759\uff0c\u660e\u663e\u4f18\u4e8e routed-only small-K \u70b9\uff1b\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r191 \u4ec5\u628a K \u4ece 96 \u538b\u5230 64\uff0c\u6d4b\u8bd5\u8fd9\u6761 shared-coarse + expert-residual \u7ed3\u6784\u80fd\u5426\u628a total_cost_ratio \u4ece 0.25x \u62c9\u56de\u7ea6 0.21x\uff0c\u540c\u65f6\u628a exceed \u7ef4\u6301\u5728\u63a5\u8fd1 0.18 \u751a\u81f3\u66f4\u4f4e\uff0c\u4ece\u800c\u903c\u8fd1\u6216\u5237\u65b0\u5f53\u524d objective anchor\u3002",
+research/history/logs/agent_round_0209.stdout.log:31375:research/history/memory.json:2570:      "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d B^sh \u4e0e {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u4ecd\u662f\u201cshared \u5b50\u5e93\u67e5\u8868 + \u5c11\u91cf routed expert \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c + \u5fc5\u8981\u65f6\u5728\u7ebf\u8865\u507f\u201d\u7684 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u5904\u4e8e cost=0.19x\u3001exceed=0.196114 \u7684\u5e73\u8861\u5e26\uff0c\u800c recent \u4e24\u4e2a\u7ed3\u6784 probe\uff08r200 lowrank_expert_topk\u3001r202 shared_two_stage_residual_expert\uff09\u90fd\u6ca1\u628a objective \u62c9\u4e0b\u53bb\uff0c\u8bf4\u660e\u7ee7\u7eed\u5728\u8fd9\u4e9b\u7ed3\u6784\u4e0a\u52a0\u4e00\u70b9 shared/coarse \u8fd8\u4e0d\u591f\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r159 \u4ec5\u628a ACTIVE_EXPERTS \u4ece 2 \u964d\u5230 1\uff0c\u76f4\u63a5\u6d4b\u8bd5 shared+routed \u5bb6\u65cf\u6700\u5173\u952e\u3001\u4e14\u5f53\u524d target \u8fd8\u6ca1\u5728\u8fd9\u6761 low-cost lane \u4e0a\u56de\u7b54\u7684\u95ee\u9898: \u5982\u679c shared \u5206\u652f\u771f\u7684\u80fd\u5403\u6389\u5e73\u6ed1\u4e3b\u5e72\uff0c\u90a3\u4e48 routed path \u538b\u6210\u5355 expert \u540e\uff0ctotal_cost_ratio \u53ef\u4ece\u7ea6 0.21x \u8fdb\u4e00\u6b65\u964d\u5230\u7ea6 0.17x\uff0c\u540c\u65f6 exceed \u4e0d\u5e94\u50cf\u65e7\u7684\u9ad8\u5bbd\u5ea6\u5355\u8def probe \u90a3\u6837\u660e\u663e\u5931\u63a7\u3002\u82e5\u8be5\u5047\u8bbe\u6210\u7acb\uff0c\u8fd9\u4f1a\u5f62\u6210\u4e00\u4e2a\u65b0\u7684\u66f4\u9760\u5de6 objective \u6bb5\uff1b\u82e5\u4e0d\u6210\u7acb\uff0c\u5219\u53ef\u66f4\u5e72\u51c0\u5730\u5224\u5b9a\u5f53\u524d target \u4e0a shared+routed \u7684\u6536\u76ca\u4ecd\u4f9d\u8d56\u53cc expert active path\u3002",
+research/history/logs/agent_round_0209.stdout.log:31382:research/history/memory.json:2675:      "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_r \u03b2_r(x) u_r + \u03a3_{j\u2208S_{e(x-t(x))}(x-t(x))} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d t(x)=\u03a3_r \u03b2_r(x) u_r\uff1b{u_r} \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201ctrunk \u67e5\u8868/\u52a0\u6743\u548c + \u8f7b\u91cf router \u9009\u5c11\u91cf expert \u5b50\u5e93 + expert \u5b50\u5e93\u67e5\u8868/\u52a0\u6743\u548c + \u5fc5\u8981\u65f6\u9009\u62e9\u6027\u5728\u7ebf\u8865\u507f\u201d\u94fe\u8def\uff0c\u56e0\u6b64 `lowrank_expert_topk` \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\uff1b`expert_topk`\u3001`shared_routed_expert_topk` \u5c5e\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002r207 \u5df2\u7ecf\u628a `lowrank_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160 TRUNK_RANK=16` \u63a8\u5230 objective=0.396871\u3001cost=0.199219x\u3001exceed=0.197653\uff0c\u8fd9\u4e2a\u70b9\u4e0e incumbent r199 \u7684\u5dee\u8ddd 0.010757 \u91cc\uff0c\u7edd\u5927\u90e8\u5206\u6765\u81ea cost \u800c\u4e0d\u662f exceed\uff1b\u540c\u65f6 family \u5185\u5df2\u6709\u65c1\u8bc1 r175 vs r170 \u8868\u660e\u5728\u66f4\u9ad8 K\u3001\u66f4\u5bbd latent \u7684 recipe \u4e0a\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8 \u80fd\u4ee5\u66f4\u4f4e cost \u6362\u6765\u66f4\u4f4e objective\uff0c\u800c\u4e0d\u662f\u5fc5\u7136\u9020\u6210 tail error \u7206\u70b8\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r207 \u4ec5\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8\uff0c\u4fdd\u6301 `ARCHITECTURE=lowrank_expert_topk`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=160`\u3001`NUM_EXPERTS=64`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u914d\u65b9\u4e0d\u53d8\uff0c\u6d4b\u8bd5\u662f\u5426\u80fd\u7528\u66f4\u4fbf\u5b9c\u7684 trunk \u76f4\u63a5\u62b9\u6389\u5f53\u524d\u4e3b\u8981\u7531 encoder cost \u5e26\u6765\u7684 objective \u7f3a\u53e3\u3002\u57fa\u4e8e\u672c\u5730 exact cost \u590d\u6838\uff0c`TRUNK_RANK=16 -> 8` \u4f1a\u628a combined_accesses \u4ece 835584 \u964d\u5230 778240\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 actual total_cost_ratio \u4ece\u7ea6 0.199219x \u964d\u5230\u7ea6 0.185547x\uff1b\u8fd9\u610f\u5473\u7740\u53ea\u8981 exceed \u7684\u56de\u5f39\u4e0d\u8d85\u8fc7\u7ea6 0.0137\uff0c\u672c\u8f6e\u5c31\u4f1a\u4f18\u4e8e r207\uff0c\u800c\u53ea\u8981 exceed \u4e0d\u9ad8\u4e8e\u7ea6 0.2006\uff0c\u5c31\u6709\u673a\u4f1a\u76f4\u63a5\u8d8a\u8fc7 incumbent r199\u3002",
+research/history/logs/agent_round_0209.stdout.log:31447:research/history/logs/agent_round_0203.stdout.log:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ACTIVE_EXPERTS","value":"1"}],"expected_win":"explore_unknown","experiment_tier":"full","family_name":"shared_routed_expert_topk","family_stage":"probe","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 B^sh 与 {B_e} 都是静态向量库，在线侧仍是“shared 子库查表 + 少量 routed expert 子库查表 + 有限加权求和 + 必要时在线补偿”的 LUTurbo/Lottable 推理链路，因此兼容性判断为直接兼容；batch/sample-coupled family 仍属不兼容，不能驱动主线。当前 incumbent r199 的 objective=0.386114 处于 cost=0.19x、exceed=0.196114 的平衡带，而 recent 两个结构 probe（r200 lowrank_expert_topk、r202 shared_two_stage_residual_expert）都没把 objective 拉下去，说明继续在这些结构上加一点 shared/coarse 还不够。本轮唯一主假设是：相对 r159 仅把 ACTIVE_EXPERTS 从 2 降到 1，直接测试 shared+routed 家族最关键、且当前 target 还没在这条 low-cost lane 上回答的问题: 如果 shared 分支真的能吃掉平滑主干，那么 routed path 压成单 expert 后，total_cost_ratio 可从约 0.21x 进一步降到约 0.17x，同时 exceed 不应像旧的高宽度单路 probe 那样明显失控。若该假设成立，这会形成一个新的更靠左 objective 段；若不成立，则可更干净地判定当前 target 上 shared+routed 的收益仍依赖双 expert active path。","summary":"建议以 r159 为 reference，只改 ACTIVE_EXPERTS=1。这个动作不是同 family 的低信息插值，而是一次直接改变 active path 长度的结构性 probe，用来回答 shared+routed 家族能否在更短在线路径上进入更低 cost regime。","self_review":"这轮满足单变量原则：相对 r159 只改 ACTIVE_EXPERTS。虽然它不是 brand-new family，但它也不是 incumbent 邻域的线性 K 扫描；它直接改变了 active path 与容量分工关系，信息增量高于继续补 small K 或 rank。之所以优先它，而不是再切一个历史上已明显偏弱的新 family，是因为当前 0.18x-0.22x lane 里真正接近 incumbent 的兼容结构只剩 `shared_routed_expert_topk`；而把 routed path 从 2 压到 1 会把 exact total_cost 直接拉到约 0.17x，是当前最值得尽快验证的 regime-shift 假设。主要风险是旧的单路 routed 证据 r114 在更宽 per-expert 配方上出现了明显 exceed 回弹；如果这轮也重现同样模式，就应果断结束这条单路 shared+routed 线，而不是继续细扫。","needs_sanity":false,"reference_round":159,"touched_files":[],"notes_to_memory":["本地 exact cost 自检已完成：`shared_routed_expert_topk, K=64, NUM_EXPERTS=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=160` 的 selection_accesses=393216、deployment_accesses=327680、combined_accesses=720896，对当前 1024x4096 proxy 的 total_cost_ratio≈0.17x。","当前 target 上同 family 的 best matched low-cost 点是 r159：`K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160`，objective=0.395234、exceed=0.185234、cost=0.21x。","旧的单路 routed 负信号存在，但不在当前最相关 lane：r114 为 `K=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=256`，objective=0.461567、exceed=0.241567、cost=0.22x；本轮是更窄、更便宜、也更贴近当前 frontier 的 fresh validation。","本地 instantiate/forward/backward 与 cost 估算均已通过，override 不涉及新 env key，无需额外接线。"],"next_hypotheses":["如果 ACTIVE_EXPERTS=1 仍把 exceed 控在约 0.18 附近并把 objective 压到接近或优于 incumbent，则下一轮保持 family 不变，只改 LATENTS_PER_EXPERT，判断单路 routed 下的容量下限在哪里。","如果 ACTIVE_EXPERTS=1 复现旧的单路 routed 失败模式，exceed 明显跳到 0.22+，则应结束这条单路 shared+routed 分支，不再继续在该 family 上做 active-path 压缩。","如果结果介于两者之间，即 cost 明显下降但 exceed 回弹有限、objective 仍未过 incumbent，则可把这条线记录为有潜力的更低 cost regime，并转向新的 architecture slot，而不是继续在同 family 连续消耗预算。"]}
+research/history/logs/agent_round_0209.stdout.log:31506:research/history/logs/agent_round_0203.stdout.log:1121:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ACTIVE_EXPERTS","value":"1"}],"expected_win":"explore_unknown","experiment_tier":"full","family_name":"shared_routed_expert_topk","family_stage":"probe","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 B^sh 与 {B_e} 都是静态向量库，在线侧仍是“shared 子库查表 + 少量 routed expert 子库查表 + 有限加权求和 + 必要时在线补偿”的 LUTurbo/Lottable 推理链路，因此兼容性判断为直接兼容；batch/sample-coupled family 仍属不兼容，不能驱动主线。当前 incumbent r199 的 objective=0.386114 处于 cost=0.19x、exceed=0.196114 的平衡带，而 recent 两个结构 probe（r200 lowrank_expert_topk、r202 shared_two_stage_residual_expert）都没把 objective 拉下去，说明继续在这些结构上加一点 shared/coarse 还不够。本轮唯一主假设是：相对 r159 仅把 ACTIVE_EXPERTS 从 2 降到 1，直接测试 shared+routed 家族最关键、且当前 target 还没在这条 low-cost lane 上回答的问题: 如果 shared 分支真的能吃掉平滑主干，那么 routed path 压成单 expert 后，total_cost_ratio 可从约 0.21x 进一步降到约 0.17x，同时 exceed 不应像旧的高宽度单路 probe 那样明显失控。若该假设成立，这会形成一个新的更靠左 objective 段；若不成立，则可更干净地判定当前 target 上 shared+routed 的收益仍依赖双 expert active path。","summary":"建议以 r159 为 reference，只改 ACTIVE_EXPERTS=1。这个动作不是同 family 的低信息插值，而是一次直接改变 active path 长度的结构性 probe，用来回答 shared+routed 家族能否在更短在线路径上进入更低 cost regime。","self_review":"这轮满足单变量原则：相对 r159 只改 ACTIVE_EXPERTS。虽然它不是 brand-new family，但它也不是 incumbent 邻域的线性 K 扫描；它直接改变了 active path 与容量分工关系，信息增量高于继续补 small K 或 rank。之所以优先它，而不是再切一个历史上已明显偏弱的新 family，是因为当前 0.18x-0.22x lane 里真正接近 incumbent 的兼容结构只剩 `shared_routed_expert_topk`；而把 routed path 从 2 压到 1 会把 exact total_cost 直接拉到约 0.17x，是当前最值得尽快验证的 regime-shift 假设。主要风险是旧的单路 routed 证据 r114 在更宽 per-expert 配方上出现了明显 exceed 回弹；如果这轮也重现同样模式，就应果断结束这条单路 shared+routed 线，而不是继续细扫。","needs_sanity":false,"reference_round":159,"touched_files":[],"notes_to_memory":["本地 exact cost 自检已完成：`shared_routed_expert_topk, K=64, NUM_EXPERTS=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=160` 的 selection_accesses=393216、deployment_accesses=327680、combined_accesses=720896，对当前 1024x4096 proxy 的 total_cost_ratio≈0.17x。","当前 target 上同 family 的 best matched low-cost 点是 r159：`K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160`，objective=0.395234、exceed=0.185234、cost=0.21x。","旧的单路 routed 负信号存在，但不在当前最相关 lane：r114 为 `K=64, ACTIVE_EXPERTS=1, LATENTS_PER_EXPERT=256`，objective=0.461567、exceed=0.241567、cost=0.22x；本轮是更窄、更便宜、也更贴近当前 frontier 的 fresh validation。","本地 instantiate/forward/backward 与 cost 估算均已通过，override 不涉及新 env key，无需额外接线。"],"next_hypotheses":["如果 ACTIVE_EXPERTS=1 仍把 exceed 控在约 0.18 附近并把 objective 压到接近或优于 incumbent，则下一轮保持 family 不变，只改 LATENTS_PER_EXPERT，判断单路 routed 下的容量下限在哪里。","如果 ACTIVE_EXPERTS=1 复现旧的单路 routed 失败模式，exceed 明显跳到 0.22+，则应结束这条单路 shared+routed 分支，不再继续在该 family 上做 active-path 压缩。","如果结果介于两者之间，即 cost 明显下降但 exceed 回弹有限、objective 仍未过 incumbent，则可把这条线记录为有潜力的更低 cost regime，并转向新的 architecture slot，而不是继续在同 family 连续消耗预算。"]}
+research/history/logs/agent_round_0209.stdout.log:31696:research/history/round_summaries/round_0203.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_shared(x)} \u03b1_i^sh(x) b_i^sh + \u03a3_{e\u2208E(x)} \u03a3_{j\u2208S_e(x)} \u03b1_{e,j}(x) b_{e,j}\u3002\u5176\u4e2d B^sh \u4e0e {B_e} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0c\u5728\u7ebf\u4fa7\u4ecd\u662f\u201cshared \u5b50\u5e93\u67e5\u8868 + \u5c11\u91cf routed expert \u5b50\u5e93\u67e5\u8868 + \u6709\u9650\u52a0\u6743\u6c42\u548c + \u5fc5\u8981\u65f6\u5728\u7ebf\u8865\u507f\u201d\u7684 LUTurbo/Lottable \u63a8\u7406\u94fe\u8def\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u5904\u4e8e cost=0.19x\u3001exceed=0.196114 \u7684\u5e73\u8861\u5e26\uff0c\u800c recent \u4e24\u4e2a\u7ed3\u6784 probe\uff08r200 lowrank_expert_topk\u3001r202 shared_two_stage_residual_expert\uff09\u90fd\u6ca1\u628a objective \u62c9\u4e0b\u53bb\uff0c\u8bf4\u660e\u7ee7\u7eed\u5728\u8fd9\u4e9b\u7ed3\u6784\u4e0a\u52a0\u4e00\u70b9 shared/coarse \u8fd8\u4e0d\u591f\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r159 \u4ec5\u628a ACTIVE_EXPERTS \u4ece 2 \u964d\u5230 1\uff0c\u76f4\u63a5\u6d4b\u8bd5 shared+routed \u5bb6\u65cf\u6700\u5173\u952e\u3001\u4e14\u5f53\u524d target \u8fd8\u6ca1\u5728\u8fd9\u6761 low-cost lane \u4e0a\u56de\u7b54\u7684\u95ee\u9898: \u5982\u679c shared \u5206\u652f\u771f\u7684\u80fd\u5403\u6389\u5e73\u6ed1\u4e3b\u5e72\uff0c\u90a3\u4e48 routed path \u538b\u6210\u5355 expert \u540e\uff0ctotal_cost_ratio \u53ef\u4ece\u7ea6 0.21x \u8fdb\u4e00\u6b65\u964d\u5230\u7ea6 0.17x\uff0c\u540c\u65f6 exceed \u4e0d\u5e94\u50cf\u65e7\u7684\u9ad8\u5bbd\u5ea6\u5355\u8def probe \u90a3\u6837\u660e\u663e\u5931\u63a7\u3002\u82e5\u8be5\u5047\u8bbe\u6210\u7acb\uff0c\u8fd9\u4f1a\u5f62\u6210\u4e00\u4e2a\u65b0\u7684\u66f4\u9760\u5de6 objective \u6bb5\uff1b\u82e5\u4e0d\u6210\u7acb\uff0c\u5219\u53ef\u66f4\u5e72\u51c0\u5730\u5224\u5b9a\u5f53\u524d target \u4e0a shared+routed \u7684\u6536\u76ca\u4ecd\u4f9d\u8d56\u53cc expert active path\u3002",
+research/history/logs/agent_round_0209.stdout.log:32134:research/history/round_summaries/round_0201.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i + \u03a3_{e\u2208E(r(x))} \u03a3_{j\u2208S_e(r(x))} \u03b3_{e,j}(r(x)) b_{e,j}\uff0c\u5176\u4e2d r(x)=x-\u03a3_{i\u2208S_sh(x)} \u03b1_i^sh(x) u_i\uff1b{u_i} \u662f\u9759\u6001 shared coarse \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert residual \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u76f4\u63a5\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201cshared \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + expert residual \u5b50\u5e93\u67e5\u8868 + \u9009\u62e9\u6027\u8865\u507f\u201d\u6d41\u6c34\u7ebf\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u6269\u5c55\u517c\u5bb9\uff1bbatch/sample-coupled family \u4ecd\u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d\u4e3b\u7ebf\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u7531 cost=0.19x \u4e0e exceed=0.196114 \u8fd1\u4e4e\u5bf9\u534a\u6784\u6210\uff0c\u800c r200 \u8bf4\u660e cheap trunk \u53ea\u628a exceed \u538b\u5230 0.188 \u4ecd\u4e0d\u591f\uff1b\u76f8\u6bd4\u7ee7\u7eed\u5728 incumbent \u90bb\u57df\u505a\u5c0f\u63d2\u503c\uff0c\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\uff1a\u663e\u5f0f\u201cshared \u4e3b\u5e72 + residual experts\u201d\u8fd9\u6761\u7ed3\u6784\u7ebf\u80fd\u5426\u5728 small-K \u4e3b\u6218\u573a\u91cc\u6bd4 routed-only \u66f4\u6162\u9000\u5316\u3002r183/r191 \u5df2\u5728\u540c family \u7684 K=108/96 \u4e0a\u7ed9\u51fa exceed\u22480.1715/0.1759\uff0c\u660e\u663e\u4f18\u4e8e routed-only small-K \u70b9\uff1b\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r191 \u4ec5\u628a K \u4ece 96 \u538b\u5230 64\uff0c\u6d4b\u8bd5\u8fd9\u6761 shared-coarse + expert-residual \u7ed3\u6784\u80fd\u5426\u628a total_cost_ratio \u4ece 0.25x \u62c9\u56de\u7ea6 0.21x\uff0c\u540c\u65f6\u628a exceed \u7ef4\u6301\u5728\u63a5\u8fd1 0.18 \u751a\u81f3\u66f4\u4f4e\uff0c\u4ece\u800c\u903c\u8fd1\u6216\u5237\u65b0\u5f53\u524d objective anchor\u3002",
+research/history/logs/agent_round_0209.stdout.log:32423:research/history/round_summaries/round_0208.json:19:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4fdd\u6301\u4e3a x_hat = \u03a3_r \u03b2_r(x) u_r + \u03a3_{j\u2208S_{e(x-t(x))}(x-t(x))} \u03b1_{e,j}(x) b_{e,j}\uff0c\u5176\u4e2d t(x)=\u03a3_r \u03b2_r(x) u_r\uff1b{u_r} \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c{b_{e,j}} \u662f\u9759\u6001 expert \u5b50\u5e93\u3002\u5728\u7ebf\u4fa7\u4ecd\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201ctrunk \u67e5\u8868/\u52a0\u6743\u548c + \u8f7b\u91cf router \u9009\u5c11\u91cf expert \u5b50\u5e93 + expert \u5b50\u5e93\u67e5\u8868/\u52a0\u6743\u548c + \u5fc5\u8981\u65f6\u9009\u62e9\u6027\u5728\u7ebf\u8865\u507f\u201d\u94fe\u8def\uff0c\u56e0\u6b64 `lowrank_expert_topk` \u5224\u5b9a\u4e3a\u6269\u5c55\u517c\u5bb9\uff1b`expert_topk`\u3001`shared_routed_expert_topk` \u5c5e\u76f4\u63a5\u517c\u5bb9\uff1b`batch_topk`\u3001`adaptive_budget_topk` \u7b49 batch/sample-coupled family \u5c5e\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u9a71\u52a8\u5f53\u524d objective leaderboard\u3002r207 \u5df2\u7ecf\u628a `lowrank_expert_topk K=64 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160 TRUNK_RANK=16` \u63a8\u5230 objective=0.396871\u3001cost=0.199219x\u3001exceed=0.197653\uff0c\u8fd9\u4e2a\u70b9\u4e0e incumbent r199 \u7684\u5dee\u8ddd 0.010757 \u91cc\uff0c\u7edd\u5927\u90e8\u5206\u6765\u81ea cost \u800c\u4e0d\u662f exceed\uff1b\u540c\u65f6 family \u5185\u5df2\u6709\u65c1\u8bc1 r175 vs r170 \u8868\u660e\u5728\u66f4\u9ad8 K\u3001\u66f4\u5bbd latent \u7684 recipe \u4e0a\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8 \u80fd\u4ee5\u66f4\u4f4e cost \u6362\u6765\u66f4\u4f4e objective\uff0c\u800c\u4e0d\u662f\u5fc5\u7136\u9020\u6210 tail error \u7206\u70b8\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u76f8\u5bf9 r207 \u4ec5\u628a `TRUNK_RANK` \u4ece 16 \u538b\u5230 8\uff0c\u4fdd\u6301 `ARCHITECTURE=lowrank_expert_topk`\u3001`K=64`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=160`\u3001`NUM_EXPERTS=64`\u3001`FACTORIZED_HIDDEN_DIM=256`\u3001`EXPANSION_FACTOR=1`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u914d\u65b9\u4e0d\u53d8\uff0c\u6d4b\u8bd5\u662f\u5426\u80fd\u7528\u66f4\u4fbf\u5b9c\u7684 trunk \u76f4\u63a5\u62b9\u6389\u5f53\u524d\u4e3b\u8981\u7531 encoder cost \u5e26\u6765\u7684 objective \u7f3a\u53e3\u3002\u57fa\u4e8e\u672c\u5730 exact cost \u590d\u6838\uff0c`TRUNK_RANK=16 -> 8` \u4f1a\u628a combined_accesses \u4ece 835584 \u964d\u5230 778240\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 actual total_cost_ratio \u4ece\u7ea6 0.199219x \u964d\u5230\u7ea6 0.185547x\uff1b\u8fd9\u610f\u5473\u7740\u53ea\u8981 exceed \u7684\u56de\u5f39\u4e0d\u8d85\u8fc7\u7ea6 0.0137\uff0c\u672c\u8f6e\u5c31\u4f1a\u4f18\u4e8e r207\uff0c\u800c\u53ea\u8981 exceed \u4e0d\u9ad8\u4e8e\u7ea6 0.2006\uff0c\u5c31\u6709\u673a\u4f1a\u76f4\u63a5\u8d8a\u8fc7 incumbent r199\u3002",
+research/history/logs/agent_round_0209.stdout.log:32519:research/history/round_summaries/round_0200.json:19:    "hypothesis": "\u5019\u9009 family \u8bbe\u4e3a `lowrank_expert_topk`\u3002\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u4e3a `x_hat = \u03a3_r \u03b2_r(x) u_r + \u03a3_{e\u2208E(x)} \u03a3_{i\u2208S_e(x)} \u03b1_{e,i}(x) b_{e,i}`\uff1a\u5176\u4e2d `{u_r}` \u662f\u9759\u6001 low-rank trunk \u5411\u91cf\u5e93\uff0c`{b_{e,i}}` \u662f\u9759\u6001 expert \u5b50\u5e93\u539f\u5b50\uff0c\u5728\u7ebf\u4fa7\u53ea\u9700\u8ba1\u7b97\u5c11\u91cf trunk \u7cfb\u6570\u3001\u8f7b\u91cf router \u9009\u62e9\u5c11\u91cf expert \u5b50\u5e93\u3001\u518d\u505a\u5b50\u5e93\u67e5\u8868\u4e0e\u6709\u9650\u52a0\u6743\u548c\uff0c\u56e0\u6b64\u53ef\u5bfc\u51fa\u5230 LUTurbo/Lottable \u7684\u201ctrunk \u67e5\u8868/\u52a0\u6743\u548c + \u5b50\u5e93\u9009\u62e9 + \u67e5\u8868 + \u52a0\u6743\u6c42\u548c + \u9009\u62e9\u6027\u8865\u507f\u201d\u6d41\u6c34\u7ebf\uff0c\u517c\u5bb9\u6027\u5224\u65ad\u4e3a `\u6269\u5c55\u517c\u5bb9`\u3002\u5f53\u524d incumbent r199 \u7684 objective=0.386114 \u7531 cost=0.19x \u4e0e exceed=0.196114 \u8fd1\u4e4e\u5bf9\u534a\u6784\u6210\uff0c\u5df2\u4e0d\u9002\u5408\u7ee7\u7eed\u53ea\u505a\u540c family \u5c0f\u63d2\u503c\uff1b\u66f4\u6709\u4fe1\u606f\u91cf\u7684\u95ee\u9898\u662f\uff1a\u5728\u540c\u6837 small-K=`64` \u7684 very-short routed path \u4e0b\uff0c\u589e\u52a0\u4e00\u4e2a\u4fbf\u5b9c\u7684 low-rank trunk\uff0c\u80fd\u5426\u7528\u7ea6 +0.02x \u7684\u603b\u6210\u672c\u6362\u56de\u8db3\u591f\u591a\u7684 exceed \u964d\u5e45\u3002\u76f8\u5bf9 r199 \u4ec5\u628a `ARCHITECTURE` \u4ece `expert_topk` \u5207\u5230 `lowrank_expert_topk`\uff0c\u4fdd\u6301 `K=64`\u3001`EXPANSION_FACTOR=1`\u3001`TRUNK_RANK=16`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`NUM_EXPERTS=64`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59\u8bad\u7ec3\u914d\u65b9\u4e0d\u53d8\uff0c\u76f4\u63a5\u56de\u7b54\u201clow-rank trunk \u662f\u5426\u80fd\u8ba9\u66f4\u5c0f K \u4e0b\u7684 exceed_alpha_0.50 \u660e\u663e\u4f4e\u4e8e routed-only incumbent\u201d\u3002\u672c\u5730\u6210\u672c\u81ea\u68c0\u663e\u793a\u8be5\u5019\u9009\u7684 selection_accesses=491520\u3001deployment_accesses=409600\u3001combined_accesses=901120\uff0c\u5bf9\u5f53\u524d 1024x4096 proxy \u7684 rounded total_cost_ratio=`0.21x`\uff0c\u4ecd\u660e\u663e\u5904\u4e8e `<0.25x` \u4e3b\u6218\u573a\u5185\uff0c\u4e5f\u8fdc\u4f4e\u4e8e 1.5\u00d7h\u00d7n \u786c\u9884\u7b97\u3002\u5386\u53f2\u4e0a\u6700\u63a5\u8fd1\u7684\u540c family \u70b9 r187/197 \u5728\u66f4\u9ad8 `K=96`\u3001\u540c `TRUNK_RANK=16`\u3001\u540c `LATENTS_PER_EXPERT=192` \u4e0b\u5df2\u62ff\u5230 exceed\u22480.1766\uff1b\u56e0\u6b64\u8fd9\u8f6e\u662f\u5f53\u524d\u6700\u5e72\u51c0\u3001\u4e5f\u6700\u6709\u5e0c\u671b\u9a8c\u8bc1\u201c\u7528 cheap trunk \u6362 small-K exceed\u201d\u662f\u5426\u503c\u5f97\u7ee7\u7eed\u7684 matched-objective architecture probe\u3002",
+research/history/logs/agent_round_0209.stdout.log:32885:research/history/logs/agent_round_0198.stdout.log:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"80"}],"expected_win":"lower_objective","family_name":"expert_topk","family_stage":"mainline","hypothesis":"候选 family 保持 `expert_topk`。最终重构公式仍为 `x_hat = Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}`，其中 `{b_{e,i}}` 是各 expert 的静态子库原子；在线侧只做轻量 router 选择少量静态 expert 子库，再在所选子库内做 local top-k 查表与有限加权和，因此可直接导出到 LUTurbo/Lottable 的“子库选择 + 查表 + 加权求和 + 选择性补偿”链路，兼容性判断为 `直接兼容`。当前 incumbent r196 的 objective 由 cost=0.20x 与 exceed=0.1845 近乎对半构成，但最近两次更复杂结构对照并没有买到足够便宜的 exceed 改善：r197 `lowrank_expert_topk` 用 +0.03 cost 只换回 -0.0079 exceed，r191 `shared_two_stage_residual_expert` 也只是 +0.03 cost 换 -0.0086 exceed，说明当前前沿更像 cost 受限而不是继续加 trunk/shared 分支就会赢。相对 r196 仅把 `K` 从 96 降到 80，保持 `ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`NUM_EXPERTS=64` 与其余训练配方不变；本地成本自检显示 deployment 访问从 393216 降到 327680，combined_accesses 从 851968 降到 786432，exact total_cost_ratio 从 0.2031 降到 0.1875。只要 `exceed_alpha_0.50` 的上升小于 0.0156，这轮 objective 就会优于 r196；这正好回答当前更关键的问题：在 active-path 已扩到 2 experts 之后，当前最佳兼容 family 是否还存在可兑现的 small-K slack。","needs_sanity":false,"next_hypotheses":["如果 `K=80` 仍能把 exceed 控在约 0.20 以内并刷新 objective，下轮继续留在 `expert_topk` 主线，只再改一个更小的 deployment 旋钮，确认 small-K knee。","如果 `K=80` 的 exceed 明显跳升、吃掉这 0.0156 的 cost 收益，则可更有把握地判定 r196 已接近该 family 的 deployment knee，后续应停止在 `expert_topk` 上线性降 K，转回新的结构槽位。"],"notes_to_memory":["r196 当前最优点是 `expert_topk K=96 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192`，objective=0.3845 由 cost 0.20x 与 exceed 0.1845 近乎对半构成，已不是纯 exceed 主导。","最近的结构扩展 `lowrank_expert_topk` 与 `shared_two_stage_residual_expert` 都只拿到约 0.008 的 exceed 改善，却各自多付约 0.03 total_cost_ratio，说明在当前 0.20x-0.25x 带里，额外 trunk/shared 路径还没有证明自己值回票价。","本地成本自检：`expert_topk` 在 `ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192` 下改 `K=80` 后 selection 仍是 458752 accesses，deployment 变为 327680，combined 786432，对应 exact combined_ratio 0.1875，远低于 1.5×h×n 硬预算。"],"reference_round":196,"self_review":"这轮严格满足单变量原则：相对 r196 只改 `K`。没有新增 tunable 参数，也没有代码改动，因此不需要触碰 `sparsify/` 之外路径。之所以选 `K=80` 而不是更保守的 `88`，是因为 `88` 只省 32768 次访问，objective 增益窗口仅 0.0078，信息量偏低；而 `64` 对当前未验证的 active2 recipe 来说跨步过大。主要风险是 exceed 对 `K` 很敏感，导致 objective 反而回退；但这会直接证明当前 incumbent 已接近 small-K deployment knee。","summary":"建议以 r196 为 reference，只改 `K=80`。这不是继续围绕 FVU 做微调，而是一次针对当前 cost 略主导前沿的 deployment 压缩 probe：用最强兼容 incumbent 直接测试 active2+192 recipe 是否还能在更小 K 下保持 exceed，从而把 objective 再往下推。","touched_files":[]}
+research/history/logs/agent_round_0209.stdout.log:32920:research/history/logs/agent_round_0198.stdout.log:657:research/AutoResearch/loop.py:302:        f"objective={result.objective_score} cost={result.total_cost_ratio} "
+research/history/logs/agent_round_0209.stdout.log:32954:research/history/logs/agent_round_0198.stdout.log:1802:/bin/bash -lc 'for r in 191 192 193 183 182 184 185 189 177; do echo ROUND=$r; rg -n "objective=|total_cost_ratio|exceed_alpha_0_50|val_fvu|decision=|ARCHITECTURE=|config mismatch|sanity" research/history/logs/round$(printf '"'%04d' "'$r)_*.log -S; done' in /root/sparsify-ascend
+research/history/logs/agent_round_0209.stdout.log:32985:research/history/logs/agent_round_0198.stdout.log:5383:{"change_type":"param_only","command":"run","env_overrides":[{"key":"K","value":"80"}],"expected_win":"lower_objective","family_name":"expert_topk","family_stage":"mainline","hypothesis":"候选 family 保持 `expert_topk`。最终重构公式仍为 `x_hat = Σ_{e∈E(x)} Σ_{i∈S_e(x)} α_{e,i}(x) b_{e,i}`，其中 `{b_{e,i}}` 是各 expert 的静态子库原子；在线侧只做轻量 router 选择少量静态 expert 子库，再在所选子库内做 local top-k 查表与有限加权和，因此可直接导出到 LUTurbo/Lottable 的“子库选择 + 查表 + 加权求和 + 选择性补偿”链路，兼容性判断为 `直接兼容`。当前 incumbent r196 的 objective 由 cost=0.20x 与 exceed=0.1845 近乎对半构成，但最近两次更复杂结构对照并没有买到足够便宜的 exceed 改善：r197 `lowrank_expert_topk` 用 +0.03 cost 只换回 -0.0079 exceed，r191 `shared_two_stage_residual_expert` 也只是 +0.03 cost 换 -0.0086 exceed，说明当前前沿更像 cost 受限而不是继续加 trunk/shared 分支就会赢。相对 r196 仅把 `K` 从 96 降到 80，保持 `ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192`、`NUM_EXPERTS=64` 与其余训练配方不变；本地成本自检显示 deployment 访问从 393216 降到 327680，combined_accesses 从 851968 降到 786432，exact total_cost_ratio 从 0.2031 降到 0.1875。只要 `exceed_alpha_0.50` 的上升小于 0.0156，这轮 objective 就会优于 r196；这正好回答当前更关键的问题：在 active-path 已扩到 2 experts 之后，当前最佳兼容 family 是否还存在可兑现的 small-K slack。","needs_sanity":false,"next_hypotheses":["如果 `K=80` 仍能把 exceed 控在约 0.20 以内并刷新 objective，下轮继续留在 `expert_topk` 主线，只再改一个更小的 deployment 旋钮，确认 small-K knee。","如果 `K=80` 的 exceed 明显跳升、吃掉这 0.0156 的 cost 收益，则可更有把握地判定 r196 已接近该 family 的 deployment knee，后续应停止在 `expert_topk` 上线性降 K，转回新的结构槽位。"],"notes_to_memory":["r196 当前最优点是 `expert_topk K=96 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192`，objective=0.3845 由 cost 0.20x 与 exceed 0.1845 近乎对半构成，已不是纯 exceed 主导。","最近的结构扩展 `lowrank_expert_topk` 与 `shared_two_stage_residual_expert` 都只拿到约 0.008 的 exceed 改善，却各自多付约 0.03 total_cost_ratio，说明在当前 0.20x-0.25x 带里，额外 trunk/shared 路径还没有证明自己值回票价。","本地成本自检：`expert_topk` 在 `ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=192` 下改 `K=80` 后 selection 仍是 458752 accesses，deployment 变为 327680，combined 786432，对应 exact combined_ratio 0.1875，远低于 1.5×h×n 硬预算。"],"reference_round":196,"self_review":"这轮严格满足单变量原则：相对 r196 只改 `K`。没有新增 tunable 参数，也没有代码改动，因此不需要触碰 `sparsify/` 之外路径。之所以选 `K=80` 而不是更保守的 `88`，是因为 `88` 只省 32768 次访问，objective 增益窗口仅 0.0078，信息量偏低；而 `64` 对当前未验证的 active2 recipe 来说跨步过大。主要风险是 exceed 对 `K` 很敏感，导致 objective 反而回退；但这会直接证明当前 incumbent 已接近 small-K deployment knee。","summary":"建议以 r196 为 reference，只改 `K=80`。这不是继续围绕 FVU 做微调，而是一次针对当前 cost 略主导前沿的 deployment 压缩 probe：用最强兼容 incumbent 直接测试 active2+192 recipe 是否还能在更小 K 下保持 exceed，从而把 objective 再往下推。","touched_files":[]}
+research/history/logs/agent_round_0209.stdout.log:33036:research/history/logs/agent_round_0206.stdout.log:1:{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_sh(x)} α_i^sh(x) u_i + Σ_{e∈E(r(x))} Σ_{j∈S_e(r(x))} γ_{e,j}(r(x)) b_{e,j}，其中 r(x)=x-Σ_{i∈S_sh(x)} α_i^sh(x) u_i；{u_i} 是静态 shared/coarse 向量库，{b_{e,j}} 是静态 routed residual expert 子库。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared/coarse 查表 + routed residual expert 子库查表 + 有限加权和 + 必要时选择性在线补偿”链路，因此 `shared_two_stage_residual_expert` 属扩展兼容；`expert_topk`、`shared_routed_expert_topk` 属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能驱动当前 objective leaderboard。r205 已经在 exact same cost=0.210938x 下证明把 `STAGE1_RATIO` 从 0.25 压到 0.125 会让 objective 从 0.398672 恶化到 0.403221、exceed 从 0.187735 回弹到 0.192283，说明当前这条 two-stage 线并不是 coarse 过重、cleanup 预算不足，而更像 coarse 主干仍偏弱。本轮唯一主假设是：相对 r201 仅把 `STAGE1_RATIO` 从 0.25 提到 0.375，保持 `ARCHITECTURE=shared_two_stage_residual_expert`、`K=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`NUM_EXPERTS=64`、`TRUNK_RANK=16`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余配方不变，测试在 exact total_cost 不变的前提下，给 shared/coarse 主干更多 K 预算是否能比 r201 更有效地降低 exceed_alpha_0.50，并把 objective 进一步推近 `shared_routed_expert_topk` 的 0.3952 乃至 incumbent r199 的 0.3861。","summary":"建议以 r201 为 reference，只改 `STAGE1_RATIO=0.375`。这轮继续留在 `shared_two_stage_residual_expert`，不是低信息细扫，而是对 r205 的反向 exact-cost 验证：既然更多 cleanup 预算在同成本下已被证伪，当前最有价值的未决问题就是更强 coarse 主干是否才是这条 family 真正缺的那一块。","change_type":"param_only","expected_win":"lower_objective","family_name":"shared_two_stage_residual_expert","family_stage":"prototype","self_review":"这轮严格满足单变量原则：相对 r201 只改 `STAGE1_RATIO`。之所以允许继续留在同一 family，而不是立刻切到全新结构槽位，是因为这里仍有一个高价值且尚未验证完的结构假设：`shared_two_stage_residual_expert` 是当前 target 上最接近 incumbent 的新 family，且 `STAGE1_RATIO` 是极少数可以在 exact cost 不变条件下直接回答“主干 vs cleanup 谁才是瓶颈”的旋钮。r205 已经明确否定了“更多 residual cleanup 预算会更好”这一方向，因此本轮反向测 `0.375` 不是线性插值，而是对该 family 核心分工假设的闭环验证。主要风险是更重 coarse 会让 residual cleanup 不足，导致 exceed 不降反升；但如果如此，就能更明确地结束这条 family 在 `K=64` lane 的预算分工问题，不再继续消耗轮次。","needs_sanity":false,"env_overrides":[{"key":"STAGE1_RATIO","value":"0.375"}],"touched_files":[],"notes_to_memory":["r205 已给出明确负信号：`shared_two_stage_residual_expert K=64 A=2 L=160 STAGE1_RATIO=0.125` 在 exact same cost=0.210938x 下把 objective 从 r201 的 0.398672 恶化到 0.403221，exceed 从 0.187735 回弹到 0.192283，说明把更多 K 预算让给 residual cleanup 并不成立。","当前 `shared_two_stage_residual_expert` 仍是最接近 incumbent 的新结构 family：r201 objective=0.398672 cost=0.210938x exceed=0.187735；它比 r200 `lowrank_expert_topk` 的 0.402860 和 r205 的 0.403221 都更好。","本地 exact cost 复核已通过：`shared_two_stage_residual_expert K=64 A=2 L=160` 在 `STAGE1_RATIO=0.125/0.25/0.375/0.5` 下 combined_accesses 都固定为 884736，对当前 1024x4096 proxy 的 actual total_cost_ratio 固定为 0.210938x。","override allowlist 本地校验已通过：`validate_env_overrides([{key: STAGE1_RATIO, value: 0.375}], fallback_architecture='shared_two_stage_residual_expert')` 返回空列表。"],"next_hypotheses":["如果 `STAGE1_RATIO=0.375` 在 exact same cost 下显著优于 r201，并把 objective 压到接近或优于 `shared_routed_expert_topk` 的 0.3952，则下一轮保持该 family 不变，只改 `K=80`，测试更强 coarse 主干配更高 deploy budget 是否能进一步换回更低 exceed。","如果 `STAGE1_RATIO=0.375` 与 r201 基本持平或更差，则说明 `shared_two_stage_residual_expert` 在当前 `K=64` lane 的主干/cleanup 分工问题已经基本摸清；后续应停止在该 family 上继续细扫，转回新的 architecture slot。","如果 `STAGE1_RATIO=0.375` 只带来小幅改善但仍明显落后于 incumbent，则记录为 two-stage 线需要更强 coarse 而非更多 cleanup，但它在当前主战场仍不足以形成 regime shift；后续除非出现新的高价值结构假设，否则不应继续主导预算。"],"reference_round":201}
+research/history/logs/agent_round_0209.stdout.log:33059:research/history/logs/agent_round_0206.stdout.log:589:{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_sh(x)} α_i^sh(x) u_i + Σ_{e∈E(r(x))} Σ_{j∈S_e(r(x))} γ_{e,j}(r(x)) b_{e,j}，其中 r(x)=x-Σ_{i∈S_sh(x)} α_i^sh(x) u_i；{u_i} 是静态 shared/coarse 向量库，{b_{e,j}} 是静态 routed residual expert 子库。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared/coarse 查表 + routed residual expert 子库查表 + 有限加权和 + 必要时选择性在线补偿”链路，因此 `shared_two_stage_residual_expert` 属扩展兼容；`expert_topk`、`shared_routed_expert_topk` 属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能驱动当前 objective leaderboard。r205 已经在 exact same cost=0.210938x 下证明把 `STAGE1_RATIO` 从 0.25 压到 0.125 会让 objective 从 0.398672 恶化到 0.403221、exceed 从 0.187735 回弹到 0.192283，说明当前这条 two-stage 线并不是 coarse 过重、cleanup 预算不足，而更像 coarse 主干仍偏弱。本轮唯一主假设是：相对 r201 仅把 `STAGE1_RATIO` 从 0.25 提到 0.375，保持 `ARCHITECTURE=shared_two_stage_residual_expert`、`K=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`NUM_EXPERTS=64`、`TRUNK_RANK=16`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余配方不变，测试在 exact total_cost 不变的前提下，给 shared/coarse 主干更多 K 预算是否能比 r201 更有效地降低 exceed_alpha_0.50，并把 objective 进一步推近 `shared_routed_expert_topk` 的 0.3952 乃至 incumbent r199 的 0.3861。","summary":"建议以 r201 为 reference，只改 `STAGE1_RATIO=0.375`。这轮继续留在 `shared_two_stage_residual_expert`，不是低信息细扫，而是对 r205 的反向 exact-cost 验证：既然更多 cleanup 预算在同成本下已被证伪，当前最有价值的未决问题就是更强 coarse 主干是否才是这条 family 真正缺的那一块。","change_type":"param_only","expected_win":"lower_objective","family_name":"shared_two_stage_residual_expert","family_stage":"prototype","self_review":"这轮严格满足单变量原则：相对 r201 只改 `STAGE1_RATIO`。之所以允许继续留在同一 family，而不是立刻切到全新结构槽位，是因为这里仍有一个高价值且尚未验证完的结构假设：`shared_two_stage_residual_expert` 是当前 target 上最接近 incumbent 的新 family，且 `STAGE1_RATIO` 是极少数可以在 exact cost 不变条件下直接回答“主干 vs cleanup 谁才是瓶颈”的旋钮。r205 已经明确否定了“更多 residual cleanup 预算会更好”这一方向，因此本轮反向测 `0.375` 不是线性插值，而是对该 family 核心分工假设的闭环验证。主要风险是更重 coarse 会让 residual cleanup 不足，导致 exceed 不降反升；但如果如此，就能更明确地结束这条 family 在 `K=64` lane 的预算分工问题，不再继续消耗轮次。","needs_sanity":false,"env_overrides":[{"key":"STAGE1_RATIO","value":"0.375"}],"touched_files":[],"notes_to_memory":["r205 已给出明确负信号：`shared_two_stage_residual_expert K=64 A=2 L=160 STAGE1_RATIO=0.125` 在 exact same cost=0.210938x 下把 objective 从 r201 的 0.398672 恶化到 0.403221，exceed 从 0.187735 回弹到 0.192283，说明把更多 K 预算让给 residual cleanup 并不成立。","当前 `shared_two_stage_residual_expert` 仍是最接近 incumbent 的新结构 family：r201 objective=0.398672 cost=0.210938x exceed=0.187735；它比 r200 `lowrank_expert_topk` 的 0.402860 和 r205 的 0.403221 都更好。","本地 exact cost 复核已通过：`shared_two_stage_residual_expert K=64 A=2 L=160` 在 `STAGE1_RATIO=0.125/0.25/0.375/0.5` 下 combined_accesses 都固定为 884736，对当前 1024x4096 proxy 的 actual total_cost_ratio 固定为 0.210938x。","override allowlist 本地校验已通过：`validate_env_overrides([{key: STAGE1_RATIO, value: 0.375}], fallback_architecture='shared_two_stage_residual_expert')` 返回空列表。"],"next_hypotheses":["如果 `STAGE1_RATIO=0.375` 在 exact same cost 下显著优于 r201，并把 objective 压到接近或优于 `shared_routed_expert_topk` 的 0.3952，则下一轮保持该 family 不变，只改 `K=80`，测试更强 coarse 主干配更高 deploy budget 是否能进一步换回更低 exceed。","如果 `STAGE1_RATIO=0.375` 与 r201 基本持平或更差，则说明 `shared_two_stage_residual_expert` 在当前 `K=64` lane 的主干/cleanup 分工问题已经基本摸清；后续应停止在该 family 上继续细扫，转回新的 architecture slot。","如果 `STAGE1_RATIO=0.375` 只带来小幅改善但仍明显落后于 incumbent，则记录为 two-stage 线需要更强 coarse 而非更多 cleanup，但它在当前主战场仍不足以形成 regime shift；后续除非出现新的高价值结构假设，否则不应继续主导预算。"],"reference_round":201}
+research/history/logs/agent_round_0209.stdout.log:33081:research/history/logs/agent_round_0207.stdout.log:1:{"command":"run","hypothesis":"最终重构公式设为 x_hat = Σ_r β_r(x) u_r + Σ_{j∈S_{e(x-t(x))}(x-t(x))} α_{e,j}(x) b_{e,j}，其中 t(x)=Σ_r β_r(x) u_r；{u_r} 是静态 low-rank trunk 向量库，{b_{e,j}} 是静态 expert 子库。在线侧可导出到 LUTurbo/Lottable 的“trunk 查表/加权和 + 轻量 router 选少量 expert 子库 + expert 子库查表/加权和 + 必要时选择性在线补偿”链路，因此 `lowrank_expert_topk` 判定为扩展兼容；`expert_topk`、`shared_routed_expert_topk` 属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能驱动当前 objective leaderboard。r205-r206 已把 `shared_two_stage_residual_expert` 在 `K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160` 这条 lane 的 coarse/cleanup 分工基本摸清：`STAGE1_RATIO=0.375` 虽把 objective 从 0.398672 压到 0.396941，但仍未越过 r159 的 0.395234，更没有接近 incumbent 0.386114，说明继续在这条 family 上做 budget split 细扫的信息价值已经明显下降。本轮唯一主假设是：相对 r201 仅把 `ARCHITECTURE` 从 `shared_two_stage_residual_expert` 切到 `lowrank_expert_topk`，保持 `K=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`TRUNK_RANK=16`、`NUM_EXPERTS=64`、`FACTORIZED_HIDDEN_DIM=256`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余配方不变，直接回答“shared coarse + routed residual cleanup”相比“low-rank trunk + expert head”到底是不是当前 0.20x 左右 lane 的正确容量分工。基于本地 exact cost 复核，该候选的 combined_accesses=835584、actual total_cost_ratio≈0.199219x，明显低于 r201/r206 的 0.210938x；如果 exceed 仍能维持在该 family 已知的约 0.188 附近，则 objective 将有机会压到 0.39 附近并挑战当前次优兼容点。","summary":"建议以 r201 为 reference，只改 `ARCHITECTURE=lowrank_expert_topk`。这是一次回到主战场的 matched-objective architecture probe：在同样的 `K=64, A=2, L=160` recipe 下，用更便宜的 low-rank trunk + expert head 去对照刚刚完成分工验证的 two-stage coarse+cleanup 结构，判断当前最该保留的是 trunk+expert 还是 coarse+cleanup。","change_type":"param_only","expected_win":"lower_objective","family_name":"lowrank_expert_topk","family_stage":"prototype","self_review":"这轮严格满足单变量原则：相对 r201 只改 `ARCHITECTURE`。之所以不继续留在 `shared_two_stage_residual_expert` 上补 `STAGE1_RATIO=0.5` 或再扫别的局部轴，是因为 r201/r205/r206 已经形成足够清楚的闭环：更多 cleanup 预算更差，更强 coarse 预算虽更好但也只把 objective 压到 0.396941，仍未进入新的 regime。相比之下，`lowrank_expert_topk K=64 A=2 L=160 TR=16` 仍是当前最值得补的一条 matched lane：它有更低 exact cost（约 0.20x），并且 family 的已有 current-target 信号没有在这个 exact recipe 上被直接验证。相比另一条可选的新槽位 `shared_lowrank_two_stage_residual_expert`，它更贴近当前 0.18x-0.22x 主战场；后者本地 exact cost 已在约 0.23x，进入这轮前就已经更贵。主要风险是 `lowrank_expert_topk` 的 exceed 也维持在 0.188 左右，从而只能做到接近但难以越过 incumbent；但即使如此，这轮也能更明确地回答当前 low-cost 主战场里“trunk+expert vs coarse+cleanup”谁更值得继续，而不是继续在同一 family 内部消耗预算。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"touched_files":[],"notes_to_memory":["r206 已基本完成 `shared_two_stage_residual_expert K=64 A=2 L=160` 的 budget-split 归因：`STAGE1_RATIO=0.375` 给出该 family 在这条 lane 上的当前最好 objective=0.396941、cost=0.210938x、exceed=0.186004，但仍未越过 r159 的 0.395234。","本地 exact cost 复核已通过：`lowrank_expert_topk K=64 A=2 L=160 TRUNK_RANK=16` 的 selection_accesses=425984、deployment_accesses=409600、combined_accesses=835584，对当前 1024x4096 proxy 的 actual total_cost_ratio≈0.199219x；这比 r201/r206 的 0.210938x 更低，且仍处在主战场。","当前 target 上该 family 的最接近参照是 r171 与 r200：r171 `K=96 A=2 L=160` 给出 objective=0.428458、cost=0.24x、exceed=0.188458；r200 `K=64 A=2 L=192` 给出 objective=0.402860、cost=0.214844x、exceed=0.188017。当前仍缺少 `K=64 A=2 L=160` 这条更便宜 matched recipe 的 fresh validation。","override allowlist 本地校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: lowrank_expert_topk}], fallback_architecture='shared_two_stage_residual_expert')` 返回空列表。"],"next_hypotheses":["如果该点在约 0.20x 下把 objective 压到接近或优于 r159，说明当前主战场里 `lowrank_expert_topk` 比 `shared_two_stage_residual_expert` 更值得继续；下一轮保持 family 不变，只改 `TRUNK_RANK=8`，测试能否继续下压 encoder cost 而不明显放大 exceed。","如果该点只得到与 r206 接近的 objective，说明当前 low-cost 主战场里 `trunk+expert` 与 `coarse+cleanup` 两条线都没有打开明显新 regime；后续应停止在这两条 family 上继续细扫，切回新的 architecture slot。","如果该点明显差于 r200，说明 `LATENTS_PER_EXPERT=160` 对 `lowrank_expert_topk` 来说已经低于有效容量下限；这条 family 后续若要继续，只应围绕更高 latent width 的明确 matched 假设推进，而不应在当前 lane 再做温和插值。"],"reference_round":201}
+research/history/logs/agent_round_0209.stdout.log:33111:research/history/logs/agent_round_0207.stdout.log:1137:{"command":"run","hypothesis":"最终重构公式设为 x_hat = Σ_r β_r(x) u_r + Σ_{j∈S_{e(x-t(x))}(x-t(x))} α_{e,j}(x) b_{e,j}，其中 t(x)=Σ_r β_r(x) u_r；{u_r} 是静态 low-rank trunk 向量库，{b_{e,j}} 是静态 expert 子库。在线侧可导出到 LUTurbo/Lottable 的“trunk 查表/加权和 + 轻量 router 选少量 expert 子库 + expert 子库查表/加权和 + 必要时选择性在线补偿”链路，因此 `lowrank_expert_topk` 判定为扩展兼容；`expert_topk`、`shared_routed_expert_topk` 属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能驱动当前 objective leaderboard。r205-r206 已把 `shared_two_stage_residual_expert` 在 `K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160` 这条 lane 的 coarse/cleanup 分工基本摸清：`STAGE1_RATIO=0.375` 虽把 objective 从 0.398672 压到 0.396941，但仍未越过 r159 的 0.395234，更没有接近 incumbent 0.386114，说明继续在这条 family 上做 budget split 细扫的信息价值已经明显下降。本轮唯一主假设是：相对 r201 仅把 `ARCHITECTURE` 从 `shared_two_stage_residual_expert` 切到 `lowrank_expert_topk`，保持 `K=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`TRUNK_RANK=16`、`NUM_EXPERTS=64`、`FACTORIZED_HIDDEN_DIM=256`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余配方不变，直接回答“shared coarse + routed residual cleanup”相比“low-rank trunk + expert head”到底是不是当前 0.20x 左右 lane 的正确容量分工。基于本地 exact cost 复核，该候选的 combined_accesses=835584、actual total_cost_ratio≈0.199219x，明显低于 r201/r206 的 0.210938x；如果 exceed 仍能维持在该 family 已知的约 0.188 附近，则 objective 将有机会压到 0.39 附近并挑战当前次优兼容点。","summary":"建议以 r201 为 reference，只改 `ARCHITECTURE=lowrank_expert_topk`。这是一次回到主战场的 matched-objective architecture probe：在同样的 `K=64, A=2, L=160` recipe 下，用更便宜的 low-rank trunk + expert head 去对照刚刚完成分工验证的 two-stage coarse+cleanup 结构，判断当前最该保留的是 trunk+expert 还是 coarse+cleanup。","change_type":"param_only","expected_win":"lower_objective","family_name":"lowrank_expert_topk","family_stage":"prototype","self_review":"这轮严格满足单变量原则：相对 r201 只改 `ARCHITECTURE`。之所以不继续留在 `shared_two_stage_residual_expert` 上补 `STAGE1_RATIO=0.5` 或再扫别的局部轴，是因为 r201/r205/r206 已经形成足够清楚的闭环：更多 cleanup 预算更差，更强 coarse 预算虽更好但也只把 objective 压到 0.396941，仍未进入新的 regime。相比之下，`lowrank_expert_topk K=64 A=2 L=160 TR=16` 仍是当前最值得补的一条 matched lane：它有更低 exact cost（约 0.20x），并且 family 的已有 current-target 信号没有在这个 exact recipe 上被直接验证。相比另一条可选的新槽位 `shared_lowrank_two_stage_residual_expert`，它更贴近当前 0.18x-0.22x 主战场；后者本地 exact cost 已在约 0.23x，进入这轮前就已经更贵。主要风险是 `lowrank_expert_topk` 的 exceed 也维持在 0.188 左右，从而只能做到接近但难以越过 incumbent；但即使如此，这轮也能更明确地回答当前 low-cost 主战场里“trunk+expert vs coarse+cleanup”谁更值得继续，而不是继续在同一 family 内部消耗预算。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"touched_files":[],"notes_to_memory":["r206 已基本完成 `shared_two_stage_residual_expert K=64 A=2 L=160` 的 budget-split 归因：`STAGE1_RATIO=0.375` 给出该 family 在这条 lane 上的当前最好 objective=0.396941、cost=0.210938x、exceed=0.186004，但仍未越过 r159 的 0.395234。","本地 exact cost 复核已通过：`lowrank_expert_topk K=64 A=2 L=160 TRUNK_RANK=16` 的 selection_accesses=425984、deployment_accesses=409600、combined_accesses=835584，对当前 1024x4096 proxy 的 actual total_cost_ratio≈0.199219x；这比 r201/r206 的 0.210938x 更低，且仍处在主战场。","当前 target 上该 family 的最接近参照是 r171 与 r200：r171 `K=96 A=2 L=160` 给出 objective=0.428458、cost=0.24x、exceed=0.188458；r200 `K=64 A=2 L=192` 给出 objective=0.402860、cost=0.214844x、exceed=0.188017。当前仍缺少 `K=64 A=2 L=160` 这条更便宜 matched recipe 的 fresh validation。","override allowlist 本地校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: lowrank_expert_topk}], fallback_architecture='shared_two_stage_residual_expert')` 返回空列表。"],"next_hypotheses":["如果该点在约 0.20x 下把 objective 压到接近或优于 r159，说明当前主战场里 `lowrank_expert_topk` 比 `shared_two_stage_residual_expert` 更值得继续；下一轮保持 family 不变，只改 `TRUNK_RANK=8`，测试能否继续下压 encoder cost 而不明显放大 exceed。","如果该点只得到与 r206 接近的 objective，说明当前 low-cost 主战场里 `trunk+expert` 与 `coarse+cleanup` 两条线都没有打开明显新 regime；后续应停止在这两条 family 上继续细扫，切回新的 architecture slot。","如果该点明显差于 r200，说明 `LATENTS_PER_EXPERT=160` 对 `lowrank_expert_topk` 来说已经低于有效容量下限；这条 family 后续若要继续，只应围绕更高 latent width 的明确 matched 假设推进，而不应在当前 lane 再做温和插值。"],"reference_round":201}
+research/history/logs/agent_round_0209.stdout.log:33114:research/history/logs/agent_action_0207.json:1:{"command":"run","hypothesis":"最终重构公式设为 x_hat = Σ_r β_r(x) u_r + Σ_{j∈S_{e(x-t(x))}(x-t(x))} α_{e,j}(x) b_{e,j}，其中 t(x)=Σ_r β_r(x) u_r；{u_r} 是静态 low-rank trunk 向量库，{b_{e,j}} 是静态 expert 子库。在线侧可导出到 LUTurbo/Lottable 的“trunk 查表/加权和 + 轻量 router 选少量 expert 子库 + expert 子库查表/加权和 + 必要时选择性在线补偿”链路，因此 `lowrank_expert_topk` 判定为扩展兼容；`expert_topk`、`shared_routed_expert_topk` 属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 属不兼容，不能驱动当前 objective leaderboard。r205-r206 已把 `shared_two_stage_residual_expert` 在 `K=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=160` 这条 lane 的 coarse/cleanup 分工基本摸清：`STAGE1_RATIO=0.375` 虽把 objective 从 0.398672 压到 0.396941，但仍未越过 r159 的 0.395234，更没有接近 incumbent 0.386114，说明继续在这条 family 上做 budget split 细扫的信息价值已经明显下降。本轮唯一主假设是：相对 r201 仅把 `ARCHITECTURE` 从 `shared_two_stage_residual_expert` 切到 `lowrank_expert_topk`，保持 `K=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=160`、`TRUNK_RANK=16`、`NUM_EXPERTS=64`、`FACTORIZED_HIDDEN_DIM=256`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余配方不变，直接回答“shared coarse + routed residual cleanup”相比“low-rank trunk + expert head”到底是不是当前 0.20x 左右 lane 的正确容量分工。基于本地 exact cost 复核，该候选的 combined_accesses=835584、actual total_cost_ratio≈0.199219x，明显低于 r201/r206 的 0.210938x；如果 exceed 仍能维持在该 family 已知的约 0.188 附近，则 objective 将有机会压到 0.39 附近并挑战当前次优兼容点。","summary":"建议以 r201 为 reference，只改 `ARCHITECTURE=lowrank_expert_topk`。这是一次回到主战场的 matched-objective architecture probe：在同样的 `K=64, A=2, L=160` recipe 下，用更便宜的 low-rank trunk + expert head 去对照刚刚完成分工验证的 two-stage coarse+cleanup 结构，判断当前最该保留的是 trunk+expert 还是 coarse+cleanup。","change_type":"param_only","expected_win":"lower_objective","family_name":"lowrank_expert_topk","family_stage":"prototype","self_review":"这轮严格满足单变量原则：相对 r201 只改 `ARCHITECTURE`。之所以不继续留在 `shared_two_stage_residual_expert` 上补 `STAGE1_RATIO=0.5` 或再扫别的局部轴，是因为 r201/r205/r206 已经形成足够清楚的闭环：更多 cleanup 预算更差，更强 coarse 预算虽更好但也只把 objective 压到 0.396941，仍未进入新的 regime。相比之下，`lowrank_expert_topk K=64 A=2 L=160 TR=16` 仍是当前最值得补的一条 matched lane：它有更低 exact cost（约 0.20x），并且 family 的已有 current-target 信号没有在这个 exact recipe 上被直接验证。相比另一条可选的新槽位 `shared_lowrank_two_stage_residual_expert`，它更贴近当前 0.18x-0.22x 主战场；后者本地 exact cost 已在约 0.23x，进入这轮前就已经更贵。主要风险是 `lowrank_expert_topk` 的 exceed 也维持在 0.188 左右，从而只能做到接近但难以越过 incumbent；但即使如此，这轮也能更明确地回答当前 low-cost 主战场里“trunk+expert vs coarse+cleanup”谁更值得继续，而不是继续在同一 family 内部消耗预算。","needs_sanity":false,"env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_expert_topk"}],"touched_files":[],"notes_to_memory":["r206 已基本完成 `shared_two_stage_residual_expert K=64 A=2 L=160` 的 budget-split 归因：`STAGE1_RATIO=0.375` 给出该 family 在这条 lane 上的当前最好 objective=0.396941、cost=0.210938x、exceed=0.186004，但仍未越过 r159 的 0.395234。","本地 exact cost 复核已通过：`lowrank_expert_topk K=64 A=2 L=160 TRUNK_RANK=16` 的 selection_accesses=425984、deployment_accesses=409600、combined_accesses=835584，对当前 1024x4096 proxy 的 actual total_cost_ratio≈0.199219x；这比 r201/r206 的 0.210938x 更低，且仍处在主战场。","当前 target 上该 family 的最接近参照是 r171 与 r200：r171 `K=96 A=2 L=160` 给出 objective=0.428458、cost=0.24x、exceed=0.188458；r200 `K=64 A=2 L=192` 给出 objective=0.402860、cost=0.214844x、exceed=0.188017。当前仍缺少 `K=64 A=2 L=160` 这条更便宜 matched recipe 的 fresh validation。","override allowlist 本地校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: lowrank_expert_topk}], fallback_architecture='shared_two_stage_residual_expert')` 返回空列表。"],"next_hypotheses":["如果该点在约 0.20x 下把 objective 压到接近或优于 r159，说明当前主战场里 `lowrank_expert_topk` 比 `shared_two_stage_residual_expert` 更值得继续；下一轮保持 family 不变，只改 `TRUNK_RANK=8`，测试能否继续下压 encoder cost 而不明显放大 exceed。","如果该点只得到与 r206 接近的 objective，说明当前 low-cost 主战场里 `trunk+expert` 与 `coarse+cleanup` 两条线都没有打开明显新 regime；后续应停止在这两条 family 上继续细扫，切回新的 architecture slot。","如果该点明显差于 r200，说明 `LATENTS_PER_EXPERT=160` 对 `lowrank_expert_topk` 来说已经低于有效容量下限；这条 family 后续若要继续，只应围绕更高 latent width 的明确 matched 假设推进，而不应在当前 lane 再做温和插值。"],"reference_round":201}
+research/history/logs/agent_round_0209.stdout.log:33123:research/history/logs/agent_action_0203.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ACTIVE_EXPERTS","value":"1"}],"expected_win":"explore_unknown","experiment_tier":"full","family_name":"shared_routed_expert_topk","family_stage":"probe","hypothesis":"最终重构公式保持为 x_hat = Σ_{i∈S_shared(x)} α_i^sh(x) b_i^sh + Σ_{e∈E(x)} Σ_{j∈S_e(x)} α_{e,j}(x) b_{e,j}。其中 B^sh 与 {B_e} 都是静态向量库，在线侧仍是“shared 子库查表 + 少量 routed expert 子库查表 + 有限加权求和 + 必要时在线补偿”的 LUTurbo/Lottable 推理链路，因此兼容性判断为直接兼容；batch/sample-coupled family 仍属不兼容，不能驱动主线。当前 incumbent r199 的 objective=0.386114 处于 cost=0.19x、exceed=0.196114 的平衡带，而 recent 两个结构 probe（r200 lowrank_expert_topk、r202 shared_two_stage_residual_expert）都没把 objective 拉下去，说明继续在这些结构上加一点 shared/coarse 还不够。本轮唯一主假设是：相对 r159 仅把 ACTIVE_EXPERTS 从 2 降到 1，直接测试 shared+routed 家族最关键、且当前 target 还没在这条 low-cost lane 上回答的问题: 如果 shared 分支真的能吃掉平滑主干，那么 routed path 压成单 expert 后，total_cost_ratio 可从约 0.21x 进一步降到约 0.17x，同时 exceed 不应像旧的高宽度单路 probe 那样明显失控。若该假设成立，这会形成一个新的更靠左 objective 段；若不成立，则可更干净地判定当前 target 上 shared+routed 的收益仍依赖双 expert active path。","summary":"建议以 r159 为 reference，只改 ACTIVE_EXPERTS=1。这个动作不是同 family 的低信息插值，而是一次直接改变 active path 长度的结构性 probe，用来回答 shared+routed 家族能否在更短在线路径上进入更低 cost regime。","self_review":"这轮满足单变量原则：相对 r159 只改 ACTIVE_EXPERTS。虽然它不是 brand-new family，但它也不是 incumbent 邻域的线性 K 扫描；它直接改变了 active path 与容量分工关系，信息增量高于继续补 small K 或 rank。之所以优先它，而不是再切一个历史上已明显偏弱的新 fa�静态 shared 向量库，{C_e} 是静态 expert residual 子库。导出到 LUTurbo/Lottable 时仍是“shared low-rank projection + shared library lookup + residual 上的 expert-local top-k + 有限加权和”，静态库不随样本动态生成，因此该 family 判定为扩展兼容；`batch_topk` / `adaptive_budget_topk` 等不兼容 family 仍不能驱动 frontier。本轮唯一主假设是：r155 已经把 `shared_lowrank_routed_expert_topk @ K=96` 明确证伪为当前 0.28x 低成本带的有效前沿候选，因此下一步不应继续在同一 family 上做局部扫参，而应切到另一条仍符合当前 agenda 的新结构槽位。相对当前低成本参考 r152，只把 `ARCHITECTURE` 从 `lowrank_expert_residual` 切到 `shared_lowrank_two_stage_residual_expert`，保持 `K=96`、`EF=1`、`FACTORIZED_HIDDEN_DIM=256`、`NUM_EXPERTS=64`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=224`、`STAGE1_RATIO=0.25` 与其余训练 recipe 不变，直接回答“shared low-rank coarse stage + expert residual cleanup”在约 0.28x total_cost 下是否比已失败的 shared-lowrank routed top-k 更接近当前低成本 frontier。","needs_sanity":true,"next_hypotheses":["如果该点在约 0.28x 下明显优于 r155 且接近当前 0.28x-0.30x frontier，则下一轮保持 family 不变，只改 `STAGE1_RATIO`，定位 coarse stage 与 residual expert 的分工边界。","如果该点仍明显落后于同成本 frontier，则可把 shared-lowrank 两段式方向在当前 target 的低成本主线优先级下调，下一轮转向更中成本但更有希望形成新段的 `shared_lowrank_routed_expert_residual` matched probe。","如果该点仅小幅优于 r155 但仍不进入非支配前沿，则记录为 shared-lowrank coarse 比 shared-lowrank routed 更稳，但仍不足以替代现有 low-cost anchors，后续不要继续在该 family 上做连续局部微调。"],"notes_to_memory":["r155 已落盘：`shared_lowrank_routed_expert_topk @ K=96` 实际 FVU=0.14630839228630066，显著落后当前 0.28x-0.30x 低成本 frontier，因此不应继续在该 family 上做局部扫参。","当前代码已支持 `shared_lowrank_two_stage_residual_expert`，本轮不需要新增 tunable，也不需要修改 `research/AutoResearch/` 或 `scripts/`。","已用本轮精确 recipe 做本地 instantiate/forward/backward smoke：`ARCHITECTURE=shared_lowrank_two_stage_residual_expert, K=96, EF=1, FACTORIZED_HIDDEN_DIM=256, NUM_EXPERTS=64, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=224, STAGE1_RATIO=0.25` 可正常运行。","本地成本自检：selection_accesses=794624，deployment_accesses=393216，combined_accesses=1187840，对当前 1024x4096 proxy 的 combined_ratio≈0.28，低于 1.5×h×n 硬约束。","这轮是对另一条高优先级结构槽位 `two-stage residual expert` 的 matched-cost 重验，不是继续打磨 `lowrank_expert_*` 或已失败的 `shared_lowrank_routed_expert_topk`。"],"reference_round":152,"self_review":"满足单轮单变量原则：相对 r152 只改 `ARCHITECTURE`。之所以不继续沿 r155 的 family 压 `FACTORIZED_HIDDEN_DIM` 或 `ACTIVE_EXPERTS`，是因为该 family 已在 128/112/96 三个成本配方上持续给出一致负信号；当前更高信息量的动作是切到尚未在现行 `K=96` 低成本 recipe 下复验的 `shared_lowrank_two_stage_residual_expert`。本轮没有返回代码改动，因为该 family 已经落盘且本地 smoke 通过；主要风险是它在 r144 的 K=112 recipe 下也表现偏弱，但正因为 r155 已证明 routed top-k 线不足，当前最需要回答的是两段式 residual cleanup 是否比 routed-topk 更适合这个低成本带。","summary":"建议本轮以 r152 为 reference，只改 `ARCHITECTURE=shared_lowrank_two_stage_residual_expert`。这是一次面向 0.28x 低成本带的 matched architecture probe，用来回答 shared-lowrank 两段式 residual expert 是否比刚失败的 shared-lowrank routed top-k 更值得继续。","touched_files":[]}
+research/history/logs/agent_round_0209.stdout.log:33610:research/history/logs/agent_round_0077.stdout.log:1457:research/history_archive/16_20260328_220351/logs/agent_action_0185.json:1:{"change_type":"param_only","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"lowrank_two_stage_soft_codebook_residual"},{"key":"EXPANSION_FACTOR","value":"2"},{"key":"K","value":"128"},{"key":"OPTIMIZER","value":"adam"},{"key":"LR","value":"1.0e-3"}],"expected_win":"information_gain","experiment_tier":"full","family_name":"lowrank_two_stage_soft_codebook_residual","family_stage":"mainline","hypothesis":"最终重构公式保持为 x_hat = U(Vx) + Σ_m pi_m c_m + Σ_i alpha_i^(1) b_i + Σ_j alpha_j^(2) b_j；其中 low-rank trunk 库 U、静态 soft-codebook 库 {c_m}、以及两阶段 residual 字典库 {b_i} 都可静态导出，因此可直接映射到 LUTurbo/Lottable 的“查表 + 加权求和 + 选择性补偿”推理链路，兼容性判断为扩展兼容。当前主线在 EF=2 下 encoder selection_cost 仍在 1.5×h×n 硬约束内，且连续 3 轮围绕 `NUM_CODES` 压缩都没有改变曲线终点，说明当前瓶颈更可能在优化动态而不是 coarse codebook 容量。本轮只回答一个问题：把主变量切到 `optimizer`，并使用更保守的 `adam@1.0e-3`，是否能在不改变 family/EF/K 的前提下改善训练曲线形状或终点 FVU，而不是继续在 signum 配方周围得到同样的 plateau。","summary":"停止继续细扫 `NUM_CODES`，回到同一主线 family 的 recipe 轴；固定 `ARCHITECTURE=lowrank_two_stage_soft_codebook_residual, K=128, EF=2`，将主变量切到 `optimizer`，测试 `adam` 配合更保守的 `LR=1.0e-3` 是否能打破当前 signum 主线的收敛平台。","needs_sanity":false,"notes_to_memory":["family 与导出路径不变，`lowrank_two_stage_soft_codebook_residual` 仍是扩展兼容：trunk 库 + soft-codebook 库 + two-stage residual 字典库。","连续 3 轮 `NUM_CODES` 压缩没有改变终点 FVU，说明当前主线更值得优先澄清 optimizer/curve-shape 问题，而不是继续沿 coarse codebook 容量轴下探。","评估本轮必须同时比较 curve_start/mid/end、tokens_per_sec、总耗时与 final_total_tokens，判断收益是否来自更优优化动态，而不是更长训练或运行时波动。"],"next_hypotheses":["若 `adam@1.0e-3` 曲线更平滑且终点优于或接近 signum 主线，则给 adam 一次同轴 LR callback，例如 `1.5e-3`。","若 `adam@1.0e-3` 明显更差或更慢，则关闭 optimizer 分支，恢复 signum 主线，并回到 `TRUNK_RANK` 或 `NUM_CODES` 的成本轴。","若终点接近但吞吐明显更差，则将 adam 视为负面系统信号，即使其数值指标不差。"],"primary_variable":"optimizer","self_review":"本轮保持同一 family，不开新架构，并把问题从已经反复无增益的 codebook 容量轴转回 recipe 轴，符合当前“先把同一 family 的训练曲线看清”的要求。虽然 `optimizer` 轴联动了更保守的 `LR=1.0e-3`，但这属于避免用 signum 学习率误判 adam 的必要局部配套；主问题仍然只有一个：当前平台是否主要来自优化器动态。","touched_files":[]}
+research/history/logs/agent_round_0209.stdout.log:34094:    "curve_start_fvu": "0.300354",
+research/history/logs/agent_round_0209.stdout.log:34095:    "curve_mid_fvu": "0.243836",
+research/history/logs/agent_round_0209.stdout.log:34096:    "curve_end_fvu": "0.224808",
+research/history/logs/agent_round_0209.stdout.log:34097:    "curve_late_slope": "-0.000000",
+research/history/logs/agent_round_0209.stdout.log:34098:    "curve_still_improving": "true",
+research/history/logs/agent_round_0209.stdout.log:34235:    "curve_start_fvu": "0.323665",
+research/history/logs/agent_round_0209.stdout.log:34236:    "curve_mid_fvu": "0.262974",
+research/history/logs/agent_round_0209.stdout.log:34237:    "curve_end_fvu": "0.246699",
+research/history/logs/agent_round_0209.stdout.log:34238:    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:34239:    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:34406:    "curve_start_fvu": "0.307016",
+research/history/logs/agent_round_0209.stdout.log:34407:    "curve_mid_fvu": "0.270022",
+research/history/logs/agent_round_0209.stdout.log:34408:    "curve_end_fvu": "0.253276",
+research/history/logs/agent_round_0209.stdout.log:34409:    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:34410:    "curve_still_improving": "false",
+research/history/logs/agent_round_0209.stdout.log:34513:    "curve_start_fvu": "0.219345",
+research/history/logs/agent_round_0209.stdout.log:34514:    "curve_mid_fvu": "0.183412",
+research/history/logs/agent_round_0209.stdout.log:34515:    "curve_end_fvu": "0.166566",
+research/history/logs/agent_round_0209.stdout.log:34516:    "curve_late_slope": "0.000000",
+research/history/logs/agent_round_0209.stdout.log:34517:    "curve_still_improving": "false",
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+p=Path('research/history/memory.json')
+obj=json.loads(p.read_text())
+print(obj.get('next_hypotheses',[])[:8])
+for item in obj.get('timeline',[])[-8:]:
+    print(item)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+['如果 `LATENTS_PER_EXPERT=160` 继续降低 objective 且 exceed 没有明显反弹，下一轮保持 family 不变，只改 `NUM_EXPERTS=1024`，测试“更窄 micro-expert + 更大总 bank”是否能把 objective 推到 0.30 附近或以下。', '如果 `LATENTS_PER_EXPERT=160` 让 objective 改善但 exceed 回弹已经接近门槛，则把该点记为 width knee，停止继续压窄 expert 宽度，后续只在 bank 容量或新结构槽位上行动。', '如果 `LATENTS_PER_EXPERT=160` 明显恶化 exceed 而 objective 不再下降，则说明当前 PK family 的收益主要来自大 bank 而不是更细 expert 宽度；此后应停止 width 轴扫描，优先切回新的 matched-objective architecture probe。']
+
+codex
+r247 已把 objective 压到 `0.307648`，距离 0.30 只剩 `0.007648`。我先补两个关键数字：`NUM_EXPERTS=1024` 在当前窄 micro-expert 配方下的精确成本，以及它相对 r247 的 exceed 门槛。
+exec
+/bin/bash -lc "python - <<'PY'
+base_obj=0.307648
+cost=0.1328125
+print('beat_r247_need_exceed<=', base_obj-cost)
+print('sub_0.30_need_exceed<=', 0.30-cost)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+beat_r247_need_exceed<= 0.17483549999999998
+sub_0.30_need_exceed<= 0.1671875
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+print(validate_env_overrides([{'key':'NUM_EXPERTS','value':'1024'}], fallback_architecture='product_key_expert_jumprelu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+[]
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0,'.')
+from sparsify.config import SparseCoderConfig
+from sparsify.sparse_coder import SparseCoder
+cfg=SparseCoderConfig(architecture='product_key_expert_jumprelu',k=32,expansion_factor=1,num_experts=1024,active_experts=2,latents_per_expert=160,factorized_hidden_dim=256)
+sae=SparseCoder(1024,cfg,device='cpu',dtype=None)
+sel=sae.selection_cost_estimate(4096)
+dep=sum(v for _,v,_ in sae._deployment_lookup_accesses(4096))
+print('selection_accesses', sel['total_accesses'])
+print('deployment_accesses', dep)
+print('combined_accesses', sel['total_accesses']+dep)
+print('combined_ratio', (sel['total_accesses']+dep)/(1024*4096))
+print('selection_ratio', sel['total_accesses']/(1024*4096))
+PY" in /root/sparsify-ascend
+ succeeded in 4845ms:
+Using fused decoder on CUDA.
+selection_accesses 393216
+deployment_accesses 163840
+combined_accesses 557056
+combined_ratio 0.1328125
+selection_ratio 0.09375
+
+codex
+门槛已经很清楚了：`NUM_EXPERTS=1024` 在当前 `LATENTS_PER_EXPERT=160` 配方下总成本只有 `0.1328125x`，只要 exceed 从 `0.179230` 压到 `<=0.1748355` 就能继续刷新 r247；若能压到 `<=0.1671875`，就直接破 `0.30`。我再看一下本轮是否有 round summary 里的曲线字段。
+exec
+/bin/bash -lc 'ls research/history/round_summaries | tail -n 10' in /root/sparsify-ascend
+ succeeded in 0ms:
+round_0238.json
+round_0239.json
+round_0240.json
+round_0241.json
+round_0242.json
+round_0243.json
+round_0244.json
+round_0245.json
+round_0246.json
+round_0247.json
+
+exec
+/bin/bash -lc "find research/history -maxdepth 2 -type f | rg '0247|247' -n" in /root/sparsify-ascend
+ succeeded in 0ms:
+9:research/history/round_summaries/round_0247.json
+799:research/history/logs/round0247_standard_1775016982.log
+803:research/history/logs/round0247_standard_1775016982.config.json
+968:research/history/logs/agent_round_0247.stdout.log
+1086:research/history/logs/agent_action_0247.json
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+p=Path('research/history/round_summaries/round_0247.json')
+print('exists', p.exists())
+if p.exists():
+    obj=json.loads(p.read_text())
+    print(json.dumps(obj, ensure_ascii=False, indent=2)[:5000])
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+exists True
+{
+  "round": 247,
+  "timestamp": 1775017837,
+  "started_at": 1775016829,
+  "ended_at": 1775017837,
+  "duration_sec": 1008,
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "mainline",
+  "session_id": "019d46fe-4475-7653-bb51-2d8a8fd9398d",
+  "timeline_event_ids": [
+    "evt_1775016829529296476",
+    "evt_1775016982605372150",
+    "evt_1775017837118941029"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l3-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中各 expert 子库 {b_{e,i}} 都是静态向量库，E_pk(x) 由两路 learned product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部继续用 JumpReLU 形成局部 support S_e^τ(x)。导出到 LUTurbo/Lottable 时，推理链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，不依赖动态生成字典，因此该 family 的兼容性判断为直接兼容。当前 objective leaderboard 只应由兼容 family 驱动；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍只作历史参考，不参与主线推进。r245 与 r246 已连续把 objective 从 0.323396 压到 0.318433，说明这条 PKM-style 主线仍有高价值未验证假设，不属于低信息量细扫。本轮相对 r246 只把 `LATENTS_PER_EXPERT` 从 `192` 降到 `160`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`NUM_EXPERTS=512`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余 recipe 不变，直接测试“在更大静态 bank 已成立的前提下，更窄的 micro-expert 是否能进一步降低 encoder cost，同时仍把 exceed 控在可接受范围”。本地精确成本复核显示该点 `selection_accesses=374784`、`deployment_accesses=163840`、`combined_accesses=538624`、`exact total_cost_ratio=0.12841796875`；因此只要 `exceed_alpha_0.50 <= 0.19001542665004728` 就能继续刷新 r246 的 objective，而若 exceed 维持在 r246 的 `0.174390` 附近，则 objective 将逼近 `0.302808`，这是当前最接近 `0.30` 目标、且归因最清晰的单变量 knee probe。",
+    "summary": "建议以 r246 为 reference，只改 `LATENTS_PER_EXPERT=160`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量 micro-expert width knee probe，目标是在保持 small-K 与短 active path 不变的前提下，进一步压低总成本并尽量守住 exceed。",
+    "change_type": "param_only",
+    "expected_win": "lower_objective",
+    "family_name": "product_key_expert_jumprelu",
+    "family_stage": "mainline",
+    "self_review": "这轮继续留在同一 family 是有充分依据的，不违背“最近 2 轮未明显改进才切结构”的策略：r245 和 r246 都是真正的 objective 刷新，而且 improvement 主要来自 prompt 明确鼓励验证的 PKM/compositional-capacity 命题。相对 r246 只改 `LATENTS_PER_EXPERT`，比继续加 `NUM_EXPERTS=1024`、重新打开 `K=48`、或把 latent 加宽到 `224` 都更像当前的高价值 knee，因为它的新增 cost 最低且容错最大。主要风险是单个 expert 过窄后 exceed 回弹过多；但由于该点的成本窗口足够大，即使 exceed 略有恶化仍可能继续降低 objective，因此它比继续右移 deploy 成本或继续堆 bank 容量更适合本轮。",
+    "needs_sanity": false,
+    "env_overrides": [
+      {
+        "key": "LATENTS_PER_EXPERT",
+        "value": "160"
+      }
+    ],
+    "touched_files": [],
+    "notes_to_memory": [
+      "`product_key_expert_jumprelu` 继续满足 LUTurbo 导出契约：静态 expert 子库上的有限加权和，兼容性为直接兼容；不兼容 family 不应进入当前 objective leaderboard 主线。",
+      "r246 已真实刷新当前 best compatible point：objective=0.3184333954000473，cost=0.144043x，selection=0.104980x，deploy=0.039062x，exceed=0.174390，fvu=0.1560433954000473。",
+      "本地精确成本复核：`product_key_expert_jumprelu K=32 NUM_EXPERTS=512 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 的 selection_accesses=374784、deployment_accesses=163840、combined_accesses=538624、exact total_cost_ratio=0.12841796875。",
+      "门槛复核：该点只需 `exceed_alpha_0.50 <= 0.19001542665004728` 就能刷新 r246；override allowlist 自检也已通过：`validate_env_overrides([{key:'LATENTS_PER_EXPERT', value:'160'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。"
+    ],
+    "next_hypotheses": [
+      "如果 `LATENTS_PER_EXPERT=160` 继续降低 objective 且 exceed 没有明显反弹，下一轮保持 family 不变，只改 `NUM_EXPERTS=1024`，测试“更窄 micro-expert + 更大总 bank”是否能把 objective 推到 0.30 附近或以下。",
+      "如果 `LATENTS_PER_EXPERT=160` 让 objective 改善但 exceed 回弹已经接近门槛，则把该点记为 width knee，停止继续压窄 expert 宽度，后续只在 bank 容量或新结构槽位上行动。",
+      "如果 `LATENTS_PER_EXPERT=160` 明显恶化 exceed 而 objective 不再下降，则说明当前 PK family 的收益主要来自大 bank 而不是更细 expert 宽度；此后应停止 width 轴扫描，优先切回新的 matched-objective architecture probe。"
+    ],
+    "reference_round": 246
+  },
+  "result": {
+    "decision": "keep",
+    "status": "ok",
+    "timestamp": "1775017837",
+    "val_fvu": "0.1605985164642334",
+    "exceed_alpha_0_50": "0.179230",
+    "objective_score": "0.307648",
+    "total_cost": "538624.000000",
+    "total_cost_ratio": "0.128418",
+    "selection_cost": "374784.000000",
+    "selection_cost_ratio": "0.089355",
+    "deployment_accesses": "163840.000000",
+    "deployment_ratio": "0.039062",
+    "observed_fvu": "0.160599",
+    "k": "32",
+    "architecture": "product_key_expert_jumprelu",
+    "expansion_factor": "1",
+    "run_health": "normal",
+    "termination_reason": "completed",
+    "tokens_per_sec": "47595.601270",
+    "baseline_ratio": "0.428591",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0247/round0247_standard_1775016982_dp2_bs1_ga8_ef1_k32_20260401_121629",
+    "experiment_id": "r247_1775017837",
+    "head_commit": "3aa25bde9aa91e5137df08d5a2c0b98ad558f012",
+    "description": "建议以 r246 为 reference，只改 `LATENTS_PER_EXPERT=160`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量 micro-expert width knee 
+
+codex
+我已经拿到 r247 的结构化 summary；还差曲线字段。读完以后，如果它仍在改善，就更支持继续做 `NUM_EXPERTS=1024` 这个最后一跳。
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+obj=json.loads(Path('research/history/round_summaries/round_0247.json').read_text())
+res=obj['result']
+for k in ['curve_start_fvu','curve_mid_fvu','curve_end_fvu','curve_late_slope','curve_still_improving','final_total_tokens','wall_time_sec']:
+    print(k, res.get(k))
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+from pathlib import Path
+obj=json.loads(Path('research/history/round_summaries/round_0246.json').read_text())
+res=obj['result']
+for k in ['objective_score','total_cost_ratio','exceed_alpha_0_50','curve_start_fvu','curve_mid_fvu','curve_end_fvu','curve_still_improving']:
+    print('r246', k, res.get(k))
+obj=json.loads(Path('research/history/round_summaries/round_0247.json').read_text())
+res=obj['result']
+for k in ['objective_score','total_cost_ratio','exceed_alpha_0_50','curve_start_fvu','curve_mid_fvu','curve_end_fvu','curve_still_improving']:
+    print('r247', k, res.get(k))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+curve_start_fvu 0.227149
+curve_mid_fvu 0.183319
+curve_end_fvu 0.160599
+curve_late_slope 0.000000
+curve_still_improving false
+final_total_tokens 49979392
+wall_time_sec None
+
+ succeeded in 0ms:
+r246 objective_score 0.318433
+r246 total_cost_ratio 0.144043
+r246 exceed_alpha_0_50 0.174390
+r246 curve_start_fvu 0.222551
+r246 curve_mid_fvu 0.179137
+r246 curve_end_fvu 0.156043
+r246 curve_still_improving false
+r247 objective_score 0.307648
+r247 total_cost_ratio 0.128418
+r247 exceed_alpha_0_50 0.179230
+r247 curve_start_fvu 0.227149
+r247 curve_mid_fvu 0.183319
+r247 curve_end_fvu 0.160599
+r247 curve_still_improving false
+
+codex
+{"command":"run","hypothesis":"最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中各 expert 子库 {b_{e,i}} 都是静态向量库，E_pk(x) 由两路 learned product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部继续用 JumpReLU 形成局部 support S_e^τ(x)。导出到 LUTurbo/Lottable 时，推理链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，不依赖动态生成字典，因此该 family 的兼容性判断为直接兼容。当前 objective leaderboard 只应由兼容 family 驱动；`batch_topk`、`adaptive_budget_topk` 等不兼容 family 仍只作历史参考，不参与主线推进。r247 已把 objective 压到 0.307648，其中 cost=0.128418x、exceed=0.179230，说明当前缺口已主要转成 exceed 而不是 cost；因此下一步不应继续向更低 width 压缩，而应在保持当前低成本小 K 路径不变的前提下，测试更大静态 bank 是否能把 exceed 拉回去并冲击 0.30。相对 r247，本轮只把 `NUM_EXPERTS` 从 `512` 提到 `1024`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`LATENTS_PER_EXPERT=160`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 与其余 recipe 不变，直接测试“更窄 micro-expert + 更大总 bank”能否在几乎不增加总成本的前提下显著压低 exceed。该点本地精确成本为 `selection_accesses=393216`、`deployment_accesses=163840`、`combined_accesses=557056`、`exact total_cost_ratio=0.1328125`；因此只要 `exceed_alpha_0.50 <= 0.1748355` 就能刷新 r247，而若 `exceed_alpha_0.50 <= 0.1671875`，则 objective 将首次压到 `0.30` 以下。考虑到 `NUM_EXPERTS=256->512` 在同 family 上曾以极小成本增量换回了明显 exceed 改善，这一 probe 是当前最接近 0.30 目标、且仍保持单变量归因清晰的主线动作。","summary":"建议以 r247 为 reference，只改 `NUM_EXPERTS=1024`。这是对当前最强兼容主线 `product_key_expert_jumprelu` 的单变量容量延展 probe，目标是在保留 `K=32` 与 `LATENTS_PER_EXPERT=160` 的低成本路径下，用更大的静态 expert bank 进一步压低 exceed，并尝试把 objective 直接推到 0.30 以下。","change_type":"param_only","expected_win":"lower_objective","family_name":"product_key_expert_jumprelu","family_stage":"mainline","self_review":"继续留在同一 family 这次仍有明确的高价值未验证假设，不属于被 prompt 下调优先级的低信息细扫：r245、r246、r247 三轮都是真实 objective 刷新，而且每一步都在回答 PKM/compositional-capacity 这条主线到底能走多远。r247 的 objective 已经降到 0.307648，距离 0.30 只差 0.007648；在这种情况下，最合理的单变量动作不是切到全新结构槽位重置证据，而是做当前 family 最有机会完成临门一脚的容量 probe。相对 r247 只改 `NUM_EXPERTS`，归因非常干净；相比重新打开 `K=48` 或把 `LATENTS_PER_EXPERT` 加回 192，这一步的新增成本更小、所需 exceed 改善门槛也更现实。主要风险是 bank 扩容收益开始递减，导致 exceed 改善不足以覆盖新增的 `0.0043945x` 成本；如果结果如此，就应把当前 PK family 记为接近饱和，并在下一轮优先切回新的 matched-objective architecture probe。","needs_sanity":false,"env_overrides":[{"key":"NUM_EXPERTS","value":"1024"}],"touched_files":[],"notes_to_memory":["`product_key_expert_jumprelu` 继续满足 LUTurbo 导出契约：静态 expert 子库上的有限加权和，兼容性为直接兼容；不兼容 family 不应进入当前 objective leaderboard 主线。","r247 已刷新当前 best compatible point：objective=0.307648，cost=0.128418x，selection=0.089355x，deploy=0.039062x，exceed=0.179230，fvu=0.1605985164642334；曲线为 start=0.227149 -> mid=0.183319 -> end=0.160599，`curve_still_improving=false`。","本地精确成本复核：`product_key_expert_jumprelu K=32 NUM_EXPERTS=1024 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=160` 的 selection_accesses=393216、deployment_accesses=163840、combined_accesses=557056、exact total_cost_ratio=0.1328125。","门槛复核：该点只需 `exceed_alpha_0.50 <= 0.1748355` 就能刷新 r247；若 `exceed_alpha_0.50 <= 0.1671875`，则 objective 将低于 0.30。override allowlist 自检已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'1024'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。"],"next_hypotheses":["如果 `NUM_EXPERTS=1024` 把 objective 压到 0.30 以下或至少继续明显刷新 r247，则下一轮优先停在该 family，改做一次 very-light deployment knee 验证，例如只改 `K=48`，确认是否存在 cost 略升但 exceed 更大幅下降的更优点。","如果 `NUM_EXPERTS=1024` 继续降低 exceed 但不足以覆盖新增 cost，则把结论记为“PK family 的 bank-capacity 轴接近饱和”；后续停止继续堆 bank，转去新的 matched-objective architecture probe。","如果 `NUM_EXPERTS=1024` 没有带来明显 exceed 改善或 objective 反弹，则说明当前最优 tradeoff 已在 `NUM_EXPERTS=512, LATENTS_PER_EXPERT=160` 附近形成 knee；下一轮应优先切换到新的结构槽位，而不是继续在 PK family 内扫 `K` 或 width。"],"reference_round":247}
+tokens used
+834,342

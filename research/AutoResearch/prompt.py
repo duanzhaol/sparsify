@@ -37,6 +37,8 @@ from .target_profile import default_target_profile, profile_matches
 # Constants — Hard constraints baked into prompt template
 # ---------------------------------------------------------------------------
 
+TARGET_OBJECTIVE = 0.22
+
 ROLE_AND_OBJECTIVE = """\
 你是本仓库中的 LUTurbo 自动研究 Agent。
 
@@ -56,7 +58,7 @@ PROXY_OBJECTIVE = """\
 - 当前主目标是最小化单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50`
 - 其中 `total_cost_ratio = (encoder 选择成本 + 部署查表成本) / original_matmul_accesses`
 - `exceed_alpha_0.50` 表示在 alpha=0.5 阈值下，超过误差阈值、需要在线补偿的比例
-- 当前阶段目标不是只比 incumbent 小幅更好，而是要把 `objective_score` 继续压向 `0.30` 以下
+- 当前阶段目标不是只比 incumbent 小幅更好，而是要把 `objective_score` 继续压向 `0.22` 以下
 - 当前 run 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
 - 当前成本 proxy 按 fused QKV 部署矩阵 `1024 x 4096` 统计，而不是按 q_proj 单矩阵 `1024 x 2048` 统计
 - FVU 继续保留，但只作为诊断与 tie-break，不再是主优化轴
@@ -68,6 +70,8 @@ PROXY_OBJECTIVE = """\
 - 部署成本由 K、trunk_rank、NUM_CODES 主导；每个静态库条目同时计入输入侧原子/value 访问与输出侧查表结果，因此 sparse 路径近似按 `K × (d_in + n_output)` 增长
 - 不同架构在相同 EF 下的 encoder 成本差异很大（见成本速查表）
 - 在比较两个候选时，优先问清楚：它是在降 cost，还是在降 exceed，还是两者都没有实质改善
+- 按当前 best lane 粗看，要逼近 `0.22` 往往意味着：若 `cost≈0.14x`，则 `exceed` 需接近 `0.08`；若 `cost≈0.12x`，则 `exceed` 也仍需压到约 `0.10`
+- 因此 `0.22` 基本不可能靠同一 family 的温和插值自然得到；更可能需要新的容量组织方式、新的 coarse-to-fine routing、或更强的“shared 主干 + tiny routed cleanup”分工
 - 局部参数微调只是辅助校准手段，不应连续多轮主导预算；若最近几轮都只是同一 family 上的小参数插值且 objective 没有扩展，应优先换结构槽位
 - 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
@@ -214,7 +218,7 @@ def _best_compatible_feasible_frontier_entry(
 def section_high_priority_directions(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    target_objective: float = 0.30,
+    target_objective: float = TARGET_OBJECTIVE,
 ) -> str:
     incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
     incumbent_note = (
@@ -247,6 +251,12 @@ def section_high_priority_directions(
                 "  当前最强已验证主线是更大 expert 池配合更小 K 的 `expert_topk`；"
                 "后续一方面应继续寻找这条线的 deployment knee / 容量配置，另一方面只在新结构能解释清楚 small-K exceed 为何会更慢退化时才值得挑战它。"
             )
+        elif arch == "product_key_expert_jumprelu":
+            mainline_note = (
+                "  当前最强已验证主线是 `product_key_expert_jumprelu`：它已经证明 product-key / compositional routing 能显著压低 router cost。"
+                "后续主问题不再是简单复现更低 cost，而是要进一步回答：如何在维持这类短 active path 的同时，把 exceed 再明显打下去。"
+                "优先考虑能改善 tail / hard-token 处理的结构，而不是只继续做微小容量插值。"
+            )
         if cost is not None:
             low = max(0.0, float(cost) - 0.02)
             high = float(cost) + 0.04
@@ -266,16 +276,18 @@ def section_high_priority_directions(
         stage_gap_note,
         incumbent_note,
         "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
-        "  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。",
+        "  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。",
         "",
         "当前高优先级方向：",
         "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
         f"  2. {cost_band_note.strip()}",
         "  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
         "  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
-        "  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
-        "  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
-        f"  7. {mainline_note.strip()}",
+        "  5. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。",
+        "  6. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。",
+        "  7. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+        "  8. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        f"  9. {mainline_note.strip()}",
         "",
         "当前应下调优先级的方向：",
         "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
@@ -291,7 +303,7 @@ def section_high_priority_directions(
 def section_objective_target_gap(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    target_objective: float = 0.30,
+    target_objective: float = TARGET_OBJECTIVE,
 ) -> str:
     """Show what cost/exceed tradeoffs are needed to reach the current stage target."""
     incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
@@ -313,7 +325,7 @@ def section_objective_target_gap(
             f"(cost={float(cost):.2f}x, exceed={float(exceed):.6f})；"
             f"距离目标仍差 {gap:.6f}。"
         ),
-        "  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。",
+        f"  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 {target_objective:.2f} 所需的 tradeoff”。",
     ]
 
     base_cost = float(cost)
