@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中 {b_{e,i}} 是静态 expert 子库原子，E_pk(x) 由两路 product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出极少量 active experts；expert 内仍用 JumpReLU 形成局部 support。导出到 LUTurbo/Lottable 的在线链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，静态库不随样本动态生成，因此 `product_key_expert_jumprelu` 继续判定为直接兼容；`batch_topk`、`adaptive_budget_topk`、`lowrank_adaptive_budget_residual` 等不兼容 family 仍不得驱动当前 objective leaderboard。当前真实兼容 frontier 已更新为 r251：`product_key_expert_jumprelu K=32 NUM_EXPERTS=512 LATENTS_PER_EXPERT=96 ACTIVE_EXPERTS=2`，controller 口径 objective=0.293524=cost 0.10x + exceed 0.193524，且 exact objective=0.290692 也优于 r250，说明当前主线仍在真实扩展，不属于应该立即切槽的停滞态。相对 r251，本轮只把 `NUM_EXPERTS` 从 `512` 降到 `256`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`LATENTS_PER_EXPERT=96`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 和其余 recipe 不变，直接测试在 width knee 已压到 96 之后，512-bank 是否依然过配，还是 256-bank 就足以保住大部分 exceed。按本地成本公式复核：`left_keys=16,right_keys=16`，router 访问为 `1024×(16+16)=32768`，active expert encoder 访问为 `2×1024×96=196608`，故 `selection_accesses=229376`、`deployment_accesses=163840`、`combined_accesses=393216`、exact `total_cost_ratio=0.09375`，controller 两位小数记分口径下为 `0.09x`。因此它把 rounded cost 再左移一档；要刷新当前 controller frontier，只需 `exceed_alpha_0.50 < 0.2035243308544159`，而要刷新当前 exact objective 也只需 `exceed_alpha_0.50 < 0.19694233085441586`。这轮的核心价值不是再省一点 cost，而是回答 LUTurbo 真正关心的 bank-size knee 是否能在更窄 micro-expert 条件下继续左移。",
+  "summary": "建议以 r251 为 reference，只改 `NUM_EXPERTS=256`。这是一轮高信息量的 bank-size knee probe：保持已验证的 `K=32 + LATENTS_PER_EXPERT=96 + ACTIVE_EXPERTS=2` 短路径不变，直接判断 512-bank 在当前更窄 micro-expert 配方下是否仍有必要，还是 256-bank 就能以 controller `0.09x` 的更低总成本维持足够低的 exceed，从而继续降低 objective。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "这轮继续留在同一 family 仍然有充分依据，不属于 prompt 明确下调优先级的低信息细扫。原因不是围绕旧文本里的 `expert_jumprelu` 锚点做温和插值，而是本地 runtime 已经明确把真实兼容主线重写为 `product_key_expert_jumprelu`，且 r250->r251 刚发生了 controller 与 exact objective 的双重改进；因此当前 family 仍存在一个高价值、未验证、且足以改变结论的主问题：在 `LATENTS_PER_EXPERT=96` 的新 width knee 下，bank 容量是否还能继续左移。相对 r251 只改 `NUM_EXPERTS`，归因比继续扫 `LATENTS_PER_EXPERT=80/112` 更干净，也比重开 `K` 轴更符合现有证据。之所以优先选 `NUM_EXPERTS=256` 而不是 `ACTIVE_EXPERTS=1`，是因为 r244 已经给过固定单 expert path 的强负信号，而当前更值得先确认的是 512-bank 是否已经过配；如果直接同时改 active path 的形态，会把“bank 不需要那么大”和“单 expert 路径是否足够”两个问题混在一起。主要风险是 `512 -> 256` 会让 exceed 回弹，抵消这次 cost 下降；但当前 controller 与 exact objective 的胜利门槛都相对宽松，这一轮足以高质量判定当前 PK 主线的 bank-capacity knee 是否已低于 512。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "256"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r251 已成为当前真实兼容 frontier：controller objective=0.293524=cost 0.10x + exceed 0.193524，且 exact objective=0.290692 也优于 r250，说明当前 PK 主线仍在真实扩展，不是只靠 rounded cost 侥幸赢分。",
+    "对 `product_key_expert_jumprelu K=32 NUM_EXPERTS=256 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=96`，本地成本公式复核为：`left_keys=16,right_keys=16`，`selection_accesses=229376`，`deployment_accesses=163840`，`combined_accesses=393216`，exact `total_cost_ratio=0.09375`，controller rounded cost 为 `0.09x`。",
+    "在 r251 的 exact objective 基线上，新点只需 `exceed_alpha_0.50 < 0.19694233085441586` 就能赢 exact objective；在 controller 口径下只需 `exceed_alpha_0.50 < 0.2035243308544159` 就能刷新 frontier，因此这轮是 bank-size knee 的高性价比判定点。",
+    "本地 allowlist 自检通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'256'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。",
+    "已有历史负例 `r244` 表明固定 `ACTIVE_EXPERTS=1` 在较旧 PK 配方上会严重抬高 exceed；因此在 r251 之后更合理的优先级是先测 bank-size knee，再决定是否值得重新挑战更短 active path。"
+  ],
+  "next_hypotheses": [
+    "如果 `NUM_EXPERTS=256` 仍把 `exceed_alpha_0.50` 控在约 `0.197` 以下并继续刷新 objective，则说明当前 PK 主线的真实 knee 更接近“更小 bank + 更窄 micro-expert”；下一轮应以本轮为 reference，只改 `ACTIVE_EXPERTS=1` 或切到 difficulty-aware 新结构槽位，判断能否进一步缩短 active path。",
+    "如果 `NUM_EXPERTS=256` 在 controller 口径下仍赢但 exact objective 持平或略差于 r251，则说明 256-bank 已接近当前配方的边缘 knee；下一轮应回到本轮附近，只改 `NUM_EXPERTS=384` 或考虑停止继续下压 bank，而不是再线性扫更小 bank。",
+    "如果 `NUM_EXPERTS=256` 让 exceed 明显回弹、objective 不再下降，则说明 r251 的收益仍依赖 512-bank 的更大组合容量；此后应停止继续下调 bank-size，转而优先考虑新的 matched-objective architecture probe，而不是继续在同 family 内做线性 bank 扫描。"
+  ],
+  "reference_round": 251
+}
