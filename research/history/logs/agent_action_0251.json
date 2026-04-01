@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中 {b_{e,i}} 是静态 expert 子库原子，E_pk(x) 由两路 product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出极少量 active experts；expert 内用 JumpReLU 形成局部 support。导出到 LUTurbo/Lottable 的在线链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，静态库不随样本动态生成，因此 `product_key_expert_jumprelu` 仍判定为直接兼容；`batch_topk`、`adaptive_budget_topk`、`lowrank_adaptive_budget_residual` 等不兼容 family 仍不得驱动当前 objective leaderboard。当前真实兼容 frontier 是 r250 的 `product_key_expert_jumprelu K=32 NUM_EXPERTS=512 LATENTS_PER_EXPERT=128 ACTIVE_EXPERTS=2`，controller 口径 objective=0.294330=cost 0.11x + exceed 0.184330；主导项仍是 exceed，但 r245->r250 的连续改进说明当前最好信号来自“compositional bank + 更窄 micro-expert width”而不是重新抬高 K。相对 r250，本轮只把 `LATENTS_PER_EXPERT` 从 `128` 降到 `96`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`NUM_EXPERTS=512`、`ACTIVE_EXPERTS=2`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 和其余 recipe 不变，直接测试当前 512-bank knee 下 expert-local width 是否仍过宽。按本地成本公式复核：`left_keys=22,right_keys=24`，router 访问固定为 `1024×(22+24)=47104`，active expert encoder 访问为 `2×1024×96=196608`，故 `selection_accesses=243712`、`deployment_accesses=163840`、`combined_accesses=407552`、exact `total_cost_ratio=0.09716796875`，在 controller 当前两位小数记分口径下记为 `0.10x`。因此它不仅比 r250 的 rounded cost 再左移一档，而且也有望带来比 r250 更稳健的 exact objective 改善；要刷新当前 controller frontier，只需 `exceed_alpha_0.50 < 0.19433016538619995`，这个门槛对一次 128->96 的 width knee probe 仍然现实。",
+  "summary": "建议以 r250 为 reference，只改 `LATENTS_PER_EXPERT=96`。这是当前 `product_key_expert_jumprelu` 主线下信息量最高、且最有机会带来 robust objective 改善的单变量 width-knee probe：保持 `K=32 + NUM_EXPERTS=512` 的已验证 bank 容量不变，直接测试更窄 micro-expert 能否把 total_cost 压到 exact `0.09717x` / controller `0.10x`，同时把 exceed 维持在约 `0.1943` 以下，从而继续降低 objective。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "这轮继续留在同一 family 仍然有充分依据，不属于低信息细扫。原因不是围绕旧 prompt 里的 `expert_jumprelu` 锚点做保守插值，而是本地 runtime 已经明确把真实兼容主线重写为 `product_key_expert_jumprelu`，且 r245-r250 连续回答了一个高价值结构问题：product-key/compositional routing 是否能在 short active path 下持续把 objective 往左下推。相对 r250 只改 `LATENTS_PER_EXPERT`，归因最干净，也比重新打开 `K` 轴或切新 family 更符合当前证据。之所以优先试 `96` 而不是更保守的 `112`，是因为 r250 在 exact 口径上其实没有击败 r249，说明下一轮更应该追求“即使按 exact 成本也能更稳地变好”的点，而不仅是再赌一次 rounded-cost frontier；`96` 给出更实质的 exact cost 下移，同时仍保留 512-bank 与 active_experts=2 的容量。主要风险是 128 已经接近最小可用 local width，进一步压窄会让 exceed 快速回弹；但当前 controller 门槛与 exact objective 门槛都相对宽松，这一轮足以高质量判断当前 PK 主线的真实 width knee 是否已经低于 128。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "LATENTS_PER_EXPERT",
+      "value": "96"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "本地 runtime/frontier 已确认当前真实兼容 incumbent 是 r250 的 `product_key_expert_jumprelu`，而不是旧 prompt 文本里的 `expert_jumprelu`；后续主线判断应以 `research/history/frontier.json` 为准。",
+    "r250 的 frontier 刷新依赖 controller 的 rounded `combined_ratio=0.11`；但 round summary 里的 exact objective `0.297123` 略高于 r249 的 exact `0.294943`，说明下一轮应优先寻找既能赢 controller、又更可能赢 exact objective 的点。",
+    "对 `product_key_expert_jumprelu K=32 NUM_EXPERTS=512 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=96`，本地成本公式复核为：`left_keys=22,right_keys=24`，`selection_accesses=243712`，`deployment_accesses=163840`，`combined_accesses=407552`，exact `total_cost_ratio=0.09716796875`，controller rounded cost 为 `0.10x`。",
+    "本地 allowlist 自检通过：`validate_env_overrides([{key:'LATENTS_PER_EXPERT', value:'96'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。",
+    "当前 PK 主线的收益来源仍更像 `compositional bank + tiny micro-experts`，而不是继续抬高 deploy-side `K`；在 r250 之后优先继续测 width knee，归因比 `K=48` 或 bank 继续波动更干净。"
+  ],
+  "next_hypotheses": [
+    "如果 `LATENTS_PER_EXPERT=96` 仍把 `exceed_alpha_0.50` 控在约 `0.1943` 以下并刷新 objective，则说明当前 PK 主线的真实 width knee 已低于 128；下一轮应以本轮为 reference，只改 `NUM_EXPERTS=256`，验证在更窄 micro-expert 下 bank 是否还能继续左移到更低成本档。",
+    "如果 `LATENTS_PER_EXPERT=96` 的 exceed 回弹过大、导致 objective 不再下降，则说明 128 更接近当前 512-bank 配方的最小可用 local width；下一轮应回到同一 reference 区间，只改 `LATENTS_PER_EXPERT=112`，补一个更保守的 width-knee 中间点，而不是继续线性下压到更小宽度。",
+    "如果 `LATENTS_PER_EXPERT=96` 的 objective 与 r250 接近但 exact cost 更低、训练吞吐或运行健康度更好，则应把结论记为“更窄 micro-expert 仍可能是 LUTurbo 更优部署点”；后续优先保留 low-width 版本，再围绕 bank-size 或实际吞吐做 follow-up，而不是重新抬高 `K`。"
+  ],
+  "reference_round": 250
+}
