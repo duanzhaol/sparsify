@@ -449,6 +449,8 @@ def _get_sae_class(architecture: str) -> type:
         return ExpertJumpReLUSparseCoder
     if architecture == "product_key_expert_jumprelu":
         return ProductKeyExpertJumpReLUSparseCoder
+    if architecture == "adaptive_active_product_key_expert_jumprelu":
+        return AdaptiveActiveProductKeyExpertJumpReLUSparseCoder
     if architecture == "product_key_factorized_expert_topk":
         return ProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
@@ -1608,6 +1610,51 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             + right_logits[:, self.pair_right_index]
         )
         selected_expert_idx, selected_probs = _select_active_expert_indices(
+            expert_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class AdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    ProductKeyExpertJumpReLUSparseCoder
+):
+    """PK-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
             expert_logits, self.active_experts
         )
         selected_weight = self.expert_encoders[selected_expert_idx]
