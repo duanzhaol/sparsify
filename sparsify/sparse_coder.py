@@ -461,6 +461,8 @@ def _get_sae_class(architecture: str) -> type:
         return DualSharedLowRankProductKeyExpertJumpReLUSparseCoder
     if architecture == "dual_shared_product_key_expert_jumprelu":
         return DualSharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "residual_dual_shared_product_key_expert_jumprelu":
+        return ResidualDualSharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
         return SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder
     if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
@@ -3056,6 +3058,163 @@ class DualSharedProductKeyExpertJumpReLUSparseCoder(
 
     architecture_name = "dual_shared_product_key_expert_jumprelu"
     shared_expert_count = 2
+
+
+class ResidualDualSharedProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Two shared residual cleanup stages followed by PK-routed expert cleanup."""
+
+    architecture_name = "residual_dual_shared_product_key_expert_jumprelu"
+    shared_expert_count = 2
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        if self.stage1_k < self.shared_expert_count:
+            raise ValueError(
+                f"{self.architecture_name} requires "
+                "stage1_k >= shared_expert_count so each residual shared stage has "
+                f"at least one active latent; got stage1_k={self.stage1_k}, "
+                f"shared_experts={self.shared_expert_count}"
+            )
+        self.stage1a_k = max(1, self.stage1_k // 2)
+        self.stage1b_k = self.stage1_k - self.stage1a_k
+
+    def _encode_single_shared_bank(
+        self,
+        x_centered: Tensor,
+        *,
+        bank_idx: int,
+        topk: int,
+        index_offset: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = x_centered.shape[:-1]
+        flat_x = x_centered.reshape(-1, self.d_in)
+        shared_pre_acts = (
+            torch.einsum(
+                "bd,ld->bl",
+                flat_x,
+                self.shared_encoders[bank_idx],
+            )
+            + self.shared_encoder_bias[bank_idx].unsqueeze(0)
+        )
+        shared_acts = F.relu(shared_pre_acts)
+        top_acts, top_indices = torch.topk(shared_acts, topk, dim=-1, sorted=False)
+        if index_offset:
+            top_indices = top_indices + index_offset
+        target_shape = (*original_shape, topk)
+        acts_shape = (*original_shape, self.latents_per_expert)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            shared_acts.reshape(acts_shape),
+        )
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+        return EncoderOutput(combined_acts, combined_indices, combined_full)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+
+        stage1a_acts, stage1a_indices, stage1a_full = self._encode_single_shared_bank(
+            x_centered,
+            bank_idx=0,
+            topk=self.stage1a_k,
+            index_offset=0,
+        )
+        stage1a_out = self._decode_sparse(stage1a_acts, stage1a_indices)
+
+        residual_1 = x_centered - stage1a_out
+        stage1b_acts, stage1b_indices, stage1b_full = self._encode_single_shared_bank(
+            residual_1,
+            bank_idx=1,
+            topk=self.stage1b_k,
+            index_offset=self.latents_per_expert,
+        )
+        stage1b_out = self._decode_sparse(stage1b_acts, stage1b_indices)
+
+        residual_2 = residual_1 - stage1b_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1a_acts, stage1b_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1a_indices, stage1b_indices, stage2_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1a_full, stage1b_full, stage2_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
 
 
 class DualSharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
