@@ -20,7 +20,6 @@ from .compatibility import (
     compatibility_hard_rules,
     compute_selection_cost_table,
     extract_full_prior_document,
-    is_compatible_label,
     summarize_registry_counts,
 )
 from .config_resolution import (
@@ -73,6 +72,8 @@ PROXY_OBJECTIVE = """\
 - 按当前 best lane 粗看，要逼近 `0.22` 往往意味着：若 `cost≈0.14x`，则 `exceed` 需接近 `0.08`；若 `cost≈0.12x`，则 `exceed` 也仍需压到约 `0.10`
 - 因此 `0.22` 基本不可能靠同一 family 的温和插值自然得到；更可能需要新的容量组织方式、新的 coarse-to-fine routing、或更强的“shared 主干 + tiny routed cleanup”分工
 - 局部参数微调只是辅助校准手段，不应连续多轮主导预算；若最近几轮都只是同一 family 上的小参数插值且 objective 没有扩展，应优先换结构槽位
+- 当某条 winning line 已经通过一轮结构升级获得 recent 改进、但后续 `K / LATENTS_PER_EXPERT / STAGE1_RATIO` 之类局部 follow-up 多数只是持平或更差时，应把它视作 scaffold / baseline，而不是继续把大部分预算花在线性细扫上
+- 这类 scaffold 更适合作为“承接下一层结构想法”的底座：优先测试能在近同成本下更强压低 exceed 的升级，而不是继续微调同一 split 或同一部署预算
 - 对 MoE-like 方向，只有在 router 足够轻、expert 更小、且最终仍能导出为静态子库有限加权和时才值得尝试"""
 
 EXECUTION_LAYER = """\
@@ -123,6 +124,12 @@ ARCHITECTURE_INTEGRATION_SKILL_PATH = Path(
 
 # Hint prefixes to filter from tactical hints (legacy constraints no longer active)
 _HARD_CONSTRAINT_HINT_PREFIXES: tuple[str, ...] = ()
+
+
+def _prompt_family_allowed(registry: dict[str, str], family_name: str) -> bool:
+    """Prompt rendering should only hide families explicitly marked incompatible."""
+    label = str(registry.get((family_name or "").lower()) or "").lower()
+    return label != "incompatible"
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +188,7 @@ def section_target_profile() -> str:
 def _best_compatible_feasible_frontier_entry(
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     current_target = default_target_profile()
     best_entry: dict[str, Any] | None = None
@@ -194,7 +202,7 @@ def _best_compatible_feasible_frontier_entry(
         if not profile_matches(cfg, current_target):
             continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
-        if family_name and not is_compatible_label(registry.get(family_name)):
+        if family_name and not _prompt_family_allowed(registry, family_name):
             continue
         metrics = entry_objective_metrics(entry, cost_cache={})
         if not metrics["feasible"]:
@@ -211,6 +219,118 @@ def _best_compatible_feasible_frontier_entry(
             best_metrics = metrics
 
     if best_entry is None or best_metrics is None:
+        frontier_best: tuple[dict[str, Any], dict[str, Any]] | None = None
+    else:
+        frontier_best = (best_entry, best_metrics)
+
+    recent_best = _best_compatible_recent_summary_entry(round_summaries or [], registry)
+    if recent_best is None:
+        return frontier_best
+    if frontier_best is None:
+        return recent_best
+
+    frontier_rank = objective_rank_tuple(
+        frontier_best[1]["objective_score"],
+        frontier_best[1]["total_cost_ratio"],
+        frontier_best[1][EXCEED_FIELD],
+        frontier_best[1]["fvu"],
+    )
+    recent_rank = objective_rank_tuple(
+        recent_best[1]["objective_score"],
+        recent_best[1]["total_cost_ratio"],
+        recent_best[1][EXCEED_FIELD],
+        recent_best[1]["fvu"],
+    )
+    if recent_rank < frontier_rank:
+        return recent_best
+
+    return frontier_best
+
+
+def _summary_metric_float(summary: dict[str, Any], key: str) -> float | None:
+    result = summary.get("result", {})
+    try:
+        value = result.get(key)
+    except AttributeError:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summary_entry_like(summary: dict[str, Any]) -> dict[str, Any] | None:
+    cfg = config_from_round_summary(summary)
+    if not cfg:
+        return None
+    return {
+        "round": summary.get("round"),
+        "architecture": (
+            cfg.get("ARCHITECTURE")
+            or summary.get("result", {}).get("architecture")
+            or "?"
+        ),
+        "k": cfg.get("K") or summary.get("result", {}).get("k") or "?",
+        "ef": cfg.get("EXPANSION_FACTOR") or summary.get("result", {}).get("expansion_factor") or "?",
+        "config": cfg,
+        "source": "recent_summary",
+    }
+
+
+def _best_compatible_recent_summary_entry(
+    round_summaries: list[dict[str, Any]],
+    registry: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    current_target = default_target_profile()
+    best_entry: dict[str, Any] | None = None
+    best_metrics: dict[str, Any] | None = None
+    best_rank: tuple[float, float, float, float] | None = None
+
+    for summary in round_summaries:
+        if not isinstance(summary, dict):
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is None or not profile_matches(cfg, current_target):
+            continue
+        family_name = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or cfg.get("architecture")
+            or ""
+        ).lower()
+        if family_name and not _prompt_family_allowed(registry, family_name):
+            continue
+        objective = _summary_metric_float(summary, "objective_score")
+        total_cost_ratio = _summary_metric_float(summary, "total_cost_ratio")
+        exceed = _summary_metric_float(summary, "exceed_alpha_0_50")
+        fvu = _summary_metric_float(summary, "val_fvu")
+        selection_cost_ratio = _summary_metric_float(summary, "selection_cost_ratio")
+        deployment_ratio = _summary_metric_float(summary, "deployment_ratio")
+        if objective is None or total_cost_ratio is None or exceed is None:
+            continue
+        if total_cost_ratio > 1.5:
+            continue
+        rank = objective_rank_tuple(objective, total_cost_ratio, exceed, fvu)
+        if best_rank is None or rank < best_rank:
+            entry_like = _summary_entry_like(summary)
+            if entry_like is None:
+                continue
+            best_rank = rank
+            best_entry = entry_like
+            best_metrics = {
+                "objective_score": objective,
+                "total_cost_ratio": total_cost_ratio,
+                "selection_cost_ratio": selection_cost_ratio,
+                "deployment_ratio": deployment_ratio,
+                EXCEED_FIELD: exceed,
+                "fvu": fvu,
+                "feasible": True,
+            }
+
+    if best_entry is None or best_metrics is None:
         return None
     return best_entry, best_metrics
 
@@ -218,9 +338,10 @@ def _best_compatible_feasible_frontier_entry(
 def section_high_priority_directions(
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]] | None = None,
     target_objective: float = TARGET_OBJECTIVE,
 ) -> str:
-    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
+    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry, round_summaries)
     incumbent_note = (
         "  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。"
     )
@@ -257,6 +378,12 @@ def section_high_priority_directions(
                 "后续主问题不再是简单复现更低 cost，而是要进一步回答：如何在维持这类短 active path 的同时，把 exceed 再明显打下去。"
                 "优先考虑能改善 tail / hard-token 处理的结构，而不是只继续做微小容量插值。"
             )
+        elif arch == "shared_product_key_expert_jumprelu":
+            mainline_note = (
+                "  当前最强已验证主线是 `shared_product_key_expert_jumprelu`：它已经说明“shared coarse 主干 + product-key tiny routed cleanup”"
+                "比 plain PK 更能改善当前目标。后续应把这条线当作 winning scaffold，而不是继续把大部分预算花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性细扫上。"
+                "当前更高价值的问题是：在近同成本下，什么结构升级能在保留这套 scaffold 的同时，把 low-K exceed 再明显压低。"
+            )
         if cost is not None:
             low = max(0.0, float(cost) - 0.02)
             high = float(cost) + 0.04
@@ -277,36 +404,40 @@ def section_high_priority_directions(
         incumbent_note,
         "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
         "  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。",
+        "  如果当前最佳线最近是靠 architecture probe 而不是局部插值取得改进，那么后续默认应把它当对照 scaffold：只保留极少量必要的 knee 校准，其余预算优先投向建立在该 scaffold 之上的新结构升级。",
         "",
         "当前高优先级方向：",
         "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
         f"  2. {cost_band_note.strip()}",
-        "  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
-        "  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
-        "  5. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。",
-        "  6. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。",
-        "  7. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
-        "  8. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
-        f"  9. {mainline_note.strip()}",
+        "  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。",
+        "  4. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
+        "  5. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
+        "  6. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。",
+        "  7. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。",
+        "  8. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+        "  9. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        f"  10. {mainline_note.strip()}",
         "",
         "当前应下调优先级的方向：",
         "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
         "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。",
-        "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
-        "  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。",
-        "  5. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。",
-        "  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
-        "  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
+        "  3. 在已经出现局部 knee 信号后，继续围绕同一个 scaffold 做 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的多轮近邻扫点。",
+        "  4. 只把 active path、shared split 或 expert 宽度做轻微改动，但没有明确解释为什么会更慢地恶化 exceed 的低信息增量实验。",
+        "  5. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
+        "  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。",
+        "  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
+        "  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
     ])
 
 
 def section_objective_target_gap(
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]] | None = None,
     target_objective: float = TARGET_OBJECTIVE,
 ) -> str:
     """Show what cost/exceed tradeoffs are needed to reach the current stage target."""
-    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
+    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry, round_summaries)
     if incumbent is None:
         return ""
     _, incumbent_metrics = incumbent
@@ -419,6 +550,7 @@ def _recent_summaries_with_latest(state: Any, limit: int = 20) -> list[dict[str,
 def section_frontier(
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]] | None = None,
     limit: int = 10,
     cost_cache: dict[str, dict] | None = None,
 ) -> str:
@@ -427,6 +559,7 @@ def section_frontier(
         cost_cache = {}
     current_target = default_target_profile()
     entries: list[tuple[tuple[float, float, float, float], str]] = []
+    seen_round_ids: set[int] = set()
     saw_any_entry = False
 
     for key, entry in frontier.items():
@@ -438,7 +571,7 @@ def section_frontier(
             continue
         arch = entry.get("architecture", "?")
         family_name = str(cfg.get("family_name") or arch).lower()
-        if not is_compatible_label(registry.get(family_name)):
+        if not _prompt_family_allowed(registry, family_name):
             continue
         metrics = entry_objective_metrics(entry, cost_cache=cost_cache)
         rank = objective_rank_tuple(
@@ -457,10 +590,40 @@ def section_frontier(
             f"| {'FEASIBLE' if metrics['feasible'] else 'OVER_BUDGET'}"
         )
         entries.append((rank, line))
+        try:
+            seen_round_ids.add(int(str(key).lstrip("r")))
+        except (TypeError, ValueError):
+            pass
 
     entries.sort(key=lambda item: item[0])
 
     parts = ["训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）："]
+    recent_best = _best_compatible_recent_summary_entry(round_summaries or [], registry)
+    if recent_best is not None:
+        recent_entry, recent_metrics = recent_best
+        recent_rank = objective_rank_tuple(
+            recent_metrics["objective_score"],
+            recent_metrics["total_cost_ratio"],
+            recent_metrics[EXCEED_FIELD],
+            recent_metrics["fvu"],
+        )
+        try:
+            recent_round_id = int(recent_entry.get("round"))
+        except (TypeError, ValueError):
+            recent_round_id = None
+        frontier_best_rank = entries[0][0] if entries else None
+        if (
+            recent_round_id is not None
+            and recent_round_id not in seen_round_ids
+            and (frontier_best_rank is None or recent_rank < frontier_best_rank)
+        ):
+            parts.append(
+                f"  r{recent_round_id:>3} objective={recent_metrics['objective_score']:.6f} "
+                f"= cost {recent_metrics['total_cost_ratio']:.6f}x + exceed {recent_metrics[EXCEED_FIELD]:.6f} "
+                f"| fvu={recent_metrics['fvu'] if recent_metrics['fvu'] is not None else '?'} "
+                f"| arch={recent_entry.get('architecture', '?')} K={recent_entry.get('k', '?')} EF={recent_entry.get('ef', '?')} "
+                "| FEASIBLE | source=recent_summary"
+            )
     if entries:
         for _, line in entries[:limit]:
             parts.append(line)
@@ -476,6 +639,7 @@ def section_frontier(
 def section_selection_cost_status(
     frontier: dict[str, Any],
     registry: dict[str, str],
+    round_summaries: list[dict[str, Any]] | None = None,
 ) -> str:
     """Show current incumbent and component leaders under the single objective."""
     current_target = default_target_profile()
@@ -491,7 +655,7 @@ def section_selection_cost_status(
         if not profile_matches(cfg, current_target):
             continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
-        if not is_compatible_label(registry.get(family_name)):
+        if not _prompt_family_allowed(registry, family_name):
             continue
         metrics = entry_objective_metrics(entry, cost_cache=cost_cache)
         if not metrics["feasible"]:
@@ -514,6 +678,18 @@ def section_selection_cost_status(
             and (lowest_exceed is None or float(metrics[EXCEED_FIELD]) < lowest_exceed[0])
         ):
             lowest_exceed = (float(metrics[EXCEED_FIELD]), entry, metrics)
+
+    recent_best = _best_compatible_recent_summary_entry(round_summaries or [], registry)
+    if recent_best is not None:
+        recent_entry, recent_metrics = recent_best
+        recent_rank = objective_rank_tuple(
+            recent_metrics["objective_score"],
+            recent_metrics["total_cost_ratio"],
+            recent_metrics[EXCEED_FIELD],
+            recent_metrics["fvu"],
+        )
+        if best_objective is None or recent_rank < best_objective[0]:
+            best_objective = (recent_rank, recent_entry, recent_metrics)
 
     if best_objective is None:
         return ""
@@ -562,7 +738,7 @@ def section_cost_feasibility_table(registry: dict[str, str]) -> str:
     from .compatibility import _COST_TABLE_ARCHITECTURES, _COST_TABLE_EF_VALUES
 
     # Filter to compatible architectures only
-    archs = [a for a in _COST_TABLE_ARCHITECTURES if is_compatible_label(registry.get(a))]
+    archs = [a for a in _COST_TABLE_ARCHITECTURES if _prompt_family_allowed(registry, a)]
     if not archs:
         archs = _COST_TABLE_ARCHITECTURES  # fallback: show all if registry empty
     efs = _COST_TABLE_EF_VALUES
@@ -627,7 +803,7 @@ def section_recent_rounds(
             or summary.get("result", {}).get("architecture")
             or ""
         ).lower()
-        if family_name and not is_compatible_label(registry.get(family_name)):
+        if family_name and not _prompt_family_allowed(registry, family_name):
             continue
         compatible_lines.append(f"  {_trim_round_summary(summary)}")
     if not compatible_lines:
@@ -676,7 +852,7 @@ def section_reference_configs(
         if not profile_matches(cfg, current_target):
             continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
-        if family_name and not is_compatible_label(registry.get(family_name)):
+        if family_name and not _prompt_family_allowed(registry, family_name):
             continue
         round_id = _safe_round_id(str(rid).lstrip("r"))
         if round_id is None:
@@ -725,7 +901,7 @@ def section_reference_configs(
         result = summary.get("result", {})
         decision = str(result.get("decision") or "")
         family_name = _family_name(summary)
-        if family_name and not is_compatible_label(registry.get(family_name)):
+        if family_name and not _prompt_family_allowed(registry, family_name):
             return None
         cfg = config_from_round_summary(summary)
         if not cfg:
@@ -742,7 +918,7 @@ def section_reference_configs(
         if not cfg:
             return None
         family_name = str(cfg.get("family_name") or entry.get("architecture") or "").lower()
-        if family_name and not is_compatible_label(registry.get(family_name)):
+        if family_name and not _prompt_family_allowed(registry, family_name):
             return None
         decision = "frontier"
         return (
@@ -927,6 +1103,11 @@ def section_literature_inspirations() -> str:
 - 普通 token 的基础成本。
 - 困难 token 的额外补偿需求。
 
+如何使用这些灵感：
+- 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
+- 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
+- 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+
 别名与复用提醒：
 - 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
 - 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
@@ -978,7 +1159,7 @@ def section_memory_brief(
             if not profile_matches(cfg, current_target):
                 continue
             fn = cfg.get("family_name", entry.get("architecture", ""))
-            if fn and is_compatible_label(registry.get(fn.lower())):
+            if fn and _prompt_family_allowed(registry, fn.lower()):
                 frontier_families.add(fn.lower())
 
     recent_families: set[str] = set()
@@ -989,7 +1170,7 @@ def section_memory_brief(
             or summary.get("result", {}).get("architecture")
             or ""
         ).lower()
-        if fn and is_compatible_label(registry.get(fn.lower())):
+        if fn and _prompt_family_allowed(registry, fn.lower()):
             recent_families.add(fn)
 
     show = frontier_families | recent_families
@@ -1050,7 +1231,7 @@ def section_memory_brief(
     filtered_count = sum(
         1
         for name in memory.get("architecture_families", {})
-        if not is_compatible_label(registry.get(str(name).lower()))
+        if not _prompt_family_allowed(registry, str(name).lower())
     )
     if filtered_count:
         parts.append("")
@@ -1150,11 +1331,11 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_target_profile())
-    sections.append(section_high_priority_directions(state.frontier, registry))
+    sections.append(section_high_priority_directions(state.frontier, registry, recent_summaries))
     sections.append(section_literature_inspirations())
-    sections.append(section_frontier(state.frontier, registry))
-    sections.append(section_selection_cost_status(state.frontier, registry))
-    sections.append(section_objective_target_gap(state.frontier, registry))
+    sections.append(section_frontier(state.frontier, registry, recent_summaries))
+    sections.append(section_selection_cost_status(state.frontier, registry, recent_summaries))
+    sections.append(section_objective_target_gap(state.frontier, registry, recent_summaries))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         recent_summaries[-8:],
@@ -1207,11 +1388,11 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_target_profile())
-    sections.append(section_high_priority_directions(state.frontier, registry))
+    sections.append(section_high_priority_directions(state.frontier, registry, recent_summaries))
     sections.append(section_literature_inspirations())
-    sections.append(section_frontier(state.frontier, registry, limit=8))
-    sections.append(section_selection_cost_status(state.frontier, registry))
-    sections.append(section_objective_target_gap(state.frontier, registry))
+    sections.append(section_frontier(state.frontier, registry, recent_summaries, limit=8))
+    sections.append(section_selection_cost_status(state.frontier, registry, recent_summaries))
+    sections.append(section_objective_target_gap(state.frontier, registry, recent_summaries))
     sections.append(section_cost_feasibility_table(registry))
     sections.append(section_recent_rounds(
         recent_summaries[-8:],

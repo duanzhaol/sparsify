@@ -21,8 +21,9 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from .compatibility import extract_cost_extra_config, is_compatible_label
+from .compatibility import extract_cost_extra_config
 from .config_resolution import (
+    config_from_round_summary,
     structured_config_from_round_summary,
     render_env_config,
     resolve_action_configs,
@@ -217,7 +218,7 @@ def build_policy_guidance(
 ) -> str:
     """把当前策略模式渲染成 prompt 中直接可读的中文说明。"""
     mode = policy_state["mode"]
-    mainline = _resolve_policy_anchor(state, mode)
+    mainline = _resolve_policy_anchor(state)
     recipe_line = _format_recipe_line(mainline["config"])
     reason = policy_state["reason"]
     if mainline["source"] == "target_profile_baseline":
@@ -309,7 +310,8 @@ def build_policy_guidance(
         "4. 降低 encoder 成本靠降 EF。降低部署成本靠降 K / TRUNK_RANK / NUM_CODES。若结构能明显压低 exceed，则允许适度 cost 上升但必须让 objective 真正下降。",
         "5. 调 recipe 时要观察训练曲线形状，不要只看最后一个 F 值。",
         "6. 当前已验证最强主线若是更大 expert 池 + 更小 K 的低成本 routed family，则不要假设更复杂结构天然更优；只有当新结构能明确解释 small-K exceed 为何会更慢退化时，才值得挑战 incumbent。",
-        "7. 因此当前优先方向应分成两类：一类是 incumbent 主线附近真正高价值的 knee / 容量点；另一类是 literature-inspired、但与现有 family 明确不同的结构 probe。",
+        "7. 如果最近的改进来自 architecture probe，而后续 `K / LATENTS / split` 局部 follow-up 多数只是持平或更差，则应把当前 winning line 当作 scaffold / baseline，只保留极少量必要校准，不再让局部细扫继续主导预算。",
+        "8. 因此当前优先方向应分成两类：一类是建立在当前 winning scaffold 上、能在近同成本下更强压低 exceed 的结构升级；另一类才是 literature-inspired、但与现有 family 明确不同的结构 probe。",
         "",
         "单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。",
         "成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。",
@@ -368,8 +370,51 @@ def _objective_focus_status(
     }
 
 
-def _resolve_policy_anchor(state: Any, mode: str) -> dict[str, Any]:
-    """Choose the most relevant anchor config for the current policy mode."""
+def _resolve_policy_anchor(state: Any) -> dict[str, Any]:
+    """Choose the most relevant anchor config for the current target profile."""
+    registry = state.load_compatibility_registry()
+    current_profile = default_target_profile()
+    best_rank = (float("inf"), float("inf"), float("inf"), float("inf"))
+    best_config: dict[str, str] | None = None
+    best_family: str | None = None
+    for summary in state.recent_round_summaries(limit=100):
+        if not isinstance(summary, dict):
+            continue
+        if not summary_is_usable_reference(summary):
+            continue
+        cfg = structured_config_from_round_summary(summary)
+        if cfg is None or not profile_matches(cfg, current_profile):
+            continue
+        family_name = str(
+            summary.get("family_name")
+            or summary.get("action", {}).get("family_name")
+            or summary.get("result", {}).get("architecture")
+            or cfg.get("architecture")
+            or ""
+        ).lower()
+        if str((registry or {}).get(family_name) or "").lower() == "incompatible":
+            continue
+        try:
+            objective = float(summary.get("result", {}).get("objective_score"))
+            total_cost = float(summary.get("result", {}).get("total_cost_ratio"))
+            exceed = float(summary.get("result", {}).get(EXCEED_FIELD))
+            fvu = float(summary.get("result", {}).get("val_fvu"))
+        except (TypeError, ValueError):
+            continue
+        rank = objective_rank_tuple(objective, total_cost, exceed, fvu)
+        if rank < best_rank:
+            env_cfg = config_from_round_summary(summary)
+            if not env_cfg:
+                continue
+            best_rank = rank
+            best_config = env_cfg
+            best_family = family_name or env_cfg.get("ARCHITECTURE", "").lower()
+    if best_config is not None:
+        return {
+            "family_name": best_family or best_config.get("ARCHITECTURE", "topk").lower(),
+            "config": best_config,
+            "source": "recent_best_summary",
+        }
     return resolve_mainline_snapshot(state)
 
 
@@ -395,7 +440,7 @@ def _best_objective_frontier_entry(
             or entry.get("architecture")
             or ""
         ).lower()
-        if registry and not is_compatible_label(registry.get(family_name)):
+        if str((registry or {}).get(family_name) or "").lower() == "incompatible":
             continue
         metrics = entry_objective_metrics(entry)
         if not metrics["feasible"]:
