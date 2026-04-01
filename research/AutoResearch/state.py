@@ -698,16 +698,31 @@ class StateManager:
         arch: str,
     ) -> None:
         families = self._memory.setdefault("architecture_families", {})
-        family = families.setdefault(family_name, {
-            "status": "incubating" if family_stage != "mainline" else "active",
-            "design_hypothesis": action.hypothesis,
-            "tested_configs": [],
-            "known_issues": [],
-            "next_steps": [],
-            "best_objective_score": None,
-            "best_fvu": None,
-            "last_round": None,
-        })
+        family = families.get(family_name)
+
+        # Policy rejection should not create a brand-new incubating family slot.
+        if result.decision == "policy_reject":
+            if family is not None:
+                family["last_round"] = round_id
+                family["design_hypothesis"] = action.hypothesis
+                family["next_steps"] = action.next_hypotheses[:8]
+                family.setdefault("known_issues", []).append(
+                    f"round {round_id}: policy_reject | {result.error_summary or result.termination_reason}"
+                )
+                family["known_issues"] = family["known_issues"][-20:]
+            return
+
+        if family is None:
+            family = families.setdefault(family_name, {
+                "status": "incubating" if family_stage != "mainline" else "active",
+                "design_hypothesis": action.hypothesis,
+                "tested_configs": [],
+                "known_issues": [],
+                "next_steps": [],
+                "best_objective_score": None,
+                "best_fvu": None,
+                "last_round": None,
+            })
 
         if _is_invalid_runtime_result(result):
             family.setdefault("known_issues", []).append(
@@ -736,8 +751,7 @@ class StateManager:
         # Update best objective / FVU and family status based on decision
         objective_score = _safe_float(result.objective_score)
         val_fvu = _safe_float(result.val_fvu)
-        if result.decision == "keep":
-            family["status"] = "active"
+        if result.decision in ("keep", "archive", "promote"):
             if objective_score is not None and (
                 family.get("best_objective_score") is None
                 or objective_score < float(family["best_objective_score"])
@@ -747,8 +761,12 @@ class StateManager:
                 family.get("best_fvu") is None or val_fvu < float(family["best_fvu"])
             ):
                 family["best_fvu"] = val_fvu
+
+        if result.decision in ("keep", "promote"):
+            family["status"] = "active"
         elif result.decision == "archive":
-            pass  # Near-frontier, keep current status
+            if family.get("status") != "active":
+                family["status"] = "archived"
         elif result.decision == "discard":
             if family.get("status") not in ("active",):
                 family["status"] = "discarded"

@@ -112,14 +112,14 @@ def check_incubation_limits(
     is_incubating_stage = family_stage not in ("mainline", "promote_to_mainline")
 
     active_incubating = sum(
-        1 for family in families.values() if family.get("status") == "incubating"
+        1 for family in families.values() if _counts_against_incubation_limit(family)
     )
 
     if is_new and is_incubating_stage and active_incubating >= MAX_INCUBATING_FAMILIES:
         stale = [
             family_name
             for family_name, family in families.items()
-            if family.get("status") == "incubating"
+            if _counts_against_incubation_limit(family)
             and _proxy_round_count(family) >= MAX_INCUBATING_PROXY_ROUNDS
             and not _has_positive_result(family)
         ]
@@ -141,7 +141,7 @@ def auto_archive_stale_families(families: dict[str, Any]) -> list[str]:
     """自动归档长期无正结果的 incubating family。"""
     archived: list[str] = []
     for name, family in families.items():
-        if family.get("status") != "incubating":
+        if not _counts_against_incubation_limit(family):
             continue
         if _proxy_round_count(family) >= MAX_INCUBATING_PROXY_ROUNDS and not _has_positive_result(family):
             family["status"] = "archived"
@@ -661,8 +661,16 @@ def _proxy_round_count(family: dict[str, Any]) -> int:
     )
 
 
+def _counts_against_incubation_limit(family: dict[str, Any]) -> bool:
+    if family.get("status") != "incubating":
+        return False
+    if _proxy_round_count(family) <= 0:
+        return False
+    return not _has_positive_result(family)
+
+
 def _has_positive_result(family: dict[str, Any]) -> bool:
     return any(
-        config.get("decision") in ("keep", "promote")
+        config.get("decision") in ("keep", "promote", "archive")
         for config in family.get("tested_configs", [])
     )
