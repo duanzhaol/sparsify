@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 E(x) 是轻量 router 选出的少量 active experts，{b_{e,i}} 是各 expert 的静态子库原子，expert 内支持集 Ŝ_e(x) 由 JumpReLU 门控局部激活形成：positive_{e,i}(x)=ReLU(z_{e,i}(x))，gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β)，最终 α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此 `expert_jumprelu` 仍属直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能驱动当前兼容 leaderboard。本轮唯一主假设是：r235 与 r236 已表明 `expert_jumprelu` 在 K=32 与 K=48 两个 matched-cost 点都略优于对应 `expert_topk`，说明支持规则替换本身有真实但很弱的信号；当前更高价值的问题不再是继续推 K，而是验证默认 `JUMPRELU_INIT_THRESHOLD=0.0` 是否过于宽松，导致许多弱激活仍占据小 K 预算。因此相对 r235 只把 `JUMPRELU_INIT_THRESHOLD` 从默认 0 提到 `0.05`，保持 `ARCHITECTURE=expert_jumprelu`、`K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试轻度正阈值是否能在不增加任何 cost 的前提下压低 exceed_alpha_0.50，把当前 incumbent 从 0.3545 再往下推。该改动不改变 encoder 或 deployment 成本，exact total_cost_ratio 仍保持 0.1640625，因此这是一次纯动态支持校准 probe，而不是新的 cost 交换。",
+  "summary": "建议以 r235 为 reference，只改 `JUMPRELU_INIT_THRESHOLD=0.05`，做一轮 `expert_jumprelu` 的同成本动态参数 probe。目标是回答当前 family 的微弱优势能否通过更强阈值整形放大成可感知的 objective 改善；如果不能，就应停止继续在 JumpReLU 家族上做局部细扫。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "这轮满足单变量原则：相对 r235 只改 `JUMPRELU_INIT_THRESHOLD`，没有代码改动，也没有新增 tunable key。之所以没有继续把 K 推到 64，是因为 r236 已经回答了最关键的 knee 问题：`expert_jumprelu@K48` 仅比 matched `expert_topk@K48` 略好约 0.0004 objective，但仍显著差于当前 incumbent `expert_jumprelu@K32`，这说明继续沿 K 轴细扫的信息增量已经开始下降。之所以此时仍允许留在同一 family 一轮，是因为当前 family 刚刚在两个 matched-cost 点都给出一致但很弱的正信号，而 `JUMPRELU_INIT_THRESHOLD` 正是该 family 的独特机制旋钮；默认阈值 0.0 很可能让许多弱激活在 small-K 情况下仍占用支持预算，轻度正阈值是当前最直接、最可归因、也最不混入成本因素的验证。主要风险是阈值抬高会削弱有效容量，导致 exceed 反而上升；但如果连这种不增加任何 cost 的家族内校准都无法把 objective 从 0.3545 再往下推，就可以更明确地结束 JumpReLU 线的局部优化，把预算转回新的结构槽位。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "JUMPRELU_INIT_THRESHOLD",
+      "value": "0.05"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r235 与 r236 一起表明 `expert_jumprelu` 相对 matched `expert_topk` 确有一致但很弱的正信号：K=32 时 objective 约优 0.0010，K=48 时 objective 约优 0.0004，但这条线尚未形成足够强的新 knee。",
+    "r236 的关键结论是 `expert_jumprelu@K48` 没有把 global incumbent 拉低，说明继续沿 K 轴向右推的价值已经有限；若继续留在该 family，优先级更高的是调家族独有的支持整形参数，而不是再补一个 K 点。",
+    "将 `JUMPRELU_INIT_THRESHOLD` 从 0 提到 0.05 不改变 LUTurbo 导出形式，也不改变 encoder/deployment 成本；相对 r235 的 exact total_cost_ratio 仍为 0.1640625。",
+    "本地 override allowlist 已校验：`validate_env_overrides([{key: JUMPRELU_INIT_THRESHOLD, value: 0.05}], fallback_architecture='expert_jumprelu')` 返回空列表。"
+  ],
+  "next_hypotheses": [
+    "如果 `JUMPRELU_INIT_THRESHOLD=0.05` 在 K=32 同成本下显著压低 exceed 并刷新当前 incumbent，则下一轮可保持 family 不变，只改 `JUMPRELU_BANDWIDTH=0.05`，测试更锐利门控是否还能继续放大这一收益。",
+    "如果 `JUMPRELU_INIT_THRESHOLD=0.05` 与 r235 基本持平或更差，则说明 `expert_jumprelu` 的正信号已经接近耗尽；下一轮应切换到新的结构槽位，而不是继续在 JumpReLU family 上做局部插值。",
+    "如果这轮失败，优先回到真正新的 matched-objective architecture probe，例如更细粒度 shared/coarse + routed micro-experts 或其他能明确解释 small-K exceed 为何会更慢退化的结构。"
+  ],
+  "reference_round": 235
+}
