@@ -72,6 +72,7 @@ ARCHITECTURE_OVERRIDE_KEYS: dict[str, set[str]] = {
     "factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
     "shared_routed_factorized_expert_residual": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
     "shared_lowrank_routed_expert_topk": _SHARED_LOWRANK_ROUTED_EXPERT_KEYS,
+    "shared_lowrank_two_stage_residual_expert": _FACTORIZED_EXPERT_RESIDUAL_KEYS,
     "shared_lowrank_routed_expert_residual": _SHARED_LOWRANK_ROUTED_EXPERT_RESIDUAL_KEYS,
     "lowrank_residual": _LOWRANK_KEYS,
     "lowrank_expert_topk": _LOWRANK_EXPERT_KEYS,
