@@ -1,0 +1,30 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式写为 x_hat = Σ_{i∈S_sh^{k1}(x)} α_i^sh(x) b_i^sh + Σ_{e∈E_pk(r1(x))} Σ_{j∈S_e^{k2}(r1(x))} γ_{e,j}(x) c_{e,j}，其中 r1(x)=x-Σ α_i^sh(x)b_i^sh，k1=round(K·ρ)，k2=K-k1，ρ=STAGE1_RATIO；第一项是 always-on shared coarse library 的静态查表加权和，第二项是在 residual 上由 product-key 路由选出的少量静态 expert 子库内做 JumpReLU 稀疏加权和。导出到 LUTurbo/Lottable 的在线链路仍是“shared 查表 -> residual -> PK 路由到静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，不涉及动态字典生成，因此 `shared_product_key_expert_jumprelu` 判定为直接兼容。当前兼容 family 的最新精确信号表明 r266 exact objective=0.275001 优于 r263 exact=0.278037，而 r267 在同 exact cost 0.095703125 下把 routed path 从 AE=2 加到 3 反而退化到 objective=0.284733，说明当前 0.10x 成本带里更值得追问的不是再加 routed expert，而是把同样的 K 预算在 shared coarse 与 expert cleanup 之间如何分工。已本地复核：对 `shared_product_key_expert_jumprelu K=32 NUM_EXPERTS=1024 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=56`，`STAGE1_RATIO` 从 0.125 到 0.75 的 exact 成本都不变，selection=237568、deployment=163840、combined=401408、exact total_cost_ratio=0.095703125。因此相对 r266 只改 `STAGE1_RATIO=0.5` 是当前最高信息量且完全同成本的单变量 probe：直接测试当前 8/24 的 routed-heavy 分工是否仍低估了 shared 主干价值，还是 shared branch 只应保持轻量 coarse role。",
+  "summary": "以 r266 为 reference，只改 `STAGE1_RATIO=0.5`，在完全同 exact cost 的条件下对 `shared_product_key_expert_jumprelu` 做一次 coarse-vs-cleanup 预算分工 probe。目标是回答：在当前 many-tiny PK recipe 下，shared coarse branch 是否值得占用更多 K 预算，从而进一步压低 exceed_alpha_0.50 并把 objective 真正往下推。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "shared_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮遵守单变量原则，相对 r266 只改 `STAGE1_RATIO`，没有把架构切换、K 变化或 expert 容量变化混在一起。之所以选 `0.5` 而不是更小步的 `0.375`，是因为本轮目标不是做低信息细扫，而是在 exact 同成本下对当前最强 recent signal 做一次更有裁决力的分工测试：r266 已经证明“shared coarse + PK cleanup”优于同成本的第三个 routed expert，下一问就该是 shared 分支是否还应更强。主要风险是 expert cleanup 才是当前 family 的核心收益来源，若把 stage1_k 从 8 提到 16 后 exceed 回升，则可以较清晰地判定该 family 在当前 hookpoint 上只适合轻量 shared coarse，不值得继续沿 shared-budget 方向深挖。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "STAGE1_RATIO",
+      "value": "0.5"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "本地 exact cost 复核确认：`shared_product_key_expert_jumprelu K=32 NUM_EXPERTS=1024 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=56` 下，`STAGE1_RATIO` 在 0.125/0.25/0.375/0.5/0.625/0.75 时 selection 都是 237568、deployment 都是 163840、combined 都是 401408，exact total_cost_ratio 固定为 0.095703125。",
+    "当前 ~0.10x 成本带的最强 recent exact objective 信号是 r266 `shared_product_key_expert_jumprelu`：objective=0.275001125，优于 r263 exact=0.2780370712；r267 `product_key_expert_jumprelu ACTIVE_EXPERTS=3` 在同 exact cost 下更差，objective=0.284733125、exceed=0.189030。",
+    "`shared_product_key_expert_jumprelu` 历史上只在当前 target 上以 `STAGE1_RATIO=0.25` 跑过两次（r258、r266）；当前 family 的 stage-split 轴仍基本未被探索。",
+    "不兼容 family 继续只作历史参考，不参与当前兼容 leaderboard 与主线决策：`batch_topk`、`adaptive_budget_topk`、`lowrank_adaptive_budget_residual`。"
+  ],
+  "next_hypotheses": [
+    "如果 `STAGE1_RATIO=0.5` 在同 exact cost 下进一步压低 exceed、并优于 r266，则说明当前 shared+PK family 的收益不只是轻量 coarse hint，而更接近“shared backbone + routed residual cleanup”；下一轮应留在该 family，只做一次更细的 `STAGE1_RATIO` 定位或再判断是否值得回测 `0.375/0.625`。",
+    "如果 `STAGE1_RATIO=0.5` 明显弱于 r266 的 `0.25`，则可较清晰判定当前 hookpoint 上 shared branch 的最佳角色仍是轻量 coarse branch，后续应停止沿 shared-budget 继续上探，转回新的 matched architecture probe。",
+    "如果 `STAGE1_RATIO=0.5` 只带来很小变化但训练曲线前后段形状更稳，则说明该 family 的主要收益来自结构本身而不是 split 细节；那时更高价值的问题将转向新的结构槽位，而不是继续在同 family 上细扫。"
+  ],
+  "reference_round": 266
+}
