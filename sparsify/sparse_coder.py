@@ -447,6 +447,8 @@ def _get_sae_class(architecture: str) -> type:
         return ExpertTopKSparseCoder
     if architecture == "expert_jumprelu":
         return ExpertJumpReLUSparseCoder
+    if architecture == "product_key_expert_jumprelu":
+        return ProductKeyExpertJumpReLUSparseCoder
     if architecture == "adaptive_active_expert_jumprelu":
         return AdaptiveActiveExpertJumpReLUSparseCoder
     if architecture == "hashed_expert_jumprelu":
@@ -1229,6 +1231,12 @@ def _select_active_expert_indices(
     return active_indices, active_probs / norm
 
 
+def _product_key_pair_grid(num_experts: int) -> tuple[int, int]:
+    left_keys = max(1, math.isqrt(num_experts))
+    right_keys = math.ceil(num_experts / left_keys)
+    return left_keys, right_keys
+
+
 def _select_adaptive_active_expert_indices(
     router_logits: Tensor,
     active_experts: int,
@@ -1456,6 +1464,145 @@ class ExpertJumpReLUSparseCoder(ExpertTopKSparseCoder):
         router_logits = self.router(flat_x)
         selected_expert_idx, selected_probs = _select_active_expert_indices(
             router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
+    """PKM-style expert router with JumpReLU-gated expert-local supports."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "product_key_expert_jumprelu requires "
+                "k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+        pair_ids = torch.arange(self.num_experts)
+        self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+        self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+
+        self.left_router = nn.Linear(
+            d_in, self.left_keys, device=device, dtype=dtype
+        )
+        self.right_router = nn.Linear(
+            d_in, self.right_keys, device=device, dtype=dtype
+        )
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        nn.init.kaiming_uniform_(self.left_router.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.right_router.weight, a=5**0.5)
+        self.left_router.bias.data.zero_()
+        self.right_router.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        param_dtype = self.expert_encoder_bias.dtype
+        threshold = torch.full(
+            (self.num_experts, self.latents_per_expert),
+            cfg.jumprelu_init_threshold,
+            device=self.expert_encoder_bias.device,
+            dtype=param_dtype,
+        ).clamp_min(torch.finfo(param_dtype).tiny)
+        self.log_threshold = nn.Parameter(torch.log(torch.expm1(threshold)))
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def _encoder_linear_layers(self):
+        return [("left_router", self.left_router), ("right_router", self.right_router)]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "active_expert_encoder",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+            )
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            expert_logits, self.active_experts
         )
         selected_weight = self.expert_encoders[selected_expert_idx]
         selected_bias = self.expert_encoder_bias[selected_expert_idx]
