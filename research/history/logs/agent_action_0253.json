@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中 {b_{e,i}} 是静态 expert 子库原子，E_pk(x) 由两路 product-key router 给出：logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出极少量 active experts；expert 内仍用 JumpReLU 形成局部 support。导出到 LUTurbo/Lottable 的在线链路仍是“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性补偿”，静态库不随样本动态生成，因此 `product_key_expert_jumprelu` 继续判定为直接兼容；`batch_topk`、`adaptive_budget_topk`、`lowrank_adaptive_budget_residual` 等不兼容 family 仍不得驱动当前 objective leaderboard。当前真实兼容 frontier 仍是 r251：`product_key_expert_jumprelu K=32 NUM_EXPERTS=512 LATENTS_PER_EXPERT=96 ACTIVE_EXPERTS=2`，controller 口径 objective=0.293524=cost 0.10x + exceed 0.193524，exact objective=0.290692。r252 已明确表明把 bank 从 512 再压到 256 会让 exceed 回弹到 0.209794，说明 bank-size knee 已经摸到反面，继续在线性 bank 轴细扫的信息增量开始下降。相对 r251，本轮只把 `ACTIVE_EXPERTS` 从 `2` 降到 `1`，保持 `ARCHITECTURE=product_key_expert_jumprelu`、`K=32`、`NUM_EXPERTS=512`、`LATENTS_PER_EXPERT=96`、`EXPANSION_FACTOR=1`、`adam`、`LR=8e-4` 和其余 recipe 不变，直接测试当前更强的 compositional bank 是否终于足以支撑最短 active path。按本地成本公式复核：`left_keys=22,right_keys=24`，router 访问固定为 `1024×(22+24)=47104`，active expert encoder 访问为 `1×1024×96=98304`，故 `selection_accesses=145408`、`deployment_accesses=163840`、`combined_accesses=309248`、exact `total_cost_ratio=0.07373046875`，在 controller 两位小数记分口径下为 `0.07x`。因此它把当前 frontier 的 rounded cost 再左移 0.03x；要刷新当前 controller frontier，只需 `exceed_alpha_0.50 < 0.22352433085441586`，而要刷新当前 exact objective 也只需 `exceed_alpha_0.50 < 0.21696153125`。这轮的核心价值不是温和插值，而是直接回答 LUTurbo 当前最关心的“更强容量组织是否已经允许 very short active path”，从而判断下一步该继续 family 内收缩路径，还是应切到新的结构槽位。",
+  "summary": "建议以 r251 为 reference，只改 `ACTIVE_EXPERTS=1`。这不是继续在线性 bank 或 width 轴上补点，而是一次高信息量的 short-active-path probe：保持 `K=32 + NUM_EXPERTS=512 + LATENTS_PER_EXPERT=96` 的当前最强 PK 配方不变，直接测试更强的 compositional bank 是否能让单 expert 路径在 controller `0.07x` 的更低总成本下仍维持足够低的 exceed，从而继续降低 objective。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "mainline",
+  "self_review": "这轮继续留在同一 family 仍然有充分依据，但不是低信息细扫。r252 已经把“bank 还能不能继续缩”这个问题回答得很清楚：256-bank 会明显抬高 exceed，因此继续在 `NUM_EXPERTS` 轴上插值的价值开始下降。当前仍未被回答、且与 prompt 高优先级方向直接对齐的 family 内核心假设，是“更强的 product-key / compositional routing 是否已经足以把 active path 压到 1 个 expert”。相对 r251 只改 `ACTIVE_EXPERTS`，归因比再扫 `NUM_EXPERTS=384` 或 `LATENTS_PER_EXPERT=112` 更干净，也比直接切回旧的 `adaptive_active_expert_jumprelu` 更符合当前证据，因为旧的 variable-active probe 建立在明显更弱的非-PK router 上。之所以现在值得重试最短路径，不是忽略 r244 的负例，而是因为当前配置与 r244 的结构条件已实质不同：router 已换成更强的 product-key 组合容量，bank 从 128 提到 512，而 micro-expert width 已降到 96；如果在这种条件下单 expert 路径仍然守不住 objective，就能更有把握地结束 PK family 内的 active-path 收缩，并把下一轮转向新的结构槽位。主要风险是 exceed 仍可能像 r244 那样大幅回弹；但当前 controller 与 exact objective 的胜利门槛都相对宽松，这一轮能非常高质量地判定当前 PK 主线的 shortest-path 极限。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ACTIVE_EXPERTS",
+      "value": "1"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r252 给出清晰负信号：`NUM_EXPERTS=256` 虽将 exact cost 压到 `0.09375x`，但 exceed 回弹到 `0.209794`，objective 反而劣于 r251，说明当前 `LATENTS_PER_EXPERT=96` 配方下继续下压 bank-size 已经越过 knee。",
+    "对 `product_key_expert_jumprelu K=32 NUM_EXPERTS=512 ACTIVE_EXPERTS=1 LATENTS_PER_EXPERT=96`，本地成本公式复核为：`left_keys=22,right_keys=24`，`selection_accesses=145408`，`deployment_accesses=163840`，`combined_accesses=309248`，exact `total_cost_ratio=0.07373046875`，controller rounded cost 为 `0.07x`。",
+    "在 r251 的 exact objective 基线上，新点只需 `exceed_alpha_0.50 < 0.21696153125` 就能赢 exact objective；在 controller 口径下只需 `exceed_alpha_0.50 < 0.22352433085441586` 就能刷新 frontier，因此这是一次高性价比的 short-active-path 判定点。",
+    "本地 allowlist 自检通过：`validate_env_overrides([{key:'ACTIVE_EXPERTS', value:'1'}], fallback_architecture='product_key_expert_jumprelu')` 返回空列表。",
+    "历史负例 `r244` 的 `ACTIVE_EXPERTS=1` 建立在更弱的旧 PK 配方上：当时 `NUM_EXPERTS=128, LATENTS_PER_EXPERT=192`，objective 达到 `0.386909`；因此它说明单 expert 路径曾经失败过，但不能替代当前更强 `512-bank + width96` 条件下的重新验证。"
+  ],
+  "next_hypotheses": [
+    "如果 `ACTIVE_EXPERTS=1` 仍把 `exceed_alpha_0.50` 控在约 `0.217` 以下并刷新 objective，则说明当前 PK 主线的容量组织已经足以支撑 very short active path；下一轮应以本轮为 reference，优先测试新的 matched-objective structure slot，或评估是否还能进一步压 `K`。",
+    "如果 `ACTIVE_EXPERTS=1` 在 controller 口径下能赢但 exact objective 持平于 r251，则说明单 expert 路径已接近当前 PK 配方的边缘可用区；后续不应继续在线性参数轴细扫，而应优先转向真正新的结构槽位。",
+    "如果 `ACTIVE_EXPERTS=1` 让 exceed 明显回弹、objective 不再下降，则说明当前 PK 主线虽能用更窄 width 和中等 bank 降 cost，但仍依赖双 expert cleanup；此后应停止在同 family 内继续压 active path，并优先切到新的 matched-objective architecture probe。"
+  ],
+  "reference_round": 251
+}
