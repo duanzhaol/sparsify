@@ -174,44 +174,14 @@ def section_target_profile() -> str:
     ])
 
 
-def section_high_priority_directions() -> str:
-    return "\n".join([
-        "当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。",
-        "  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。",
-        "  当前阶段目标不是把 incumbent 从 0.386 再抠到 0.37x，而是推动一次能把 objective 明显拉向 0.30 的结构突破。",
-        "  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。",
-        "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
-        "  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。",
-        "",
-        "当前高优先级方向：",
-        "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
-        "  2. 首选仍应聚焦 `total_cost_ratio≈0.18~0.22` 这一主战场；如果新结构想占用更高 cost，必须能非常明确地换回更低 exceed。",
-        "  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
-        "  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
-        "  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
-        "  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
-        "  7. 宁可做中等风险但高信息增量的新结构原型，也不要把预算继续花在低信息的 incumbent 邻域细扫上。",
-        "",
-        "当前应下调优先级的方向：",
-        "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
-        "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。",
-        "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
-        "  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。",
-        "  5. 目标仍远高于 0.30 时，还继续围绕 incumbent 做保守小步扫描。",
-        "  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
-        "  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
-    ])
-
-
-def section_objective_target_gap(
+def _best_compatible_feasible_frontier_entry(
     frontier: dict[str, Any],
     registry: dict[str, str],
-    target_objective: float = 0.30,
-) -> str:
-    """Show what cost/exceed tradeoffs are needed to reach the current stage target."""
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
     current_target = default_target_profile()
+    best_entry: dict[str, Any] | None = None
+    best_metrics: dict[str, Any] | None = None
     best_rank: tuple[float, float, float, float] | None = None
-    incumbent_metrics: dict[str, Any] | None = None
 
     for entry in frontier.values():
         if not isinstance(entry, dict):
@@ -220,7 +190,7 @@ def section_objective_target_gap(
         if not profile_matches(cfg, current_target):
             continue
         family_name = str(cfg.get("family_name") or entry.get("architecture", "")).lower()
-        if not is_compatible_label(registry.get(family_name)):
+        if family_name and not is_compatible_label(registry.get(family_name)):
             continue
         metrics = entry_objective_metrics(entry, cost_cache={})
         if not metrics["feasible"]:
@@ -233,10 +203,101 @@ def section_objective_target_gap(
         )
         if best_rank is None or rank < best_rank:
             best_rank = rank
-            incumbent_metrics = metrics
+            best_entry = entry
+            best_metrics = metrics
 
-    if incumbent_metrics is None:
+    if best_entry is None or best_metrics is None:
+        return None
+    return best_entry, best_metrics
+
+
+def section_high_priority_directions(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    target_objective: float = 0.30,
+) -> str:
+    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
+    incumbent_note = (
+        "  incumbent 只应视作 objective anchor / matched baseline，不应自动变成默认 continuation plan。"
+    )
+    stage_gap_note = (
+        "  当前阶段需要的是明显拉低 objective 的结构或容量突破，而不是继续围绕 incumbent 做保守小步扫描。"
+    )
+    mainline_note = (
+        "  当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。"
+    )
+    cost_band_note = (
+        "  新结构不应默认占用明显更高 cost；若想进入更高 cost 带，必须能非常明确地换回更低 exceed。"
+    )
+
+    if incumbent is not None:
+        entry, metrics = incumbent
+        arch = entry.get("architecture", "?")
+        k = entry.get("k", "?")
+        obj = metrics["objective_score"]
+        cost = metrics["total_cost_ratio"]
+        exceed = metrics[EXCEED_FIELD]
+        gap = float(obj) - target_objective if obj is not None else None
+        incumbent_note = (
+            f"  当前已验证 incumbent 是 `{arch}` (K={k})，"
+            f"objective≈{float(obj):.6f} = cost {float(cost):.2f}x + exceed {float(exceed):.6f}。"
+        )
+        if arch == "expert_topk":
+            mainline_note = (
+                "  当前最强已验证主线是更大 expert 池配合更小 K 的 `expert_topk`；"
+                "后续一方面应继续寻找这条线的 deployment knee / 容量配置，另一方面只在新结构能解释清楚 small-K exceed 为何会更慢退化时才值得挑战它。"
+            )
+        if cost is not None:
+            low = max(0.0, float(cost) - 0.02)
+            high = float(cost) + 0.04
+            cost_band_note = (
+                f"  当前可优先关注 `total_cost_ratio≈{low:.2f}~{high:.2f}` 这一带；"
+                "若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。"
+            )
+        if gap is not None and gap > 0.04:
+            stage_gap_note = (
+                f"  当前距离 `objective<{target_objective:.2f}` 仍差约 {gap:.3f}；"
+                "这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。"
+            )
+
+    return "\n".join([
+        "当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。",
+        "  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。",
+        stage_gap_note,
+        incumbent_note,
+        "  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。",
+        "  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。",
+        "",
+        "当前高优先级方向：",
+        "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
+        f"  2. {cost_band_note.strip()}",
+        "  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
+        "  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
+        "  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+        "  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        f"  7. {mainline_note.strip()}",
+        "",
+        "当前应下调优先级的方向：",
+        "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
+        "  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。",
+        "  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。",
+        "  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。",
+        "  5. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。",
+        "  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
+        "  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
+    ])
+
+
+def section_objective_target_gap(
+    frontier: dict[str, Any],
+    registry: dict[str, str],
+    target_objective: float = 0.30,
+) -> str:
+    """Show what cost/exceed tradeoffs are needed to reach the current stage target."""
+    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
+    if incumbent is None:
         return ""
+    _, incumbent_metrics = incumbent
 
     objective = incumbent_metrics["objective_score"]
     cost = incumbent_metrics["total_cost_ratio"]
@@ -255,12 +316,22 @@ def section_objective_target_gap(
         "  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。",
     ]
 
-    candidate_costs = [0.16, 0.18, 0.20, 0.22]
+    base_cost = float(cost)
+    candidate_costs = sorted({
+        max(0.0, round(base_cost - 0.02, 2)),
+        round(base_cost, 2),
+        round(base_cost + 0.02, 2),
+        round(base_cost + 0.04, 2),
+    })
     parts.append("  若想达到该目标，不同 cost 档位大致需要满足：")
     for c in candidate_costs:
         need_exceed = target_objective - c
         parts.append(f"    - 若 cost≈{c:.2f}x，则 exceed 需压到 ≤{need_exceed:.2f}")
-    parts.append("  因此：若新结构 cost 升到 0.22x 左右，却仍无法把 exceed 压到约 0.08~0.10，则通常不够支撑 0.30 目标。")
+    upper_probe_cost = candidate_costs[-1]
+    upper_need = target_objective - upper_probe_cost
+    parts.append(
+        f"  因此：若新结构 cost 升到约 {upper_probe_cost:.2f}x，却仍无法把 exceed 压到约 {upper_need:.2f} 附近，则通常不够支撑 {target_objective:.2f} 目标。"
+    )
     parts.append("  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。")
     return "\n".join(parts)
 
@@ -584,6 +655,8 @@ def section_reference_configs(
     current_target = default_target_profile()
     frontier_rounds: list[int] = []
     frontier_objectives: dict[int, tuple[float, float, float, float]] = {}
+    incumbent_round_id: int | None = None
+    incumbent_family: str | None = None
     for rid, entry in frontier.items():
         if not isinstance(entry, dict):
             continue
@@ -604,6 +677,20 @@ def section_reference_configs(
             metrics[EXCEED_FIELD],
             metrics["fvu"],
         )
+    incumbent = _best_compatible_feasible_frontier_entry(frontier, registry)
+    if incumbent is not None:
+        incumbent_entry, _ = incumbent
+        incumbent_round_id = _safe_round_id(str(incumbent_entry.get("round", "")).lstrip("r"))
+        if incumbent_round_id is None:
+            for rid, entry in frontier.items():
+                if entry is incumbent_entry:
+                    incumbent_round_id = _safe_round_id(str(rid).lstrip("r"))
+                    break
+        incumbent_family = str(
+            incumbent_entry.get("config", {}).get("family_name")
+            or incumbent_entry.get("architecture")
+            or ""
+        ).lower()
 
     def _priority(summary: dict[str, Any]) -> tuple[int, int]:
         decision = str(summary.get("result", {}).get("decision") or "")
@@ -638,11 +725,48 @@ def section_reference_configs(
             f"(decision={decision}, source={source})\n{render_env_config(cfg)}"
         )
 
+    def _format_frontier_entry_block(entry: dict[str, Any], round_id: int) -> str | None:
+        cfg = dict(entry.get("config", {}) or {})
+        if not cfg:
+            return None
+        family_name = str(cfg.get("family_name") or entry.get("architecture") or "").lower()
+        if family_name and not is_compatible_label(registry.get(family_name)):
+            return None
+        decision = "frontier"
+        return (
+            f"  r{round_id} {family_name or cfg.get('architecture', '?')} "
+            f"(decision={decision}, source=frontier_entry)\n{render_env_config(cfg)}"
+        )
+
     ordered = sorted(usable, key=_priority)
+    by_round_id: dict[int, dict[str, Any]] = {}
+    for summary in ordered:
+        try:
+            by_round_id[int(summary.get("round") or 0)] = summary
+        except (TypeError, ValueError):
+            continue
+
     chosen: list[dict[str, Any]] = []
     seen_families: set[str] = set()
     deferred: list[dict[str, Any]] = []
+    incumbent_frontier_entry: dict[str, Any] | None = None
+    if incumbent is not None:
+        incumbent_frontier_entry, _ = incumbent
+    incumbent_frontier_block: str | None = None
+    if incumbent_round_id is not None and incumbent_round_id in by_round_id:
+        incumbent_summary = by_round_id[incumbent_round_id]
+        chosen.append(incumbent_summary)
+        if incumbent_family:
+            seen_families.add(incumbent_family)
+    elif incumbent_frontier_entry is not None and incumbent_round_id is not None:
+        incumbent_frontier_block = _format_frontier_entry_block(
+            incumbent_frontier_entry, incumbent_round_id
+        )
+        if incumbent_family:
+            seen_families.add(incumbent_family)
     for summary in ordered:
+        if summary in chosen:
+            continue
         family_name = _family_name(summary)
         if family_name and family_name in seen_families:
             deferred.append(summary)
@@ -652,6 +776,8 @@ def section_reference_configs(
             seen_families.add(family_name)
 
     blocks: list[str] = []
+    if incumbent_frontier_block:
+        blocks.append(incumbent_frontier_block)
     for summary in [*chosen, *deferred]:
         if len(blocks) >= limit:
             break
@@ -675,9 +801,14 @@ def section_reference_configs(
 
 
 def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
-    """只保留战术性 hint，过滤掉已经固化到模板里的 K/EF 硬约束。"""
+    """只保留战术性 hint，过滤掉已经固化到 prompt 模板中的论文灵感。"""
     tactical = []
     current_profile = default_target_profile()
+    elevated_tags = {
+        "asymmetric-moe-literature",
+        "memory-routing",
+        "alias-awareness",
+    }
     for hint in hints:
         text = str(hint.get("text") or hint.get("message") or "").strip()
         if not text:
@@ -687,6 +818,8 @@ def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
             continue
         if any(text.startswith(p) for p in _HARD_CONSTRAINT_HINT_PREFIXES):
             continue
+        if str(hint.get("tag") or "") in elevated_tags:
+            continue
         tactical.append(text)
 
     if not tactical:
@@ -695,6 +828,109 @@ def section_tactical_hints(hints: list[dict[str, Any]]) -> str:
     for i, t in enumerate(tactical, 1):
         lines.append(f"  {i}. {t}")
     return "\n".join(lines)
+
+
+def section_literature_inspirations() -> str:
+    """Static literature-inspired guidance injected early in the prompt."""
+    return """\
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+"""
 
 
 def section_compatibility_status(registry: dict[str, str]) -> str:
@@ -902,7 +1138,8 @@ def compose_proposal(state: Any, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_target_profile())
-    sections.append(section_high_priority_directions())
+    sections.append(section_high_priority_directions(state.frontier, registry))
+    sections.append(section_literature_inspirations())
     sections.append(section_frontier(state.frontier, registry))
     sections.append(section_selection_cost_status(state.frontier, registry))
     sections.append(section_objective_target_gap(state.frontier, registry))
@@ -958,7 +1195,8 @@ def compose_resume(state: Any, round_id: int, policy_guidance: str) -> str:
         state.consecutive_no_improve, state.rounds_since_new_family,
     ))
     sections.append(section_target_profile())
-    sections.append(section_high_priority_directions())
+    sections.append(section_high_priority_directions(state.frontier, registry))
+    sections.append(section_literature_inspirations())
     sections.append(section_frontier(state.frontier, registry, limit=8))
     sections.append(section_selection_cost_status(state.frontier, registry))
     sections.append(section_objective_target_gap(state.frontier, registry))
