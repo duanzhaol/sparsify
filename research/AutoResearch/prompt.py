@@ -71,6 +71,12 @@ PROXY_OBJECTIVE = """\
 - 在比较两个候选时，优先问清楚：它是在降 cost，还是在降 exceed，还是两者都没有实质改善
 - 按当前 best lane 粗看，要逼近 `0.22` 往往意味着：若 `cost≈0.14x`，则 `exceed` 需接近 `0.08`；若 `cost≈0.12x`，则 `exceed` 也仍需压到约 `0.10`
 - 因此 `0.22` 基本不可能靠同一 family 的温和插值自然得到；更可能需要新的容量组织方式、新的 coarse-to-fine routing、或更强的“shared 主干 + tiny routed cleanup”分工
+- 当前最值得优先怀疑的“新 regime”不是再多加一个近亲 shared 分支，而是：
+  1. 难度自适应预算：普通 token 走极便宜基础路径，困难 token 才追加少量 expert / residual / 更大 K
+  2. 显式两阶段或条件触发的级联补偿：先做超便宜 coarse 重构，只在第一阶段失败时才打开第二阶段 cleanup
+  3. 更直接对齐 exceed / tail 的机制：结构上显式区分基础路径与 hard-token cleanup，不要只指望平均误差自然带来更低 exceed
+  4. 非对称“shared 主干 + tail experts”：shared/coarse 吃掉大多数样本，tiny routed experts 只处理难点 / 残差 / 边界样本
+  5. 更激进的 coarse-to-fine / local residual dictionary：先用便宜索引缩小候选集，再做 very-small-K 精选，而不是继续 flat retrieval
 - 局部参数微调只是辅助校准手段，不应连续多轮主导预算；若最近几轮都只是同一 family 上的小参数插值且 objective 没有扩展，应优先换结构槽位
 - 当某条 winning line 已经通过一轮结构升级获得 recent 改进、但后续 `K / LATENTS_PER_EXPERT / STAGE1_RATIO` 之类局部 follow-up 多数只是持平或更差时，应把它视作 scaffold / baseline，而不是继续把大部分预算花在线性细扫上
 - 这类 scaffold 更适合作为“承接下一层结构想法”的底座：优先测试能在近同成本下更强压低 exceed 的升级，而不是继续微调同一 split 或同一部署预算
@@ -410,13 +416,14 @@ def section_high_priority_directions(
         "  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。",
         f"  2. {cost_band_note.strip()}",
         "  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。",
-        "  4. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。",
-        "  5. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。",
-        "  6. product-key / compositional routing 与 shared/residual cleanup 的组合；目标不是再省一点 router，而是让 hard tokens 的 exceed 更慢增长。",
-        "  7. variable-active path by difficulty：普通 token 保持极短路径，困难 token 才追加少量 expert / residual 分支。",
-        "  8. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
-        "  9. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
-        f"  10. {mainline_note.strip()}",
+        "  4. 难度自适应预算：不要默认所有 token 都走同一 active path；优先考虑“简单样本极便宜、困难样本才追加 cleanup”的结构。",
+        "  5. 显式两阶段 / 条件级联补偿：第一阶段负责超便宜 shared/coarse 重构，第二阶段只在第一阶段失败时才打开 routed residual cleanup。",
+        "  6. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，tiny routed experts 只做 tail / hard-token residual cleanup，active path 尽量短。",
+        "  7. 更激进的 coarse-to-fine / product-key / bucketed routing / local residual dictionary；目标是扩大容量、缩小 hard-token 候选集，而不是继续 flat retrieval。",
+        "  8. `shared bottleneck + expert-specific head`、expert 内部 low-rank、以及更轻的 scorer / router；但 plain shared-lowrank 近邻线若没有新的条件触发 / tail-cleanup 语义，不应再作为默认主线。",
+        "  9. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。",
+        "  10. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。",
+        f"  11. {mainline_note.strip()}",
         "",
         "当前应下调优先级的方向：",
         "  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。",
@@ -427,6 +434,7 @@ def section_high_priority_directions(
         "  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。",
         "  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。",
         "  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。",
+        "  9. 把 fixed `ACTIVE_EXPERTS` 或固定 `K` 的轻微插值误当成新 regime；若没有难度自适应或条件级联语义，它通常只是局部校准。",
     ])
 
 
@@ -1022,7 +1030,7 @@ def section_literature_inspirations() -> str:
     """Static literature-inspired guidance injected early in the prompt."""
     return """\
 论文与结构灵感（当前优先消化）：
-最值得吸收的 6 个方向：
+最值得吸收的 4 个方向：
 1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
    来源：ACL 2024, DeepSeekMoE
    https://aclanthology.org/2024.acl-long.70/
@@ -1052,17 +1060,7 @@ def section_literature_inspirations() -> str:
    - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
    - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
 
-4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
-   来源：Hash Layers for Large Sparse Models
-   https://huggingface.co/papers/2106.04426
-   关键点：
-   - 不需要额外 routing 参数。
-   - 不需要复杂 load balancing loss。
-   - 仍然能和 learned routing 竞争。
-   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
-   - 甚至可以试固定分桶 + 轻量 re-score。
-
-5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+4. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
    来源：Google Research, Omni-SMoLA
    https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
    关键点：
@@ -1070,15 +1068,6 @@ def section_literature_inspirations() -> str:
    - 用很多轻量 low-rank experts 残差式地补 backbone。
    - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
    - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
-
-6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
-   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
-   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
-   关键点：
-   - transformer 里的 activation sparsity 是自然出现的。
-   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
-   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
-   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
 
 当前最值得优先尝试的 4 个具体结构想法：
 1. `shared coarse library + routed micro-experts`
@@ -1093,6 +1082,7 @@ def section_literature_inspirations() -> str:
 4. `shared low-rank trunk + tiny low-rank expert residuals`
    - 灵感来自 Omni-SMoLA。
    - 不是 full expert，而是很多 rank 很小的 expert adapters。
+   - 注意：在当前 target 上 plain shared-lowrank 近邻线已经给过负信号；只有当它与 genuinely new 语义绑定，例如条件触发 cleanup、difficulty-aware budget、或更强 tail-specialization 时，才值得继续试。
 
 一个重要判断：
 - 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
@@ -1107,6 +1097,7 @@ def section_literature_inspirations() -> str:
 - 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
 - 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
 - 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+- 当前已知较弱、应避免默认回流的旧槽位包括：plain shared-lowrank 邻域、dual-shared / residual-dual-shared 的局部变体、以及没有条件触发语义的同 scaffold 微小插值。
 
 别名与复用提醒：
 - 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
@@ -1116,10 +1107,8 @@ def section_literature_inspirations() -> str:
 - `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
 - 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
 
-补充一个基线教训：
-- `Switch Transformer` 的启发是：很多时候简单路由先赢。
-  https://huggingface.co/papers/2101.03961
-- 所以如果要加复杂结构，仍应尽量保持：
+补充一个实现提醒：
+- 即使尝试复杂结构，也应尽量保持：
 - `very short active path`
 - `very cheap router`
 - `very clean decomposition`

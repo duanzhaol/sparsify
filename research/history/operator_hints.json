@@ -1,7 +1,7 @@
 [
   {
     "id": "hint_20260401_objective_and_breakthrough_1",
-    "message": "当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。新的阶段目标已经更新为把 objective 压向 `0.22` 以下；以当前 best lane 粗看，这通常要求把 `cost≈0.12~0.14x` 同时配上 `exceed≈0.08~0.10`，明显不是 incumbent 邻域的小步微调能自然得到的。若多轮结果仍停留在 `0.28~0.33` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。",
+    "message": "当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost、low-FVU 或单纯更低的平均误差当成成功。当前阶段目标仍是把 objective 压向 `0.22` 以下；这通常不可能靠 incumbent 邻域的小步参数插值自然得到。若多轮结果仍停留在 `0.27~0.33` 一带，应优先寻找新的 regime shift，特别是那些能专门降低 hard-token / tail exceed 的结构。",
     "priority": "critical",
     "scope": "persistent",
     "tag": "objective-breakthrough",
@@ -11,68 +11,68 @@
     "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
   },
   {
-    "id": "hint_20260401_asymmetric_moe_literature_1",
-    "message": "参考论文灵感时，优先按“不对称分工”的 sparse MoE 理解：shared/coarse 分支吃平滑主干，routed experts 只做 sparse residual cleanup，active path 尽量短。可重点吸收这些方向：`DeepSeekMoE` 的 shared experts + 更细粒度 experts；`Expert Choice Routing` 的困难 token 允许更多 experts、简单 token 更少 experts；`Omni-SMoLA / soft mixture of low-rank experts` 的 shared backbone + 轻量 low-rank experts residual specialization。核心问题不是做对称多专家平均分工，而是用 shared capacity + tiny routed cleanup 在小 K 下压低 exceed。",
-    "priority": "critical",
-    "scope": "persistent",
-    "tag": "asymmetric-moe-literature",
-    "status": "pending",
-    "created_at": 1775005201,
-    "applied_at": null,
-    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
-  },
-  {
-    "id": "hint_20260401_memory_and_routing_1",
-    "message": "可吸收 `Product Key Memory / compositional memory` 与 `Hash Layers` 一类思路：不要默认从单一大字典直接 flat top-k；可以考虑 coarse-to-fine / product-key / bucketed routing / hash-based preselection，让超大容量先经便宜索引缩到小候选集，再做小 K 精选。目标是扩大总容量而不线性拉长 active path，也不显著增加 router/scorer 成本。",
-    "priority": "high",
-    "scope": "persistent",
-    "tag": "memory-routing",
-    "status": "pending",
-    "created_at": 1775005202,
-    "applied_at": null,
-    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
-  },
-  {
-    "id": "hint_20260401_alias_awareness_1",
-    "message": "注意区分“真正的新结构”与“只是旧 family 换了名字”。在提出 literature-inspired probe 前，先检查它是否已被现有 family 近似覆盖：例如 `shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`；`shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体；`cheap trunk + routed experts` 常接近 `lowrank_expert_topk`；`shared expert + routed experts` 常接近 `shared_routed_expert_topk`。如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。",
-    "priority": "critical",
-    "scope": "persistent",
-    "tag": "alias-awareness",
-    "status": "pending",
-    "created_at": 1775005203,
-    "applied_at": null,
-    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
-  },
-  {
-    "id": "hint_20260401_small_k_focus_1",
-    "message": "当前仍要重点回答“怎样在更小 `K` 下控制 `exceed_alpha_0.50`，并把 objective 真正压向 `0.22`”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。",
-    "priority": "high",
-    "scope": "persistent",
-    "tag": "small-k-structure",
-    "status": "pending",
-    "created_at": 1775005204,
-    "applied_at": null,
-    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
-  },
-  {
-    "id": "hint_20260401_active_experts_axis_1",
-    "message": "关于 `ACTIVE_EXPERTS` 轴请基于最新真实证据判断，不要继续沿用旧假设。当前 layer3 q_proj 主线里，`product_key_expert_jumprelu` 上把 active path 压到 `ACTIVE_EXPERTS=1` 会让 exceed 明显恶化，而在当前 best PK recipe 上做过的 matched `2 -> 3` probe 也没有赢过 `ACTIVE_EXPERTS=2`。因此在现有 PK / shared+PK many-tiny regime 下，`AE=2` 应视为当前默认工作点；除非新结构改变了 coarse/shared 主干或 cleanup 语义，否则不要再把 `AE=1` 或固定 `AE=3` 当成高优先级主线。",
-    "priority": "critical",
-    "scope": "persistent",
-    "tag": "active-experts-axis",
-    "status": "pending",
-    "created_at": 1775005205,
-    "applied_at": null,
-    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
-  },
-  {
-    "id": "hint_20260401_shared_pk_scaffold_1",
-    "message": "当前最有价值的 recent 正信号不是 plain PK，而是 `shared_product_key_expert_jumprelu`：它说明“shared coarse 主干 + product-key tiny routed cleanup”这条分工在当前 hookpoint 上确实优于 plain PK。但后续 `STAGE1_RATIO`、`K` 等局部 follow-up 基本已接近平台，`tiny factorized expert heads` 也给出强负信号。因此后续不应继续让 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的近邻细扫主导预算；更值得优先测试的是建立在这条 shared+PK scaffold 之上的同成本或近同成本结构升级，目标是更强地降低 low-K 条件下的 exceed，例如更好的 hard-token cleanup 机制、shared/coarse 表达方式升级、或真正有差异的 variable-active residual path。",
+    "id": "hint_20260402_scaffold_not_local_sweep_1",
+    "message": "把当前 best `shared_product_key_expert_jumprelu` 视作 winning scaffold / objective anchor，而不是局部细扫终点。已有证据表明：plain PK、dual-shared、residual-dual-shared、shared-lowrank、shared-stacked 这些近邻升级大多没有赢它。因此后续预算不应继续主要花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性微调上，而应优先测试建立在这个 scaffold 之上的 genuinely new structure semantics。",
     "priority": "critical",
     "scope": "persistent",
     "tag": "shared-pk-scaffold",
     "status": "pending",
-    "created_at": 1775005206,
+    "created_at": 1775091001,
+    "applied_at": null,
+    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
+  },
+  {
+    "id": "hint_20260402_difficulty_adaptive_and_cascade_1",
+    "message": "当前最值得优先尝试的新 regime 之一，是“难度自适应预算 + 条件级联补偿”。不要默认所有 token 都走固定 `K`、固定 `ACTIVE_EXPERTS`、固定 cleanup 深度。更值得测试的是：简单 token 只走极便宜基础路径，困难 token 才追加少量 expert / residual / 更大 K；或先做超便宜 coarse 重构，只在第一阶段失败时才打开第二阶段 cleanup。目标不是平均意义上更低 FVU，而是专门更高效地压低 `exceed_alpha_0.50`。",
+    "priority": "critical",
+    "scope": "persistent",
+    "tag": "difficulty-adaptive-cascade",
+    "status": "pending",
+    "created_at": 1775091002,
+    "applied_at": null,
+    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
+  },
+  {
+    "id": "hint_20260402_asymmetric_tail_experts_1",
+    "message": "参考 `DeepSeekMoE`、`Expert Choice Routing`、`Omni-SMoLA` 等灵感时，优先按“不对称分工”的 sparse MoE 理解，而不是对称多专家平均分工：shared/coarse 主干吃大多数样本，tiny routed experts 只处理难点 / tail / residual cleanup，active path 尽量短。真正值得测试的不是“更多专家一起干活”，而是“shared 主干 + tail experts + 按难度追加少量预算”能否在小 K 下显著降低 exceed。",
+    "priority": "critical",
+    "scope": "persistent",
+    "tag": "asymmetric-moe-literature",
+    "status": "pending",
+    "created_at": 1775091003,
+    "applied_at": null,
+    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
+  },
+  {
+    "id": "hint_20260402_memory_and_local_residual_1",
+    "message": "继续吸收 `Product Key Memory / compositional memory / Hash Layers` 这类思路，但重点不是再省一点 router，而是改变 hard-token 的候选集组织方式。不要默认从单一大字典直接 flat top-k；更值得测试的是 coarse-to-fine、product-key、bucketed routing、hash preselection、local residual dictionary 等结构，让超大容量先经便宜索引缩到小候选集，再做 very-small-K 精选。",
+    "priority": "high",
+    "scope": "persistent",
+    "tag": "memory-routing",
+    "status": "pending",
+    "created_at": 1775091004,
+    "applied_at": null,
+    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
+  },
+  {
+    "id": "hint_20260402_active_budget_semantics_1",
+    "message": "关于 `ACTIVE_EXPERTS` / `K` 轴，不要把“固定 AE=1/2/3 或固定 K 的小插值”误当成新 regime。已有证据表明，在现有 PK / shared+PK many-tiny 语义下，简单的 fixed `AE` 调整信息增量有限。若要重新动这根轴，应优先让它服务于新的结构语义，例如按难度自适应地追加 experts、只在失败样本上打开第二阶段 cleanup、或让 coarse/shared 主干决定是否触发 extra budget。",
+    "priority": "high",
+    "scope": "persistent",
+    "tag": "active-experts-axis",
+    "status": "pending",
+    "created_at": 1775091005,
+    "applied_at": null,
+    "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
+  },
+  {
+    "id": "hint_20260402_alias_awareness_1",
+    "message": "注意区分“真正的新结构”与“只是旧 family 换了名字”。在提出 literature-inspired probe 前，先检查它是否已被现有 family 近似覆盖：例如 `shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`；`shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体；`cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异，以及它为何会更直接地降低 hard-token exceed。",
+    "priority": "critical",
+    "scope": "persistent",
+    "tag": "alias-awareness",
+    "status": "pending",
+    "created_at": 1775091006,
     "applied_at": null,
     "target_profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
   }
