@@ -1,0 +1,1147 @@
+{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"product_key_expert_jumprelu"}],"expected_win":"lower_objective","family_name":"product_key_expert_jumprelu","family_stage":"prototype","hypothesis":"最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中 {b_{e,i}} 是各 expert 的静态子库原子；E_pk(x) 由两路 learned product-key router 给出，具体为 logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部再用 JumpReLU 形成局部 support S_e^τ(x)。在线侧可直接导出到 LUTurbo/Lottable 的“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 JumpReLU sparse support -> 查表加权和 -> 选择性补偿”链路，静态库不随样本动态生成，因此兼容性判断为直接兼容。`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍是不兼容，不能进入当前 objective leaderboard。r241 的 crash 不是结构质量信号，而是实现阻塞：`pair_left_index/pair_right_index` buffer 落在 CPU，导致 DDP 在 GPU 训练前同步模块状态时报 `No backend type associated with device type cpu`，最终缺失 objective 指标。本轮唯一主假设是：修复这个 DDP blocker 后，继续以 r235 为 matched baseline，只改 `ARCHITECTURE=product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 与主要 recipe 不变，重新获得这条 PKM-style architecture slot 的有效 objective 证据；如果它真能在 exact total_cost_ratio=0.138427734375 下把 exceed_alpha_0.50 控制到约 0.2161 以下，就有机会刷新当前 incumbent。","needs_sanity":true,"next_hypotheses":["如果修复后的 `product_key_expert_jumprelu@K32` 刷新 incumbent，下一轮保持 family 不变，只改 `K=48`，测试把节省下来的 router 成本回投到 lookup budget 后是否能进一步压低 exceed。","如果该点能稳定跑通但 objective 仍略输给 r235，且主要输在 exceed 而非 cost，则说明 PKM-style compositional routing 可能有局部价值但交换率不够；后续只在它明显优于 `factorized_router_expert_topk` 时才值得继续。","如果修复后该点仍明显劣于 r235，则可把 `product_key_expert_jumprelu` 作为已裁决的新结构槽位归档，下调 product-key routed-expert 方向优先级。"],"notes_to_memory":["r241 的 `missing_objective_metric` 根因已定位为实现问题而非训练结果：`product_key_expert_jumprelu` 的 pair-index buffer 初始落在 CPU，DDP 在 GPU 上包装模块时因 CPU buffer 同步失败而提前退出。","本轮已实际落盘最小修复：在 `ProductKeyExpertJumpReLUSparseCoder` 中把 `pair_ids` 直接创建在目标 device 上，从而使 `pair_left_index/pair_right_index` buffer 与模型参数同设备。","修复后 exact architecture smoke 已再次通过：`SparseCoderConfig(architecture='product_key_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192)` 可在 CUDA 上成功 instantiate、forward、backward。","修复后做了针对性 DDP smoke：单进程 `DDP(SparseCoder(..., architecture='product_key_expert_jumprelu'))` 在 `cuda:0` 上可成功包装并完成 forward/backward，说明 r241 的特定 blocker 已消除。","本轮没有新增 env key，也没有改动执行层；`ARCHITECTURE=product_key_expert_jumprelu` 的 allowlist 与 wiring 仍保持已接通状态。"],"reference_round":235,"self_review":"这轮优先修 blocker 而不是再开新 architecture slot，符合当前运行时优先级。虽然 Round 242 的模式是 matched architecture probe，但 r241 的 probe 事实上无效，因为它在 DDP 初始化阶段就崩了；若不先修复，就会把实现问题误判成结构负信号。修复范围严格限制在 `sparsify/` 单文件，没有新增 tunable，也没有改变训练语义。运行动作仍然满足 matched-probe 约束：相对 r235 只改 `ARCHITECTURE`，保持 K、EF、OPTIMIZER、LR 与主要 recipe 不变。","summary":"建议先用已修复的 `product_key_expert_jumprelu` 重新执行同一轮 matched architecture probe。r241 的 crash 来自 DDP 设备放置 bug，不是结构结论；现在 blocker 已被最小化修复并通过了精确架构与 DDP 本地 smoke。","touched_files":["sparsify/sparse_coder.py"]}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d46fe-4475-7653-bb51-2d8a8fd9398d
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 242。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 242 策略模式：架构探针
+原因：主线已经连续 5 轮没有改进，可以插入 1 个 matched architecture probe。
+当前 objective anchor family：expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 只允许做 1 个 matched architecture probe。
+2. 保持主线的 K、OPTIMIZER、LR、EXPANSION_FACTOR 与主要 recipe 不变，只改变 architecture 本身。
+3. probe 应优先用于可能显著降低 objective_score 的结构槽位，而不是继续在同一 family 上补局部插值点。
+4. 这个 probe 只回答一个问题：该结构槽位本身值不值得继续。
+
+兼容性注册表：直接兼容 12 个，扩展兼容 24 个，不兼容 3 个。
+
+Agent 状态：round=241, consecutive_crashes=1, consecutive_no_improve=5, rounds_since_new_family=0
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.30` 仍差约 0.054；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `expert_jumprelu` (K=32)，objective≈0.354491 = cost 0.16x + exceed 0.194491。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；除非它明确打开了一条新结构线，否则不值得连续多轮消耗预算。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.14~0.20` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. `shared bottleneck + expert-specific head`、expert 内部 low-rank、`shared low-rank trunk + routed residual experts`、以及更轻的 scorer / router。
+  4. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短。
+  5. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  6. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  7. 当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  4. 只把 shared / routed 分支换个轻微变体、但没有改变容量与 active path 关系的低信息增量实验。
+  5. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  6. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  7. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 6 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Hash Layers`：去掉 learned router，改成 hashing / balanced routing。
+   来源：Hash Layers for Large Sparse Models
+   https://huggingface.co/papers/2106.04426
+   关键点：
+   - 不需要额外 routing 参数。
+   - 不需要复杂 load balancing loss。
+   - 仍然能和 learned routing 竞争。
+   - 若 router/scorer 成本不低或训练不稳定，可以试：`hash/bucket -> bucket 内局部 scorer/top-k`。
+   - 甚至可以试固定分桶 + 轻量 re-score。
+
+5. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+6. Activation sparsity / Top-K thresholding 本身可能带来更稳的性质。
+   来源：Google Research, On Emergence of Activation Sparsity in Trained Transformers
+   https://research.google/pubs/on-emergence-of-activation-sparsity-in-trained-transformers/
+   关键点：
+   - transformer 里的 activation sparsity 是自然出现的。
+   - 更稀疏的 Top-K thresholding 可能带来更好的鲁棒性 / 校准。
+   - 小 K 不一定只是“被迫压成本”，也可能是结构先验的一部分。
+   - 关键是要有足够好的 coarse/shared/trunk 去兜住主干，让小 K 只负责 tail。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个基线教训：
+- `Switch Transformer` 的启发是：很多时候简单路由先赢。
+  https://huggingface.co/papers/2101.03961
+- 所以如果要加复杂结构，仍应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r235 objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | fvu=0.1710990071296692 | arch=expert_jumprelu K=32 EF=1 | FEASIBLE
+  r236 objective=0.36131738901138305 = cost 0.18x + exceed 0.18131738901138306 | fvu=0.1570778787136078 | arch=expert_jumprelu K=48 EF=1 | FEASIBLE
+  r209 objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | fvu=0.14861851930618286 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r199 objective=0.386114 = cost 0.19x + exceed 0.196114 | fvu=0.16656622290611267 | arch=expert_topk K=64 EF=1 | FEASIBLE
+  r208 objective=0.3925313973426819 = cost 0.19x + exceed 0.20253139734268188 | fvu=0.1712922751903534 | arch=lowrank_expert_topk K=64 EF=1 | FEASIBLE
+  r196 objective=0.4145242083072662 = cost 0.23x + exceed 0.18452420830726624 | fvu=0.15407827496528625 | arch=expert_topk K=96 EF=1 | FEASIBLE
+  r176 objective=0.4211236047744751 = cost 0.23x + exceed 0.1911236047744751 | fvu=0.15915092825889587 | arch=expert_topk K=108 EF=1 | FEASIBLE
+  r187 objective=0.426606148481369 = cost 0.25x + exceed 0.17660614848136902 | fvu=0.14519497752189636 | arch=lowrank_expert_topk K=96 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → expert_jumprelu (K=32, EF=1):
+    objective=0.3544909989833832 = cost 0.16x + exceed 0.19449099898338318 | encoder=0.12x | deploy=0.04x | fvu=0.1710990071296692
+  最低 exceed leader → expert_topk (K=64, EF=1):
+    objective=0.3729298233985901 = cost 0.2x + exceed 0.1729298233985901 | encoder=0.12x | deploy=0.08x | fvu=0.14861851930618286
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.30 以下。
+  当前 incumbent 约为 objective=0.354491 (cost=0.16x, exceed=0.194491)；距离目标仍差 0.054491。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.30 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.16
+    - 若 cost≈0.16x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.18x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.20x，则 exceed 需压到 ≤0.10
+  因此：若新结构 cost 升到约 0.20x，却仍无法把 exceed 压到约 0.10 附近，则通常不够支撑 0.30 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，3）：
+  r235 expert_jumprelu param_only -> keep objective=0.358553 cost=0.164062x exceed=0.194491 fvu=0.1710990071296692 772s
+  r236 expert_jumprelu param_only -> keep objective=0.364911 cost=0.183594x exceed=0.181317 fvu=0.1570778787136078 628s
+  r237 expert_jumprelu param_only -> archive objective=0.359437 cost=0.164062x exceed=0.195374 fvu=0.17175798118114471 699s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost 或 low-FVU 单独当成成功。全局方向仍是把 objective 压向 `0.30` 以下，但这通常不可能靠 incumbent 邻域的小步微调自然达到；若多轮结果仍停留在 `0.35~0.40` 一带，应优先寻找能带来 regime shift 的结构，而不是继续做温和插值。
+  2. 当前仍要重点回答“怎样在更小 `K` 下控制 exceed_alpha_0.50”。如果某条复杂结构不能在 small-K 主战场里显著减缓 exceed 的退化，它就不值得保留。相比继续围绕 incumbent 做低信息细扫，更值得测试的是：更细粒度 experts、shared bottleneck + expert-specific head、expert 内部 low-rank、variable-active-experts by difficulty、以及 coarse-to-fine candidate selection 这类可能改变 small-K tradeoff 的结构。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r235 expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r230 two_stage_residual_expert (decision=discard, source=resolved_candidate_env_config)
+  ARCHITECTURE=two_stage_residual_expert
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=192
+  NUM_EXPERTS=128
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+本轮先检查 `round_0241` 的真实失败模式和当前工作区改动，确认是否是新 family 注册/运行链问题，再决定返回 architecture probe 还是 repair。
+exec
+/bin/bash -lc "ls research/history/round_summaries/round_0241.json research/history/logs 2>/dev/null | sed -n '1,40p'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/round_summaries/round_0241.json
+
+research/history/logs:
+agent_action_0001.json
+agent_action_0002.json
+agent_action_0003.json
+agent_action_0004.json
+agent_action_0005.json
+agent_action_0006.json
+agent_action_0007.json
+agent_action_0008.json
+agent_action_0009.json
+agent_action_0010.json
+agent_action_0011.json
+agent_action_0012.json
+agent_action_0013.json
+agent_action_0014.json
+agent_action_0015.json
+agent_action_0016.json
+agent_action_0017.json
+agent_action_0018.json
+agent_action_0019.json
+agent_action_0020.json
+agent_action_0021.json
+agent_action_0022.json
+agent_action_0023.json
+agent_action_0023_repair_1.json
+agent_action_0024.json
+agent_action_0025.json
+agent_action_0026.json
+agent_action_0027.json
+agent_action_0028.json
+agent_action_0029.json
+agent_action_0030.json
+agent_action_0031.json
+agent_action_0032.json
+agent_action_0033.json
+agent_action_0034.json
+agent_action_0035.json
+agent_action_0036.json
+
+exec
+/bin/bash -lc "if [ -f research/history/round_summaries/round_0241.json ]; then sed -n '1,260p' research/history/round_summaries/round_0241.json; fi" in /root/sparsify-ascend
+ succeeded in 0ms:
+{
+  "round": 241,
+  "timestamp": 1775012910,
+  "started_at": 1775012556,
+  "ended_at": 1775012910,
+  "duration_sec": 354,
+  "family_name": "product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "session_id": "019d46fe-4475-7653-bb51-2d8a8fd9398d",
+  "timeline_event_ids": [
+    "evt_1775012556237266118",
+    "evt_1775012867004208655",
+    "evt_1775012876194825626",
+    "evt_1775012910769574393"
+  ],
+  "repair_attempts": [],
+  "experiment_branch": "autoresearch-sae-l3-qproj",
+  "action": {
+    "command": "run",
+    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a x_hat = \u03a3_{e\u2208E_pk(x)} \u03a3_{i\u2208S_e^\u03c4(x)} \u03b1_{e,i}(x) b_{e,i}\u3002\u5176\u4e2d\u6bcf\u4e2a expert \u5b50\u5e93 {b_{e,i}} \u90fd\u662f\u9759\u6001\u5411\u91cf\u5e93\uff0cE_pk(x) \u4e0d\u662f\u7531 full router \u6216 fixed hash \u76f4\u63a5\u7ed9\u51fa\uff0c\u800c\u662f\u7531\u4e24\u8def learned product-key \u8def\u7531\u5206\u6570\u76f8\u52a0\u540e\u5728\u7b1b\u5361\u5c14 expert \u5bf9\u4e0a\u9009\u51fa\u5c11\u91cf active experts\uff1alogit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)\uff1bexpert \u5185\u90e8\u518d\u7528 JumpReLU \u5f62\u6210\u5c40\u90e8 support S_e^\u03c4(x)\u3002\u5728\u7ebf\u5bfc\u51fa\u94fe\u8def\u4ecd\u662f\u201cleft/right product-key router \u6253\u5206 -> \u9009\u62e9\u5c11\u91cf\u9759\u6001 expert \u5b50\u5e93 -> expert \u5185 JumpReLU sparse support -> \u67e5\u8868\u52a0\u6743\u6c42\u548c -> \u9009\u62e9\u6027\u8865\u507f\u201d\uff0c\u4e0d\u4f9d\u8d56\u52a8\u6001\u751f\u6210\u5b57\u5178\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a\u76f4\u63a5\u517c\u5bb9\u3002`batch_topk`\u3001`adaptive_budget_topk` \u8fd9\u7c7b batch/sample-coupled family \u4ecd\u662f\u4e0d\u517c\u5bb9\uff0c\u4e0d\u80fd\u8fdb\u5165\u5f53\u524d objective leaderboard\u3002\u672c\u8f6e\u552f\u4e00\u4e3b\u5047\u8bbe\u662f\uff1a\u5f53\u524d incumbent `expert_jumprelu@K32` \u7684 objective \u7f3a\u53e3\u4ecd\u4e3b\u8981\u5361\u5728 selection cost\uff0c\u800c recent `hashed_expert_jumprelu` \u4e0e `factorized_router_expert_topk` \u7684\u8d1f\u4fe1\u53f7\u8bf4\u660e\u201c\u628a router \u53d8\u8f7b\u201d\u672c\u8eab\u4e0d\u80fd\u9760 fixed hash \u6216 generic low-rank hidden \u7c97\u66b4\u5b8c\u6210\uff1b\u76f8\u5bf9 r235 \u4ec5\u628a `ARCHITECTURE` \u4ece `expert_jumprelu` \u5207\u5230\u65b0\u5b9e\u73b0\u7684 `product_key_expert_jumprelu`\uff0c\u4fdd\u6301 `K=32`\u3001`EXPANSION_FACTOR=1`\u3001`NUM_EXPERTS=128`\u3001`ACTIVE_EXPERTS=2`\u3001`LATENTS_PER_EXPERT=192`\u3001`adam`\u3001`LR=8e-4` \u4e0e\u5176\u4f59 recipe \u4e0d\u53d8\uff0c\u76f4\u63a5\u6d4b\u8bd5 PKM-style coarse-to-fine compositional routing \u662f\u5426\u80fd\u5728\u4fdd\u4f4f routed micro-expert \u8d28\u91cf\u7684\u540c\u65f6\uff0c\u628a exact total_cost_ratio \u538b\u5230 0.138427734375\uff0c\u5e76\u628a exceed_alpha_0.50 \u7ef4\u6301\u5728\u7ea6 0.2161 \u4ee5\u4e0b\uff0c\u4ece\u800c\u5237\u65b0\u5f53\u524d incumbent 0.354491\u3002\u8fd9\u4e2a family \u4e0e\u5df2\u6d4b `factorized_router_expert_topk` \u7684\u7cbe\u786e\u5dee\u5f02\u662f\uff1a\u5b83\u4e0d\u662f\u201c\u4f4e\u79e9 hidden -> \u5168 expert logits\u201d\uff0c\u800c\u662f\u201c\u5de6\u53f3\u4e24\u7ec4\u5c0f key \u7684\u53ef\u7ec4\u5408 expert addressing\u201d\uff0c\u56e0\u6b64\u662f\u5728\u5f53\u524d target \u4e0a\u5c1a\u672a\u88ab\u73b0\u6709 family \u8986\u76d6\u7684\u65b0\u7ed3\u6784\u69fd\u4f4d\u3002",
+    "summary": "\u5df2\u843d\u76d8\u5e76\u81ea\u68c0\u65b0\u7684 `product_key_expert_jumprelu` \u539f\u578b\u3002\u5efa\u8bae\u4ee5 r235 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=product_key_expert_jumprelu`\uff0c\u505a\u4e00\u8f6e PKM-style matched architecture probe\uff0c\u76f4\u63a5\u5224\u65ad compositional coarse-to-fine expert routing \u80fd\u5426\u5728 0.1384x \u7684\u66f4\u4f4e\u603b\u6210\u672c\u4e0b\u4fdd\u4f4f\u8db3\u591f\u7684 exceed \u8868\u73b0\u3002",
+    "change_type": "edit_sae_code",
+    "expected_win": "lower_objective",
+    "family_name": "product_key_expert_jumprelu",
+    "family_stage": "prototype",
+    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u8fd0\u884c\u52a8\u4f5c\u76f8\u5bf9 r235 \u53ea\u6539 `ARCHITECTURE`\u3002\u4e4b\u6240\u4ee5\u503c\u5f97\u505a\u4ee3\u7801\u539f\u578b\u800c\u4e0d\u662f\u7ee7\u7eed\u5728 `expert_jumprelu` \u4e0a\u5fae\u8c03\uff0c\u662f\u56e0\u4e3a current-target \u4e0a\u73b0\u6709 matched K=32 probes \u5df2\u57fa\u672c\u628a shared/coarse\u3001factorized-router\u3001hash-router\u3001lowrank-trunk \u7b49\u76f8\u90bb\u7ed3\u6784\u69fd\u4f4d\u88c1\u4e86\u4e00\u904d\uff0c\u800c PKM-style compositional routing \u4ecd\u662f prompt \u660e\u786e\u70b9\u540d\u3001\u4e14\u4e0e\u5df2\u6709 family \u4e0d\u540c\u7684\u65b0\u69fd\u4f4d\u3002\u4ee3\u7801\u6539\u52a8\u4fdd\u6301\u5728\u6700\u5c0f\u8303\u56f4\uff0c\u6ca1\u6709\u5f15\u5165\u65b0 env key\uff1b\u65b0\u589e family \u590d\u7528\u4e86\u5df2\u6709 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/JUMPRELU_*` \u8bed\u4e49\uff0c\u5e76\u5b8c\u6210 whitelist\u3001dispatch\u3001allowlist\u3001smoke \u7684\u95ed\u73af\u3002\u4e3b\u8981\u98ce\u9669\u662f product-key \u7684\u53ef\u5206\u89e3 expert logits \u4ecd\u53ef\u80fd\u50cf hash/factorized router \u4e00\u6837\u4f24\u5bb3\u9009\u62e9\u8d28\u91cf\uff1b\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u6700\u503c\u5f97\u88ab\u5e72\u51c0\u56de\u7b54\u7684\u95ee\u9898\u3002",
+    "needs_sanity": true,
+    "env_overrides": [
+      {
+        "key": "ARCHITECTURE",
+        "value": "product_key_expert_jumprelu"
+      }
+    ],
+    "touched_files": [
+      "research/AutoResearch/override_registry.py",
+      "sparsify/config.py",
+      "sparsify/sparse_coder.py"
+    ],
+    "notes_to_memory": [
+      "\u5df2\u5b9e\u9645\u843d\u76d8\u65b0 family `product_key_expert_jumprelu`\uff0c\u4fee\u6539\u4f4d\u4e8e `sparsify/config.py`\u3001`sparsify/sparse_coder.py`\uff0c\u5e76\u8865\u4e86 `research/AutoResearch/override_registry.py` \u7684 architecture allowlist\u3002",
+      "`product_key_expert_jumprelu` \u7684\u7ed3\u6784\u8bed\u4e49\u662f\u201clearned left/right product-key router + routed static expert sublibraries + expert-local JumpReLU gating\u201d\uff1b\u5b83\u4e0d\u662f `factorized_router_expert_topk` \u7684\u91cd\u547d\u540d\uff0c\u56e0\u4e3a expert logits \u6765\u81ea pairwise compositional addressing\uff0c\u800c\u4e0d\u662f low-rank hidden \u5230 full expert logits\u3002",
+      "\u672c\u5730 exact architecture smoke \u5df2\u901a\u8fc7\uff1a`SparseCoderConfig(architecture='product_key_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192)` \u53ef\u6210\u529f instantiate\u3001forward\u3001backward\u3002",
+      "\u672c\u5730 exact \u6210\u672c\u590d\u6838\uff1aselection_accesses=416768\u3001deployment_accesses=163840\u3001combined_accesses=580608\u3001exact total_cost_ratio=0.138427734375\uff1b\u76f8\u5bf9 r235 \u7684 0.160000 \u91ca\u653e\u7ea6 0.02157 objective \u7a7a\u95f4\u3002",
+      "override allowlist \u81ea\u68c0\u5df2\u901a\u8fc7\uff1a`validate_env_overrides([{key:'ARCHITECTURE',value:'product_key_expert_jumprelu'}], fallback_architecture='expert_jumprelu')` \u8fd4\u56de\u7a7a\u5217\u8868\uff1b\u643a\u5e26 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/JUMPRELU_INIT_THRESHOLD` \u7684 family-key \u7ec4\u5408\u6821\u9a8c\u4e5f\u8fd4\u56de\u7a7a\u5217\u8868\u3002"
+    ],
+    "next_hypotheses": [
+      "\u5982\u679c `product_key_expert_jumprelu@K32` \u5237\u65b0 incumbent\uff0c\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `K=48`\uff0c\u6d4b\u8bd5\u628a\u7701\u4e0b\u7684 router \u6210\u672c\u56de\u6295\u5230 lookup budget \u540e\u662f\u5426\u8fd8\u80fd\u8fdb\u4e00\u6b65\u538b\u4f4e exceed\u3002",
+      "\u5982\u679c\u8be5\u70b9 objective \u63a5\u8fd1\u4f46\u4ecd\u7565\u8f93\u7ed9 r235\uff0c\u4e14\u4e3b\u8981\u8f93\u5728 exceed \u800c\u975e cost\uff0c\u4e0b\u4e00\u8f6e\u4fdd\u6301 family \u4e0d\u53d8\uff0c\u53ea\u6539 `JUMPRELU_INIT_THRESHOLD`\uff0c\u5224\u65ad PK router \u662f\u5426\u9700\u8981\u66f4\u4fdd\u5b88\u7684 local support \u6821\u51c6\u3002",
+      "\u5982\u679c\u8be5\u70b9\u4ecd\u660e\u663e\u52a3\u4e8e r235\uff0c\u8bf4\u660e\u5f53\u524d small-K lane \u7684\u4e3b\u95ee\u9898\u4e0d\u662f router \u53c2\u6570\u91cf\uff0c\u800c\u662f product-key \u53ef\u5206\u89e3\u8def\u7531\u672c\u8eab\u635f\u4f24\u4e86 expert \u9009\u62e9\u8d28\u91cf\uff1b\u540e\u7eed\u5e94\u4e0b\u8c03 PKM-style routed-expert \u65b9\u5411\u4f18\u5148\u7ea7\uff0c\u800c\u4e0d\u662f\u7ee7\u7eed\u7ec6\u626b\u8fd9\u6761\u7ebf\u3002"
+    ],
+    "reference_round": 235
+  },
+  "result": {
+    "decision": "crash",
+    "status": "crash",
+    "timestamp": "1775012910",
+    "total_cost": "580608.000000",
+    "total_cost_ratio": "0.138428",
+    "selection_cost": "416768.000000",
+    "selection_cost_ratio": "0.099365",
+    "deployment_accesses": "163840.000000",
+    "deployment_ratio": "0.039062",
+    "k": "32",
+    "architecture": "product_key_expert_jumprelu",
+    "expansion_factor": "1",
+    "run_health": "crash",
+    "termination_reason": "missing_objective_metric",
+    "checkpoint": "/root/sparsify-ascend/checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802",
+    "experiment_id": "r241_1775012910",
+    "head_commit": "551dc6190ec01eb6e5c93031c767d626dc3d6513",
+    "description": "\u5df2\u843d\u76d8\u5e76\u81ea\u68c0\u65b0\u7684 `product_key_expert_jumprelu` \u539f\u578b\u3002\u5efa\u8bae\u4ee5 r235 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE=product_key_expert_jumprelu`\uff0c\u505a\u4e00\u8f6e PKM-style matched architecture probe\uff0c\u76f4\u63a5\u5224\u65ad compositional coarse-to-fine expert routing \u80fd\u5426\u5728 0.1384x \u7684\u66f4\u4f4e\u603b\u6210\u672c\u4e0b\u4fdd\u4f4f\u8db3\u591f\u7684 exceed \u8868\u73b0\u3002 [MISSING OBJECTIVE METRIC]",
+    "self_review": "\u8fd9\u8f6e\u6ee1\u8db3\u5355\u53d8\u91cf\u539f\u5219\uff1a\u8fd0\u884c\u52a8\u4f5c\u76f8\u5bf9 r235 \u53ea\u6539 `ARCHITECTURE`\u3002\u4e4b\u6240\u4ee5\u503c\u5f97\u505a\u4ee3\u7801\u539f\u578b\u800c\u4e0d\u662f\u7ee7\u7eed\u5728 `expert_jumprelu` \u4e0a\u5fae\u8c03\uff0c\u662f\u56e0\u4e3a current-target \u4e0a\u73b0\u6709 matched K=32 probes \u5df2\u57fa\u672c\u628a shared/coarse\u3001factorized-router\u3001hash-router\u3001lowrank-trunk \u7b49\u76f8\u90bb\u7ed3\u6784\u69fd\u4f4d\u88c1\u4e86\u4e00\u904d\uff0c\u800c PKM-style compositional routing \u4ecd\u662f prompt \u660e\u786e\u70b9\u540d\u3001\u4e14\u4e0e\u5df2\u6709 family \u4e0d\u540c\u7684\u65b0\u69fd\u4f4d\u3002\u4ee3\u7801\u6539\u52a8\u4fdd\u6301\u5728\u6700\u5c0f\u8303\u56f4\uff0c\u6ca1\u6709\u5f15\u5165\u65b0 env key\uff1b\u65b0\u589e family \u590d\u7528\u4e86\u5df2\u6709 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/JUMPRELU_*` \u8bed\u4e49\uff0c\u5e76\u5b8c\u6210 whitelist\u3001dispatch\u3001allowlist\u3001smoke \u7684\u95ed\u73af\u3002\u4e3b\u8981\u98ce\u9669\u662f product-key \u7684\u53ef\u5206\u89e3 expert logits \u4ecd\u53ef\u80fd\u50cf hash/factorized router \u4e00\u6837\u4f24\u5bb3\u9009\u62e9\u8d28\u91cf\uff1b\u4f46\u8fd9\u6b63\u662f\u5f53\u524d\u6700\u503c\u5f97\u88ab\u5e72\u51c0\u56de\u7b54\u7684\u95ee\u9898\u3002",
+    "log_path": "/root/sparsify-ascend/research/history/logs/round0241_standard_1775012876.log",
+    "metrics_path": "/root/sparsify-ascend/checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802/metrics.jsonl",
+    "error_type": "missing_objective_metric",
+    "error_summary": "missing exceed_alpha_0_50 in final metrics; round cannot enter objective leaderboard",
+    "log_excerpt": "missing exceed_alpha_0_50 in final metrics; round cannot enter objective leaderboard",
+    "initial_target_tokens": "30000000",
+    "final_target_tokens": "30000000",
+    "resume_stage_count": "1",
+    "continuation_stop_reason": "missing_step_records",
+    "continued_from_checkpoint": "false"
+  },
+  "resolved_reference_env_config": {
+    "ARCHITECTURE": "expert_jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "32",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "16",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "128",
+    "LATENTS_PER_EXPERT": "192",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "resolved_candidate_env_config": {
+    "ARCHITECTURE": "product_key_expert_jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "32",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "TRUNK_RANK": "16",
+    "STAGE1_RATIO": "0.25",
+    "NUM_EXPERTS": "128",
+    "LATENTS_PER_EXPERT": "192",
+    "ACTIVE_EXPERTS": "2"
+  },
+  "changed_keys": [
+    "ARCHITECTURE"
+  ],
+  "reference_source": "reference_round:r235",
+  "runtime_config_json": {
+    "architecture": "product_key_expert_jumprelu",
+    "expansion_factor": 1,
+    "k": 32,
+    "optimizer": "adam",
+    "lr": "8e-4",
+    "hookpoints": "layers.[3].self_attn.q_proj",
+    "batch_size": 1,
+    "grad_acc_steps": 8,
+    "micro_acc_steps": 1,
+    "auxk_alpha": 0.03125,
+    "dead_feature_threshold": 10000000,
+    "use_hadamard": false,
+    "family_name": "product_key_expert_jumprelu",
+    "family_stage": "prototype",
+    "target_profile": {
+      "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+      "training_hookpoint": "layers.[3].self_attn.q_proj",
+      "d_in": 1024,
+      "n_output": 4096,
+      "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
+      "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
+      "original_matmul_accesses": 4194304
+    },
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
+    "d_in": 1024,
+    "n_output": 4096,
+    "original_matmul_accesses": 4194304,
+    "trunk_rank": 16,
+    "stage1_ratio": 0.25,
+    "factorized_hidden_dim": 256,
+    "num_experts": 128,
+    "active_experts": 2,
+    "latents_per_expert": 192
+  },
+  "runtime_env_config": {
+    "ARCHITECTURE": "product_key_expert_jumprelu",
+    "EXPANSION_FACTOR": "1",
+    "K": "32",
+    "HOOKPOINTS": "layers.[3].self_attn.q_proj",
+    "OPTIMIZER": "adam",
+    "LR": "8e-4",
+    "BATCH_SIZE": "1",
+    "GRAD_ACC_STEPS": "8",
+    "MICRO_ACC_STEPS": "1",
+    "AUXK_ALPHA": "0.03125",
+    "DEAD_FEATURE_THRESHOLD": "10000000",
+    "USE_HADAMARD": "0",
+    "COMPILE_MODEL": "1",
+    "TRUNK_RANK": "16",
+    "STAGE1_RATIO": "0.25",
+    "FACTORIZED_HIDDEN_DIM": "256",
+    "NUM_EXPERTS": "128",
+    "ACTIVE_EXPERTS": "2",
+    "LATENTS_PER_EXPERT": "192"
+  },
+  "target_profile": {
+    "profile_id": "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1",
+    "training_hookpoint": "layers.[3].self_attn.q_proj",
+    "d_in": 1024,
+    "n_output": 4096,
+    "elbow_threshold_path": "thresholds/Qwen3-0.6B/thresholds_q.json",
+    "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
+    "original_matmul_accesses": 4194304
+  },
+  "cost_model_label": "train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output",
+  "touched_files": [
+    "research/AutoResearch/override_registry.py",
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py"
+  ],
+  "patch_path": "/root/sparsify-ascend/research/history/patches/round_0241.patch"
+}
+
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/timeline.jsonl
+
+codex
+`r241` 不是 parse/dispatch 崩溃，而是训练没产出最终 `exceed_alpha_0_50`。我先看这是不是 family 特有的前向/训练链问题，避免把 runtime 缺陷误判成结构结论。
+exec
+/bin/bash -lc "sed -n '1,240p' research/history/logs/round0241_standard_1775012876.log" in /root/sparsify-ascend
+ succeeded in 0ms:
+W0401 11:07:57.299000 233711 site-packages/torch/distributed/run.py:803] 
+W0401 11:07:57.299000 233711 site-packages/torch/distributed/run.py:803] *****************************************
+W0401 11:07:57.299000 233711 site-packages/torch/distributed/run.py:803] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0401 11:07:57.299000 233711 site-packages/torch/distributed/run.py:803] *****************************************
+Using fused decoder on CUDA.
+Using fused decoder on CUDA.
+Using DDP across 2 GPUs.
+`torch_dtype` is deprecated! Use `dtype` instead!
+`torch_dtype` is deprecated! Use `dtype` instead!
+Dataset already tokenized; skipping tokenization.
+Shuffling dataset with seed 1127
+Dataset already tokenized; skipping tokenization.
+Shuffling dataset with seed 1127
+Training on '/root/fineweb-edu/sample/10BT-tokenized-qwen3-2048' (split 'train')
+Storing model weights in torch.bfloat16
+Training on modules: ['layers.3.self_attn.q_proj']
+Training on '/root/fineweb-edu/sample/10BT-tokenized-qwen3-2048' (split 'train')
+Storing model weights in torch.bfloat16
+Training on modules: ['layers.3.self_attn.q_proj']
+Initializing SAEs with random seed(s) [1127]
+Learning rate: 8.00e-04
+Loaded elbow thresholds for 1/1 hookpoints
+Initializing SAEs with random seed(s) [1127]
+Learning rate: 8.00e-04
+Loaded elbow thresholds for 1/1 hookpoints
+wandb: Currently logged in as: 762842077 (762842077-tianjin-university) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 7gkcfih6
+wandb: Tracking run with wandb version 0.23.1
+wandb: Run data is saved locally in /root/sparsify-ascend/wandb/run-20260401_110804-7gkcfih6
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802
+wandb: ⭐️ View project at https://wandb.ai/762842077-tianjin-university/qwen3-0.6B-auto-qproj
+wandb: 🚀 View run at https://wandb.ai/762842077-tianjin-university/qwen3-0.6B-auto-qproj/runs/7gkcfih6
+Number of SAE parameters: 50_405_399
+Number of model parameters: 596_049_920
+Number of SAE parameters: 50_405_399
+Number of model parameters: 596_049_920
+
+Training:   0%|          | 0/500000 [00:00<?, ?it/s]Compiled 28 transformer layers with torch.compile
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank1]:   File "<frozen runpy>", line 88, in _run_code
+[rank1]:   File "/root/sparsify-ascend/sparsify/__main__.py", line 340, in <module>
+[rank1]:     run()
+[rank1]:   File "/root/sparsify-ascend/sparsify/__main__.py", line 336, in run
+[rank1]:     trainer.fit()
+[rank1]:   File "/root/sparsify-ascend/sparsify/trainer.py", line 605, in fit
+[rank1]:     name: DDP(sae, device_ids=[local_rank])
+[rank1]:           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py", line 860, in __init__
+[rank1]:     _sync_module_states(
+[rank1]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 310, in _sync_module_states
+[rank1]:     _sync_params_and_buffers(process_group, module_states, broadcast_bucket_size, src)
+[rank1]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 321, in _sync_params_and_buffers
+[rank1]:     dist._broadcast_coalesced(
+[rank1]: RuntimeError: No backend type associated with device type cpu
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/root/sparsify-ascend/sparsify/__main__.py", line 340, in <module>
+    run()
+  File "/root/sparsify-ascend/sparsify/__main__.py", line 336, in run
+    trainer.fit()
+  File "/root/sparsify-ascend/sparsify/trainer.py", line 605, in fit
+    name: DDP(sae, device_ids=[local_rank])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py", line 860, in __init__
+    _sync_module_states(
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 310, in _sync_module_states
+    _sync_params_and_buffers(process_group, module_states, broadcast_bucket_size, src)
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 321, in _sync_params_and_buffers
+    dist._broadcast_coalesced(
+RuntimeError: No backend type associated with device type cpu
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/root/sparsify-ascend/sparsify/__main__.py", line 340, in <module>
+[rank0]:     run()
+[rank0]:   File "/root/sparsify-ascend/sparsify/__main__.py", line 336, in run
+[rank0]:     trainer.fit()
+[rank0]:   File "/root/sparsify-ascend/sparsify/trainer.py", line 605, in fit
+[rank0]:     name: DDP(sae, device_ids=[local_rank])
+[rank0]:           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/nn/parallel/distributed.py", line 860, in __init__
+[rank0]:     _sync_module_states(
+[rank0]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 310, in _sync_module_states
+[rank0]:     _sync_params_and_buffers(process_group, module_states, broadcast_bucket_size, src)
+[rank0]:   File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/utils.py", line 321, in _sync_params_and_buffers
+[rank0]:     dist._broadcast_coalesced(
+[rank0]: RuntimeError: No backend type associated with device type cpu
+W0401 11:08:09.716000 233711 site-packages/torch/distributed/elastic/multiprocessing/api.py:908] Sending process 233751 closing signal SIGTERM
+E0401 11:08:09.880000 233711 site-packages/torch/distributed/elastic/multiprocessing/api.py:882] failed (exitcode: 1) local_rank: 1 (pid: 233752) of binary: /root/miniconda3/envs/sparsify-ascend/bin/python3.12
+Traceback (most recent call last):
+  File "/root/miniconda3/envs/sparsify-ascend/bin/torchrun", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 357, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py", line 936, in main
+    run(args)
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/run.py", line 927, in run
+    elastic_launch(
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 156, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/miniconda3/envs/sparsify-ascend/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 293, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+sparsify FAILED
+------------------------------------------------------------
+Failures:
+  <NO_OTHER_FAILURES>
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-04-01_11:08:09
+  host      : iZuf6cmwgapdeot4ojlegeZ
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 233752)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+
+exec
+/bin/bash -lc 'if [ -f checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802/metrics.jsonl ]; then tail -n 40 checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802/metrics.jsonl; fi' in /root/sparsify-ascend
+ succeeded in 0ms:
+{"type": "config", "data": {"sae": {"expansion_factor": 1, "normalize_decoder": true, "num_latents": 0, "k": 32, "architecture": "product_key_expert_jumprelu", "jumprelu_init_threshold": 0.0, "jumprelu_bandwidth": 0.1, "gated_temperature": 1.0, "gated_init_logit": 2.0, "group_topk_size": 4, "trunk_rank": 16, "num_codes": null, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 128, "active_experts": 2, "latents_per_expert": 192}, "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "max_tokens": 30000000, "lr": 0.0008, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "exceed_alphas": [0.05, 0.1, 0.25, 0.5], "elbow_threshold_path": "/root/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json", "hookpoints": ["layers.3.self_attn.q_proj"], "init_seeds": [1127], "layers": [], "layer_stride": 1, "num_tiles": 1, "global_topk": false, "input_mixing": false, "use_hadamard": false, "hadamard_block_size": 128, "hadamard_seed": 0, "hadamard_use_perm": true, "compile_model": true, "save_every": 1000, "save_best": true, "save_dir": "/root/sparsify-ascend/checkpoints/research_agent/round_0241", "log_to_wandb": true, "run_name": "round0241_standard_1775012876", "wandb_project": "qwen3-0.6B-auto-qproj", "wandb_log_frequency": 1, "finetune": null, "optimizer": "adam", "matryoshka_ks": [], "matryoshka_weights": [], "ortho_lambda": 0.0, "residual_from": null, "save_metrics_jsonl": true, "model": "/root/models/Qwen3-0.6B", "dataset": "/root/fineweb-edu/sample/10BT-tokenized-qwen3-2048", "split": "train", "ctx_len": 2048, "hf_token": null, "revision": null, "max_examples": 1000000, "resume": false, "text_column": "text", "shuffle_seed": 1127, "data_preprocessing_num_proc": 120, "data_args": ""}}
+
+exec
+/bin/bash -lc "python - <<'PY'
+from pathlib import Path
+p=Path('checkpoints/research_agent/round_0241/round0241_standard_1775012876_dp2_bs1_ga8_ef1_k32_20260401_110802/metrics.jsonl')
+if p.exists():
+    lines=p.read_text().splitlines()
+    print('lines', len(lines))
+    print(lines[-1] if lines else 'EMPTY')
+else:
+    print('missing metrics')
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+lines 1
+{"type": "config", "data": {"sae": {"expansion_factor": 1, "normalize_decoder": true, "num_latents": 0, "k": 32, "architecture": "product_key_expert_jumprelu", "jumprelu_init_threshold": 0.0, "jumprelu_bandwidth": 0.1, "gated_temperature": 1.0, "gated_init_logit": 2.0, "group_topk_size": 4, "trunk_rank": 16, "num_codes": null, "stage1_ratio": 0.25, "factorized_hidden_dim": 256, "num_experts": 128, "active_experts": 2, "latents_per_expert": 192}, "batch_size": 1, "grad_acc_steps": 8, "micro_acc_steps": 1, "max_tokens": 30000000, "lr": 0.0008, "auxk_alpha": 0.03125, "dead_feature_threshold": 10000000, "exceed_alphas": [0.05, 0.1, 0.25, 0.5], "elbow_threshold_path": "/root/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json", "hookpoints": ["layers.3.self_attn.q_proj"], "init_seeds": [1127], "layers": [], "layer_stride": 1, "num_tiles": 1, "global_topk": false, "input_mixing": false, "use_hadamard": false, "hadamard_block_size": 128, "hadamard_seed": 0, "hadamard_use_perm": true, "compile_model": true, "save_every": 1000, "save_best": true, "save_dir": "/root/sparsify-ascend/checkpoints/research_agent/round_0241", "log_to_wandb": true, "run_name": "round0241_standard_1775012876", "wandb_project": "qwen3-0.6B-auto-qproj", "wandb_log_frequency": 1, "finetune": null, "optimizer": "adam", "matryoshka_ks": [], "matryoshka_weights": [], "ortho_lambda": 0.0, "residual_from": null, "save_metrics_jsonl": true, "model": "/root/models/Qwen3-0.6B", "dataset": "/root/fineweb-edu/sample/10BT-tokenized-qwen3-2048", "split": "train", "ctx_len": 2048, "hf_token": null, "revision": null, "max_examples": 1000000, "resume": false, "text_column": "text", "shuffle_seed": 1127, "data_preprocessing_num_proc": 120, "data_args": ""}}
+
+codex
+`r241` 的 crash 根因已经定位：新 family 里 `pair_left_index/pair_right_index` buffer 落在 CPU，DDP 在 GPU 训练前同步模块状态时报错。先做最小修复并用精确架构字符串复测。
+apply patch
+patch: completed
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+arch = 'product_key_expert_jumprelu'
+k = 32
+ef = 1
+cfg = SparseCoderConfig(
+    architecture=arch,
+    k=k,
+    expansion_factor=ef,
+    num_experts=128,
+    active_experts=2,
+    latents_per_expert=192,
+)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+print('buffers', {n:str(b.device) for n,b in sae.named_buffers() if 'pair_' in n})
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+import os, sys, tempfile
+sys.path.insert(0, '.')
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+if not torch.cuda.is_available():
+    print('skip_ddp_smoke:no_cuda')
+    raise SystemExit(0)
+
+fd, path = tempfile.mkstemp(prefix='ddp-pk-', suffix='.init')
+os.close(fd)
+try:
+    dist.init_process_group(
+        backend='nccl',
+        init_method=f'file://{path}',
+        rank=0,
+        world_size=1,
+    )
+    torch.cuda.set_device(0)
+    cfg = SparseCoderConfig(
+        architecture='product_key_expert_jumprelu',
+        k=32,
+        expansion_factor=1,
+        num_experts=128,
+        active_experts=2,
+        latents_per_expert=192,
+    )
+    sae = SparseCoder(1024, cfg, device='cuda:0', dtype=torch.float32)
+    ddp = DDP(sae, device_ids=[0])
+    x = torch.randn(2, 1024, device='cuda:0')
+    out = ddp(x)
+    out.fvu.backward()
+    print('ddp_smoke: OK')
+finally:
+    if dist.is_initialized():
+        dist.destroy_process_group()
+    if os.path.exists(path):
+        os.remove(path)
+PY" in /root/sparsify-ascend
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+ succeeded in 5130ms:
+Using fused decoder on CUDA.
+integration_smoke: OK product_key_expert_jumprelu 32 1 cuda
+buffers {'pair_left_index': 'cuda:0', 'pair_right_index': 'cuda:0'}
+
+ succeeded in 5459ms:
+Using fused decoder on CUDA.
+ddp_smoke: OK
+
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+codex
+blocker 已修掉，并做了针对性的 DDP 复测。接下来不该换新结构槽位，而是把同一个 `product_key_expert_jumprelu` probe 重新跑成有效结果，否则 r241 只是运行时伪影。
+exec
+/bin/bash -lc 'git status --short' in /root/sparsify-ascend
+ succeeded in 0ms:
+ M research/history/timeline.jsonl
+ M sparsify/sparse_coder.py
+
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+exec
+/bin/bash -lc "python - <<'PY'
+import json
+obj=json.load(open('research/history/logs/agent_action_0241.json'))
+print(sorted(obj.keys()))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+['change_type', 'command', 'env_overrides', 'expected_win', 'family_name', 'family_stage', 'hypothesis', 'needs_sanity', 'next_hypotheses', 'notes_to_memory', 'reference_round', 'self_review', 'summary', 'touched_files']
+
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+codex
+{"change_type":"edit_sae_code","command":"run","env_overrides":[{"key":"ARCHITECTURE","value":"product_key_expert_jumprelu"}],"expected_win":"lower_objective","family_name":"product_key_expert_jumprelu","family_stage":"prototype","hypothesis":"最终重构公式保持为 x_hat = Σ_{e∈E_pk(x)} Σ_{i∈S_e^τ(x)} α_{e,i}(x) b_{e,i}。其中 {b_{e,i}} 是各 expert 的静态子库原子；E_pk(x) 由两路 learned product-key router 给出，具体为 logit_e(x)=l_{a(e)}(x)+r_{b(e)}(x)，再选出少量 active experts；expert 内部再用 JumpReLU 形成局部 support S_e^τ(x)。在线侧可直接导出到 LUTurbo/Lottable 的“left/right product-key 打分 -> 选择少量静态 expert 子库 -> expert 内 JumpReLU sparse support -> 查表加权和 -> 选择性补偿”链路，静态库不随样本动态生成，因此兼容性判断为直接兼容。`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍是不兼容，不能进入当前 objective leaderboard。r241 的 crash 不是结构质量信号，而是实现阻塞：`pair_left_index/pair_right_index` buffer 落在 CPU，导致 DDP 在 GPU 训练前同步模块状态时报 `No backend type associated with device type cpu`，最终缺失 objective 指标。本轮唯一主假设是：修复这个 DDP blocker 后，继续以 r235 为 matched baseline，只改 `ARCHITECTURE=product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4` 与主要 recipe 不变，重新获得这条 PKM-style architecture slot 的有效 objective 证据；如果它真能在 exact total_cost_ratio=0.138427734375 下把 exceed_alpha_0.50 控制到约 0.2161 以下，就有机会刷新当前 incumbent。","needs_sanity":true,"next_hypotheses":["如果修复后的 `product_key_expert_jumprelu@K32` 刷新 incumbent，下一轮保持 family 不变，只改 `K=48`，测试把节省下来的 router 成本回投到 lookup budget 后是否能进一步压低 exceed。","如果该点能稳定跑通但 objective 仍略输给 r235，且主要输在 exceed 而非 cost，则说明 PKM-style compositional routing 可能有局部价值但交换率不够；后续只在它明显优于 `factorized_router_expert_topk` 时才值得继续。","如果修复后该点仍明显劣于 r235，则可把 `product_key_expert_jumprelu` 作为已裁决的新结构槽位归档，下调 product-key routed-expert 方向优先级。"],"notes_to_memory":["r241 的 `missing_objective_metric` 根因已定位为实现问题而非训练结果：`product_key_expert_jumprelu` 的 pair-index buffer 初始落在 CPU，DDP 在 GPU 上包装模块时因 CPU buffer 同步失败而提前退出。","本轮已实际落盘最小修复：在 `ProductKeyExpertJumpReLUSparseCoder` 中把 `pair_ids` 直接创建在目标 device 上，从而使 `pair_left_index/pair_right_index` buffer 与模型参数同设备。","修复后 exact architecture smoke 已再次通过：`SparseCoderConfig(architecture='product_key_expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192)` 可在 CUDA 上成功 instantiate、forward、backward。","修复后做了针对性 DDP smoke：单进程 `DDP(SparseCoder(..., architecture='product_key_expert_jumprelu'))` 在 `cuda:0` 上可成功包装并完成 forward/backward，说明 r241 的特定 blocker 已消除。","本轮没有新增 env key，也没有改动执行层；`ARCHITECTURE=product_key_expert_jumprelu` 的 allowlist 与 wiring 仍保持已接通状态。"],"reference_round":235,"self_review":"这轮优先修 blocker 而不是再开新 architecture slot，符合当前运行时优先级。虽然 Round 242 的模式是 matched architecture probe，但 r241 的 probe 事实上无效，因为它在 DDP 初始化阶段就崩了；若不先修复，就会把实现问题误判成结构负信号。修复范围严格限制在 `sparsify/` 单文件，没有新增 tunable，也没有改变训练语义。运行动作仍然满足 matched-probe 约束：相对 r235 只改 `ARCHITECTURE`，保持 K、EF、OPTIMIZER、LR 与主要 recipe 不变。","summary":"建议先用已修复的 `product_key_expert_jumprelu` 重新执行同一轮 matched architecture probe。r241 的 crash 来自 DDP 设备放置 bug，不是结构结论；现在 blocker 已被最小化修复并通过了精确架构与 DDP 本地 smoke。","touched_files":["sparsify/sparse_coder.py"]}
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index de7ad0a5f9336355cf244b054b6a5a20c8a50acc..d6c4e9d8f1e8aca096b6c4e2e1b3d32f8db59775
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -1522,7 +1522,7 @@
+             )
+ 
+         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
+-        pair_ids = torch.arange(self.num_experts)
++        pair_ids = torch.arange(self.num_experts, device=device)
+         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
+         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
+ 
+
+tokens used
+288,834

@@ -1522,7 +1522,7 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             )
 
         self.left_keys, self.right_keys = _product_key_pair_grid(self.num_experts)
-        pair_ids = torch.arange(self.num_experts)
+        pair_ids = torch.arange(self.num_experts, device=device)
         self.register_buffer("pair_left_index", pair_ids // self.right_keys)
         self.register_buffer("pair_right_index", pair_ids % self.right_keys)
 
