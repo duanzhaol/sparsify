@@ -449,6 +449,8 @@ def _get_sae_class(architecture: str) -> type:
         return ExpertJumpReLUSparseCoder
     if architecture == "adaptive_active_expert_jumprelu":
         return AdaptiveActiveExpertJumpReLUSparseCoder
+    if architecture == "hashed_expert_jumprelu":
+        return HashedExpertJumpReLUSparseCoder
     if architecture == "factorized_router_expert_topk":
         return FactorizedRouterExpertTopKSparseCoder
     if architecture == "shared_routed_expert_topk":
@@ -1257,6 +1259,39 @@ def _select_adaptive_active_expert_indices(
     return active_indices, adaptive_probs / norm
 
 
+def _select_hashed_active_expert_indices(
+    x: Tensor,
+    hash_projections: Tensor,
+    num_experts: int,
+) -> tuple[Tensor, Tensor]:
+    """Select active experts from fixed sign hashes instead of a learned router."""
+    active_experts = hash_projections.shape[0]
+    num_hash_bits = hash_projections.shape[1]
+    hash_logits = torch.einsum("bd,ahd->bah", x, hash_projections)
+    bit_weights = (2 ** torch.arange(num_hash_bits, device=x.device)).view(1, 1, -1)
+    raw_indices = ((hash_logits > 0).long() * bit_weights).sum(dim=-1) % num_experts
+    selected_indices = raw_indices
+
+    for slot in range(1, active_experts):
+        duplicate = (selected_indices[:, slot : slot + 1] == selected_indices[:, :slot]).any(
+            dim=-1
+        )
+        while duplicate.any():
+            selected_indices[duplicate, slot] = (
+                selected_indices[duplicate, slot] + 1
+            ) % num_experts
+            duplicate = (
+                selected_indices[:, slot : slot + 1] == selected_indices[:, :slot]
+            ).any(dim=-1)
+
+    if active_experts == 1:
+        selected_probs = x.new_ones(x.shape[0], 1)
+    else:
+        hash_strength = hash_logits.abs().mean(dim=-1)
+        selected_probs = torch.softmax(hash_strength, dim=-1)
+    return selected_indices, selected_probs
+
+
 def _finalize_routed_expert_acts(
     acts: Tensor,
     selected_expert_idx: Tensor,
@@ -1459,6 +1494,143 @@ class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
         router_logits = self.router(flat_x)
         selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
             router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class HashedExpertJumpReLUSparseCoder(SparseCoder):
+    """Fixed-hash expert routing with JumpReLU-gated local supports."""
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        nn.Module.__init__(self)
+        self.cfg = cfg
+        self.d_in = d_in
+        (
+            _base_num_latents,
+            self.num_experts,
+            self.latents_per_expert,
+            self.active_experts,
+        ) = _resolve_expert_layout(cfg, d_in)
+        self.num_latents = self.num_experts * self.latents_per_expert
+        if cfg.k > self.active_experts * self.latents_per_expert:
+            raise ValueError(
+                "hashed_expert_jumprelu requires k <= active_experts * latents_per_expert, "
+                f"got k={cfg.k}, active_experts={self.active_experts}, "
+                f"latents_per_expert={self.latents_per_expert}"
+            )
+
+        self.expert_encoders = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.latents_per_expert,
+                d_in,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.expert_encoder_bias = nn.Parameter(
+            torch.zeros(
+                self.num_experts,
+                self.latents_per_expert,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        nn.init.kaiming_uniform_(self.expert_encoders, a=5**0.5)
+
+        param_dtype = self.expert_encoder_bias.dtype
+        threshold = torch.full(
+            (self.num_experts, self.latents_per_expert),
+            cfg.jumprelu_init_threshold,
+            device=self.expert_encoder_bias.device,
+            dtype=param_dtype,
+        ).clamp_min(torch.finfo(param_dtype).tiny)
+        self.log_threshold = nn.Parameter(torch.log(torch.expm1(threshold)))
+
+        num_hash_bits = max(1, math.ceil(math.log2(max(2, self.num_experts))))
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(0)
+        projections = torch.randint(
+            0,
+            2,
+            (self.active_experts, num_hash_bits, d_in),
+            generator=gen,
+            dtype=torch.int64,
+        ).to(dtype=param_dtype, device=device)
+        projections = projections.mul_(2).sub_(1).div_(math.sqrt(d_in))
+        self.register_buffer("hash_projections", projections)
+
+        if decoder:
+            decoder_init = self.expert_encoders.data.reshape(self.num_latents, d_in)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+        else:
+            self.W_dec = None
+
+        self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+
+    @property
+    def threshold(self) -> Tensor:
+        return F.softplus(self.log_threshold)
+
+    def _encoder_linear_layers(self):
+        return []
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        return [
+            (
+                "hash_router_projection",
+                self.active_experts * self.hash_projections.shape[1] * self.d_in,
+                f"hash={self.active_experts}×{self.hash_projections.shape[1]}x{self.d_in}",
+            ),
+            (
+                "active_expert_encoder",
+                self.active_experts * self.d_in * self.latents_per_expert,
+                f"active={self.active_experts}×{self.d_in}x{self.latents_per_expert}",
+            ),
+        ]
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        selected_expert_idx, selected_probs = _select_hashed_active_expert_indices(
+            flat_x,
+            self.hash_projections,
+            self.num_experts,
         )
         selected_weight = self.expert_encoders[selected_expert_idx]
         selected_bias = self.expert_encoder_bias[selected_expert_idx]
