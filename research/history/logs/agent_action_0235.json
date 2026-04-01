@@ -1,0 +1,31 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 x_hat = Σ_{e∈E(x)} Σ_{i∈Ŝ_e(x)} α_{e,i}(x) b_{e,i}，其中 E(x) 是轻量 router 选出的少量 active experts，{b_{e,i}} 是各 expert 的静态子库原子，而 expert 内支持集 Ŝ_e(x) 由 JumpReLU 门控的局部激活形成：先算正激活 positive_{e,i}(x)=ReLU(z_{e,i}(x))，再用 gate_{e,i}(x)=σ((positive_{e,i}(x)-τ_{e,i})/β) 做阈值化，最终系数为 α_{e,i}(x)=positive_{e,i}(x)·gate_{e,i}(x)。导出到 LUTurbo/Lottable 的在线链路仍是“router 选择静态 expert 子库 -> expert 内 JumpReLU-gated sparse support -> 查表加权求和 -> 选择性补偿”，静态库不随样本动态生成，因此 `expert_jumprelu` 判定为直接兼容；`batch_topk`、`adaptive_budget_topk` 等 batch/sample-coupled family 仍属不兼容，不能驱动当前兼容 leaderboard。本轮唯一主假设是：当前 `expert_topk@K=32` 的瓶颈不一定只是 routed 容量或 router 成本，还可能是 expert 内 top-k 支持过硬导致 small-K 下尾部误差校准不足；因此相对 r212 只把 `ARCHITECTURE` 从 `expert_topk` 切到 `expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`OPTIMIZER=adam`、`LR=8e-4`、`NUM_EXPERTS=128`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=192` 与其余主 recipe 不变，直接测试“同一 routed 子库容量、同一 exact cost 下，JumpReLU-gated local support 是否能比 local top-k 更好地压低 exceed_alpha_0.50”。本地 exact 成本复核表明该 matched recipe 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与 r212 完全同成本，因此这轮是纯结构支持规则 probe，不混入 cost 归因。",
+  "summary": "建议以 r212 为 reference，只改 `ARCHITECTURE=expert_jumprelu`，做一轮 matched-cost architecture probe。目标是回答在与 incumbent 完全同成本的前提下，expert 内 JumpReLU 门控能否显著改善 small-K exceed；如果不能，这条“支持规则替换”方向也可以快速降级。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮满足单变量原则：相对 r212 只改 `ARCHITECTURE`，没有代码改动，也没有新增 tunable key。之所以此时不继续留在 `factorized_router_expert_topk`，是因为 r233 和 r234 已经给出连续负信号：从 K=32 到 K=48，objective 反而从 0.368110 升到 0.373391，说明“router-only 低秩化”并没有形成值得继续追的 deployment knee。之所以也不选 `codebook_topk` / `residual_vq` 这类 coarse-codebook family，是因为本地 exact 成本复核显示它们在 matched K=32 recipe 下 total_cost_ratio 已分别到约 0.40 和 0.51，明显偏离当前 0.14x~0.20x 主战场。`expert_jumprelu` 则提供了一个真正新的、但仍与 incumbent 完全同成本的结构槽位；它也不等同于已失败的 plain `jumprelu`，因为 r226 测的是无 expert routing 的单库 family，cost=0.289062、objective=0.599505，而本轮测的是保留 routed expert 容量、只替换 expert 内支持形成机制的 matched probe。主要风险是 JumpReLU 门控在当前 hookpoint 上只会带来更软的稀疏支持而不会真正改善 exceed；但如果连同成本下的支持规则替换都没有收益，就可以更明确地把后续预算转去别的结构线，而不是继续在 routed-only 家族内部做低信息变体。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "expert_jumprelu"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r233/r234 已基本否定当前 target 上的 `factorized_router_expert_topk` 主线价值：K=32 objective=0.368110，K=48 objective=0.373391，exceed 仍在 0.20 以上，说明 router-only 低秩化没有换回足够的 exceed 改善。",
+    "本地 exact 成本复核：`expert_jumprelu K=32 EF=1 NUM_EXPERTS=128 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=192` 的 selection_accesses=524288、deployment_accesses=163840、combined_accesses=688128、exact total_cost_ratio=0.1640625，与 `expert_topk@r212` 完全同成本。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key: ARCHITECTURE, value: expert_jumprelu}], fallback_architecture='expert_topk')` 返回空列表。",
+    "本地 smoke 已通过：`SparseCoderConfig(architecture='expert_jumprelu', k=32, expansion_factor=1, num_experts=128, active_experts=2, latents_per_expert=192, factorized_hidden_dim=256)` 在 CPU 上可成功 instantiate、forward、backward。",
+    "本地成本筛查表明 `codebook_topk` / `residual_vq` 在 matched K=32 recipe 下 exact total_cost_ratio 约为 0.40 / 0.51，已偏离当前主战场，不适合作为 Round 235 的 matched-objective probe。"
+  ],
+  "next_hypotheses": [
+    "如果 `expert_jumprelu@K32` 在同成本下把 exceed_alpha_0.50 明显压低并刷新 r212，则下一轮可保持 family 不变，只改 `K=48`，确认 JumpReLU 门控下的 deployment knee 是否比 `expert_topk` 更有利。",
+    "如果 `expert_jumprelu@K32` 与 r212 接近但未明显胜出，下一轮可保持 family 不变，只改 `JUMPRELU_INIT_THRESHOLD`，测试更强初始阈值是否能进一步抑制 small-K 尾部误差。",
+    "如果 `expert_jumprelu@K32` 在同成本下仍不能接近或超过 `expert_topk@K32`，则应停止继续消耗 routed-support-rule 替换方向的预算，转去新的结构槽位，例如更细粒度 shared/coarse + micro-expert 或 variable-active-path 原型。"
+  ],
+  "reference_round": 212
+}
