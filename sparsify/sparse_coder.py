@@ -455,6 +455,8 @@ def _get_sae_class(architecture: str) -> type:
         return ProductKeyFactorizedExpertTopKSparseCoder
     if architecture == "shared_product_key_expert_jumprelu":
         return SharedProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_product_key_expert_residual":
+        return SharedProductKeyExpertResidualSparseCoder
     if architecture == "shared_stacked_product_key_expert_jumprelu":
         return SharedStackedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_lowrank_product_key_expert_jumprelu":
@@ -2737,6 +2739,248 @@ class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
             top_acts.reshape(target_shape),
             top_indices.reshape(target_shape),
             full_acts.reshape(acts_shape),
+        )
+
+
+class SharedProductKeyExpertResidualSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Shared coarse stage, PK-routed expert cleanup, then tiny global residual cleanup."""
+
+    architecture_name = "shared_product_key_expert_residual"
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        *,
+        decoder: bool = True,
+    ):
+        super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
+        if self.stage2_k < 2:
+            raise ValueError(
+                f"{self.architecture_name} requires stage2_k >= 2 so the routed "
+                f"expert branch keeps at least one cleanup slot after reserving a "
+                f"global residual slot; got stage2_k={self.stage2_k}"
+            )
+
+        self.residual_stage_k = max(1, self.stage2_k // 6)
+        self.expert_stage_k = self.stage2_k - self.residual_stage_k
+        if self.expert_stage_k < 1:
+            raise ValueError(
+                f"{self.architecture_name} requires expert_stage_k >= 1, "
+                f"got stage2_k={self.stage2_k}"
+            )
+
+        self.residual_num_latents = self.latents_per_expert
+        hidden_dim = min(
+            self.latents_per_expert,
+            cfg.factorized_hidden_dim or self.latents_per_expert,
+        )
+        self.residual_factor = nn.Linear(
+            d_in, hidden_dim, device=device, dtype=dtype
+        )
+        self.residual_heads = nn.Parameter(
+            torch.empty(
+                self.residual_num_latents,
+                hidden_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.residual_head_bias = nn.Parameter(
+            torch.zeros(
+                self.residual_num_latents,
+                device=device,
+                dtype=dtype,
+            )
+        )
+        self.residual_factor.bias.data.zero_()
+        nn.init.kaiming_uniform_(self.residual_factor.weight, a=5**0.5)
+        nn.init.kaiming_uniform_(self.residual_heads, a=5**0.5)
+
+        if decoder:
+            assert self.W_dec is not None, "Decoder weight was not initialized."
+            residual_decoder = torch.matmul(
+                self.residual_heads.data,
+                self.residual_factor.weight.data,
+            )
+            decoder_init = torch.cat((self.W_dec.data, residual_decoder), dim=0)
+            self.W_dec = nn.Parameter(decoder_init.clone())
+            if self.cfg.normalize_decoder:
+                self.set_decoder_norm_to_unit_norm()
+
+        self.num_latents = (
+            self.shared_num_latents
+            + self.expert_num_latents
+            + self.residual_num_latents
+        )
+
+    def _encoder_linear_layers(self):
+        return super()._encoder_linear_layers() + [
+            ("residual_factor", self.residual_factor)
+        ]
+
+    def _extra_encode_accesses(self) -> list[tuple[str, int, str]]:
+        base = super()._extra_encode_accesses()
+        hidden_dim = self.residual_factor.out_features
+        base.append(
+            (
+                "factorized_residual_head",
+                hidden_dim * self.residual_num_latents,
+                f"residual={hidden_dim}x{self.residual_num_latents}",
+            )
+        )
+        return base
+
+    def _encode_expert_stage_with_budget(
+        self, residual: Tensor, *, topk: int
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_active_expert_indices(
+            expert_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            topk,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+        )
+
+        target_shape = (*original_shape, topk)
+        acts_shape = (*original_shape, self.expert_num_latents)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+    def _encode_residual_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+        hidden = F.relu(self.residual_factor(flat_x))
+        pre_acts = F.linear(hidden, self.residual_heads, self.residual_head_bias)
+        residual_acts = F.relu(pre_acts)
+        top_acts, top_indices = torch.topk(
+            residual_acts, self.residual_stage_k, dim=-1, sorted=False
+        )
+        top_indices = top_indices + self.shared_num_latents + self.expert_num_latents
+
+        target_shape = (*original_shape, self.residual_stage_k)
+        acts_shape = (*original_shape, self.residual_num_latents)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            residual_acts.reshape(acts_shape),
+        )
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x_centered = x - self.b_dec
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual_1 = x_centered - stage1_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
+            residual_1,
+            topk=self.expert_stage_k,
+        )
+        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
+
+        residual_2 = residual_1 - stage2_out
+        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts, stage3_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1_indices, stage2_indices, stage3_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1_full, stage2_full, stage3_full), dim=-1)
+        return EncoderOutput(combined_acts, combined_indices, combined_full)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual_1 = x_centered - stage1_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage_with_budget(
+            residual_1,
+            topk=self.expert_stage_k,
+        )
+        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
+
+        residual_2 = residual_1 - stage2_out
+        stage3_acts, stage3_indices, stage3_full = self._encode_residual_stage(
+            residual_2
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts, stage3_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1_indices, stage2_indices, stage3_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1_full, stage2_full, stage3_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
         )
 
 
