@@ -457,6 +457,8 @@ def _get_sae_class(architecture: str) -> type:
         return SharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_cascade_product_key_expert_jumprelu":
         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+        return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_expert_residual":
         return SharedProductKeyExpertResidualSparseCoder
     if architecture == "shared_product_key_expert_jumprelu_residual":
@@ -2766,6 +2768,8 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
         *,
         decoder: bool = True,
     ):
+        if cfg.active_experts is None:
+            cfg.active_experts = 2
         super().__init__(d_in, cfg, device=device, dtype=dtype, decoder=decoder)
         if self.active_experts != 2:
             raise ValueError(
@@ -2924,6 +2928,91 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
             fvu,
             auxk_loss,
         )
+
+
+class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
+    SharedCascadeProductKeyExpertJumpReLUSparseCoder
+):
+    """Cascade PK cleanup whose second expert only triggers on hard residuals."""
+
+    architecture_name = "shared_conditional_cascade_product_key_expert_jumprelu"
+
+    def _encode_cascade(
+        self, x_centered: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual_1 = x_centered - stage1_out
+        selected_expert_idx, selected_probs = self._select_ordered_expert_pair(
+            residual_1
+        )
+
+        single_expert_probs = torch.zeros_like(selected_probs)
+        single_expert_probs[:, :1] = 1.0
+        probe_stage2a_acts, probe_stage2a_indices, _ = self._encode_ordered_expert_stage(
+            residual_1,
+            selected_expert_idx,
+            single_expert_probs,
+            slot=0,
+            topk=self.stage2a_k,
+        )
+        probe_stage2a_out = self._decode_sparse(
+            probe_stage2a_acts, probe_stage2a_indices
+        )
+        probe_residual_2 = residual_1 - probe_stage2a_out
+
+        residual_eps = torch.finfo(residual_1.dtype).tiny
+        residual_1_energy = residual_1.detach().pow(2).mean(dim=-1, keepdim=True)
+        probe_residual_2_energy = probe_residual_2.detach().pow(2).mean(
+            dim=-1, keepdim=True
+        )
+        need_second = probe_residual_2_energy > (
+            0.5 * residual_1_energy.clamp_min(residual_eps)
+        )
+
+        final_probs = selected_probs.clone()
+        final_probs[:, :1] = torch.where(
+            need_second.reshape(-1, 1),
+            final_probs[:, :1],
+            torch.ones_like(final_probs[:, :1]),
+        )
+        final_probs[:, 1:] = torch.where(
+            need_second.reshape(-1, 1),
+            final_probs[:, 1:],
+            torch.zeros_like(final_probs[:, 1:]),
+        )
+
+        stage2a_acts, stage2a_indices, stage2a_full = self._encode_ordered_expert_stage(
+            residual_1,
+            selected_expert_idx,
+            final_probs,
+            slot=0,
+            topk=self.stage2a_k,
+        )
+        stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
+
+        residual_2 = residual_1 - stage2a_out
+        stage2b_acts, stage2b_indices, stage2b_full = self._encode_ordered_expert_stage(
+            residual_2,
+            selected_expert_idx,
+            final_probs,
+            slot=1,
+            topk=self.stage2b_k,
+        )
+
+        second_mask = need_second.to(stage2b_acts.dtype)
+        stage2b_acts = stage2b_acts * second_mask
+        stage2b_full = stage2b_full * second_mask
+
+        combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
+        )
+        combined_full = torch.cat((stage1_full, stage2a_full + stage2b_full), dim=-1)
+        return combined_acts, combined_indices, combined_full
 
 
 class SharedProductKeyExpertResidualSparseCoder(
