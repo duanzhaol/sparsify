@@ -1,0 +1,32 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 `h(x)=ReLU(Ux)`，`x_hat = Σ_{i∈S_sh(h(x))} α_i^sh b_i^sh + Σ_{j∈S_{e1(h(x))}^{τ1}(r1)} β_j c_{e1,j} + Σ_{m∈S_{e2(h(x))}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(h(x))`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)=PK_top2(h(x))` 是同一次 low-rank product-key 路由选出的有序 top-2 静态 expert 子库。在线导出仍是“低秩 shared trunk 计算 hidden -> shared 静态库查表 -> PK 选择有序 expert 子库 -> 第一位 expert cleanup -> 第二位 expert 对剩余残差再 cleanup -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。相对 r308 本轮只改 `NUM_EXPERTS=4096`，其余 `ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu, K=32, EF=1, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试 lowrank+cascade 当前是卡在 expert 粒度不足，还是卡在 low-rank hidden 路由本身。该点本地精确成本复核为 `selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`，几乎与 r308 同成本；若按 r308 的 exact `objective≈0.2781607508659363` 为基准，只需把 `exceed_alpha_0.50` 压到 `0.19562596082687378` 以下即可刷新该 family 自身最好点；若要击败当前 incumbent r304，则需要把 exceed 压到 `0.18239373564720152` 以下。",
+  "summary": "建议以 r308 为 reference，只改 `NUM_EXPERTS=4096`。这是在当前新 scaffold 上的一次高信息量、近同成本 knee 校准，直接回答“更细的 many-tiny PK expert 分片”能否在几乎不抬 cost 的前提下明显降低 tail exceed。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮继续留在 r308 family 内，但不是低信息量的局部细扫。之所以允许做这一个 patch，是因为 r308 刚建立了一个新的低成本 scaffold，且它的失败形状很具体：cost 已经足够左，但 exceed 仍明显偏高。此时最值得优先回答的不是再开一个不相干 family，而是判断当前 short-path PK cleanup 的瓶颈到底来自 expert 粒度，还是来自 low-rank hidden 本身。`NUM_EXPERTS=4096` 的价值在于它几乎不增加 total_cost，却能显式测试 DeepSeekMoE 式“更细 expert 分片”是否能更好地服务 hard-token cleanup。主要风险是 low-rank hidden 已经把 tail routing 信号压扁，导致再增 expert 数也几乎不改善 exceed；但如果结果如此，这轮就能较干净地终结“只靠更细 micro-experts 就能救活 lowrank+cascade”这条分支。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "4096"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r308 `shared_lowrank_cascade_product_key_expert_jumprelu` 的 exact 结果为 objective≈0.2781607508659363、cost_ratio=0.08230781555175781、exceed=0.19585293531417847；后续比较应以这组 persisted exact 值为准。",
+    "本轮选择 `NUM_EXPERTS=4096` 的原因不是继续扫常规容量轴，而是利用该 family 的 cost 结构特性：expert 数从 3072 提到 4096 时，selection_accesses 只从 181384 微升到 182336，combined_accesses 仅到 346176，仍处于约 `0.08253x` 的低成本档。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'4096'}], fallback_architecture='shared_lowrank_cascade_product_key_expert_jumprelu') == []`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=308` 且仅改 `NUM_EXPERTS=4096` 的 param_only 提案不会被当前 policy 拦截。",
+    "本地成本复核：`selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`；若要优于 r308，只需 `exceed_alpha_0.50 <= 0.19562596082687378`。",
+    "当前 lowrank 方向的历史证据是：plain `shared_lowrank_product_key_expert_jumprelu` 在当前 target 上 exceed 很差，r308 的 cascade 语义已把 exceed 从旧 lowrank 线的 `0.216~0.223` 压到 `0.1959`；本轮进一步测试更细 expert 粒度是否还能在近同成本下继续压 tail。"
+  ],
+  "next_hypotheses": [
+    "如果该点在几乎同成本下把 exceed 压到 `<=0.19563` 并刷新 r308，下一轮优先保留该 family，只改 `K=48`，测试在 expert 粒度已细化后追加少量 deploy lookup 预算，是否能把 objective 继续压向 incumbent。",
+    "如果该点 exceed 有明显下降但仍未接近 incumbent 门槛 `0.1824`，说明更细 micro-experts 有帮助但不足以单独解决 lowrank+cascade 的 tail 问题；后续应优先考虑带有更强条件补偿语义的新结构，而不是继续只扫 bank 粒度。",
+    "如果该点与 r308 持平或更差，则可更明确地判断当前 lowrank+cascade 的主瓶颈不在 expert 粒度，而更可能在 low-rank hidden 路由本身；后续应下调该 family 的继续预算优先级。"
+  ],
+  "reference_round": 308
+}

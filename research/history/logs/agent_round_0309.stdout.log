@@ -1,0 +1,786 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 `h(x)=ReLU(Ux)`，`x_hat = Σ_{i∈S_sh(h(x))} α_i^sh b_i^sh + Σ_{j∈S_{e1(h(x))}^{τ1}(r1)} β_j c_{e1,j} + Σ_{m∈S_{e2(h(x))}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(h(x))`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)=PK_top2(h(x))` 是同一次 low-rank product-key 路由选出的有序 top-2 静态 expert 子库。在线导出仍是“低秩 shared trunk 计算 hidden -> shared 静态库查表 -> PK 选择有序 expert 子库 -> 第一位 expert cleanup -> 第二位 expert 对剩余残差再 cleanup -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。相对 r308 本轮只改 `NUM_EXPERTS=4096`，其余 `ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu, K=32, EF=1, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试 lowrank+cascade 当前是卡在 expert 粒度不足，还是卡在 low-rank hidden 路由本身。该点本地精确成本复核为 `selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`，几乎与 r308 同成本；若按 r308 的 exact `objective≈0.2781607508659363` 为基准，只需把 `exceed_alpha_0.50` 压到 `0.19562596082687378` 以下即可刷新该 family 自身最好点；若要击败当前 incumbent r304，则需要把 exceed 压到 `0.18239373564720152` 以下。",
+  "summary": "建议以 r308 为 reference，只改 `NUM_EXPERTS=4096`。这是在当前新 scaffold 上的一次高信息量、近同成本 knee 校准，直接回答“更细的 many-tiny PK expert 分片”能否在几乎不抬 cost 的前提下明显降低 tail exceed。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮继续留在 r308 family 内，但不是低信息量的局部细扫。之所以允许做这一个 patch，是因为 r308 刚建立了一个新的低成本 scaffold，且它的失败形状很具体：cost 已经足够左，但 exceed 仍明显偏高。此时最值得优先回答的不是再开一个不相干 family，而是判断当前 short-path PK cleanup 的瓶颈到底来自 expert 粒度，还是来自 low-rank hidden 本身。`NUM_EXPERTS=4096` 的价值在于它几乎不增加 total_cost，却能显式测试 DeepSeekMoE 式“更细 expert 分片”是否能更好地服务 hard-token cleanup。主要风险是 low-rank hidden 已经把 tail routing 信号压扁，导致再增 expert 数也几乎不改善 exceed；但如果结果如此，这轮就能较干净地终结“只靠更细 micro-experts 就能救活 lowrank+cascade”这条分支。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "4096"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r308 `shared_lowrank_cascade_product_key_expert_jumprelu` 的 exact 结果为 objective≈0.2781607508659363、cost_ratio=0.08230781555175781、exceed=0.19585293531417847；后续比较应以这组 persisted exact 值为准。",
+    "本轮选择 `NUM_EXPERTS=4096` 的原因不是继续扫常规容量轴，而是利用该 family 的 cost 结构特性：expert 数从 3072 提到 4096 时，selection_accesses 只从 181384 微升到 182336，combined_accesses 仅到 346176，仍处于约 `0.08253x` 的低成本档。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'4096'}], fallback_architecture='shared_lowrank_cascade_product_key_expert_jumprelu') == []`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=308` 且仅改 `NUM_EXPERTS=4096` 的 param_only 提案不会被当前 policy 拦截。",
+    "本地成本复核：`selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`；若要优于 r308，只需 `exceed_alpha_0.50 <= 0.19562596082687378`。",
+    "当前 lowrank 方向的历史证据是：plain `shared_lowrank_product_key_expert_jumprelu` 在当前 target 上 exceed 很差，r308 的 cascade 语义已把 exceed 从旧 lowrank 线的 `0.216~0.223` 压到 `0.1959`；本轮进一步测试更细 expert 粒度是否还能在近同成本下继续压 tail。"
+  ],
+  "next_hypotheses": [
+    "如果该点在几乎同成本下把 exceed 压到 `<=0.19563` 并刷新 r308，下一轮优先保留该 family，只改 `K=48`，测试在 expert 粒度已细化后追加少量 deploy lookup 预算，是否能把 objective 继续压向 incumbent。",
+    "如果该点 exceed 有明显下降但仍未接近 incumbent 门槛 `0.1824`，说明更细 micro-experts 有帮助但不足以单独解决 lowrank+cascade 的 tail 问题；后续应优先考虑带有更强条件补偿语义的新结构，而不是继续只扫 bank 粒度。",
+    "如果该点与 r308 持平或更差，则可更明确地判断当前 lowrank+cascade 的主瓶颈不在 expert 粒度，而更可能在 low-rank hidden 路由本身；后续应下调该 family 的继续预算优先级。"
+  ],
+  "reference_round": 308
+}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d4b92-27b6-7db0-af8d-b0690f44c48e
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 309。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 309 策略模式：Exceed 探索
+原因：当前 incumbent objective=0.2649，其中 exceed=0.1649 明显高于 cost=0.1000；下一步应优先降 exceed_alpha_0.50。
+当前 objective anchor family：shared_cascade_product_key_expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=shared_cascade_product_key_expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 首要目标是降低 exceed_alpha_0.50；只要 objective_score 下降，允许适度增加 cost，但必须留在预算内。
+2. FVU 只作诊断：当 exceed 明显下降而 FVU 只小幅波动时，不要被旧的 FVU 直觉误导。
+3. 优先考虑能减少 tail-error / online compensation 需求的结构，而不是只做线性 cost 压缩。
+4. 允许新开 family；但任何新结构都必须仍能导出为静态子库有限加权和。
+5. 如果最近几轮都只是同一 family 上的轻微参数插值且 objective 没有实质下降，应优先换结构槽位。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 19 个，扩展兼容 26 个，不兼容 3 个。
+
+Agent 状态：round=308, consecutive_crashes=0, consecutive_no_improve=0, rounds_since_new_family=0
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.22` 仍差约 0.045；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `shared_cascade_product_key_expert_jumprelu` (K=32)，objective≈0.264929 = cost 0.10x + exceed 0.164929。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。
+  如果当前最佳线最近是靠 architecture probe 而不是局部插值取得改进，那么后续默认应把它当对照 scaffold：只保留极少量必要的 knee 校准，其余预算优先投向建立在该 scaffold 之上的新结构升级。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.08~0.14` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。
+  4. 难度自适应预算：不要默认所有 token 都走同一 active path；优先考虑“简单样本极便宜、困难样本才追加 cleanup”的结构。
+  5. 显式两阶段 / 条件级联补偿：第一阶段负责超便宜 shared/coarse 重构，第二阶段只在第一阶段失败时才打开 routed residual cleanup。
+  6. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，tiny routed experts 只做 tail / hard-token residual cleanup，active path 尽量短。
+  7. 更激进的 coarse-to-fine / product-key / bucketed routing / local residual dictionary；目标是扩大容量、缩小 hard-token 候选集，而不是继续 flat retrieval。
+  8. `shared bottleneck + expert-specific head`、expert 内部 low-rank、以及更轻的 scorer / router；但 plain shared-lowrank 近邻线若没有新的条件触发 / tail-cleanup 语义，不应再作为默认主线。
+  9. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  10. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  11. 当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 在已经出现局部 knee 信号后，继续围绕同一个 scaffold 做 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的多轮近邻扫点。
+  4. 只把 active path、shared split 或 expert 宽度做轻微改动，但没有明确解释为什么会更慢地恶化 exceed 的低信息增量实验。
+  5. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+  9. 把 fixed `ACTIVE_EXPERTS` 或固定 `K` 的轻微插值误当成新 regime；若没有难度自适应或条件级联语义，它通常只是局部校准。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 4 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+   - 注意：在当前 target 上 plain shared-lowrank 近邻线已经给过负信号；只有当它与 genuinely new 语义绑定，例如条件触发 cleanup、difficulty-aware budget、或更强 tail-specialization 时，才值得继续试。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+如何使用这些灵感：
+- 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
+- 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
+- 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+- 当前已知较弱、应避免默认回流的旧槽位包括：plain shared-lowrank 邻域、dual-shared / residual-dual-shared 的局部变体、以及没有条件触发语义的同 scaffold 微小插值。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个实现提醒：
+- 即使尝试复杂结构，也应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r304 objective=0.264928525686264 = cost 0.1x + exceed 0.16492852568626404 | fvu=0.15110117197036743 | arch=shared_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r305 objective=0.26992915630340575 = cost 0.11x + exceed 0.15992915630340576 | fvu=0.1468515694141388 | arch=shared_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r308 objective=0.2758529353141785 = cost 0.08x + exceed 0.19585293531417847 | fvu=0.17800554633140564 | arch=shared_lowrank_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r279 objective=0.2811864471435547 = cost 0.11x + exceed 0.1711864471435547 | fvu=0.15307489037513733 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r274 objective=0.28746201157569884 = cost 0.11x + exceed 0.17746201157569885 | fvu=0.16134148836135864 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r306 objective=0.2944666302204132 = cost 0.11x + exceed 0.1844666302204132 | fvu=0.16265490651130676 | arch=shared_conditional_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r278 objective=0.3017943370342255 = cost 0.08x + exceed 0.22179433703422546 | fvu=0.20013664662837982 | arch=dual_shared_lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r246 objective=0.3143901073932648 = cost 0.14x + exceed 0.17439010739326477 | fvu=0.1560433954000473 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → shared_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.264928525686264 = cost 0.1x + exceed 0.16492852568626404 | encoder=0.06x | deploy=0.04x | fvu=0.15110117197036743
+  最低 cost leader → shared_lowrank_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.2758529353141785 = cost 0.08x + exceed 0.19585293531417847 | encoder=0.04x | deploy=0.04x | fvu=0.17800554633140564
+  最低 exceed leader → shared_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.26992915630340575 = cost 0.11x + exceed 0.15992915630340576 | encoder=0.07x | deploy=0.04x | fvu=0.1468515694141388
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.22 以下。
+  当前 incumbent 约为 objective=0.264929 (cost=0.10x, exceed=0.164929)；距离目标仍差 0.044929。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.22 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.08x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.10x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.12x，则 exceed 需压到 ≤0.10
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.08
+  因此：若新结构 cost 升到约 0.14x，却仍无法把 exceed 压到约 0.08 附近，则通常不够支撑 0.22 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，7）：
+  r301 shared_adaptive_active_product_key_expert_jumprelu param_only -> keep objective=0.274642 cost=0.11x exceed=0.164642 fvu=0.14819805324077606 1307s
+  r302 shared_adaptive_active_product_key_expert_jumprelu param_only -> archive objective=0.272618 cost=0.11x exceed=0.162618 fvu=0.14764496684074402 1152s
+  r304 shared_cascade_product_key_expert_jumprelu param_only -> keep objective=0.267223 cost=0.102295x exceed=0.164929 fvu=0.15110117197036743 1403s
+  r305 shared_cascade_product_key_expert_jumprelu param_only -> keep objective=0.267107 cost=0.107178x exceed=0.159929 fvu=0.1468515694141388 1547s
+  r306 shared_conditional_cascade_product_key_expert_jumprelu edit_sae_code -> keep objective=0.291644 cost=0.107178x exceed=0.184467 fvu=0.16265490651130676 1894s
+  r307 shared_cascade_product_key_expert_jumprelu param_only -> archive objective=0.267775 cost=0.107178x exceed=0.160597 fvu=0.14866027235984802 1404s
+  r308 shared_lowrank_cascade_product_key_expert_jumprelu edit_sae_code -> keep objective=0.278161 cost=0.082308x exceed=0.195853 fvu=0.17800554633140564 1671s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost、low-FVU 或单纯更低的平均误差当成成功。当前阶段目标仍是把 objective 压向 `0.22` 以下；这通常不可能靠 incumbent 邻域的小步参数插值自然得到。若多轮结果仍停留在 `0.27~0.33` 一带，应优先寻找新的 regime shift，特别是那些能专门降低 hard-token / tail exceed 的结构。
+  2. 把当前 best `shared_product_key_expert_jumprelu` 视作 winning scaffold / objective anchor，而不是局部细扫终点。已有证据表明：plain PK、dual-shared、residual-dual-shared、shared-lowrank、shared-stacked 这些近邻升级大多没有赢它。因此后续预算不应继续主要花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性微调上，而应优先测试建立在这个 scaffold 之上的 genuinely new structure semantics。
+  3. 当前最值得优先尝试的新 regime 之一，是“难度自适应预算 + 条件级联补偿”。不要默认所有 token 都走固定 `K`、固定 `ACTIVE_EXPERTS`、固定 cleanup 深度。更值得测试的是：简单 token 只走极便宜基础路径，困难 token 才追加少量 expert / residual / 更大 K；或先做超便宜 coarse 重构，只在第一阶段失败时才打开第二阶段 cleanup。目标不是平均意义上更低 FVU，而是专门更高效地压低 `exceed_alpha_0.50`。
+  4. 关于 `ACTIVE_EXPERTS` / `K` 轴，不要把“固定 AE=1/2/3 或固定 K 的小插值”误当成新 regime。已有证据表明，在现有 PK / shared+PK many-tiny 语义下，简单的 fixed `AE` 调整信息增量有限。若要重新动这根轴，应优先让它服务于新的结构语义，例如按难度自适应地追加 experts、只在失败样本上打开第二阶段 cleanup、或让 coarse/shared 主干决定是否触发 extra budget。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r304 shared_cascade_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_cascade_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=2048
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r308 shared_lowrank_cascade_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=3072
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先不动代码，先对 r308 这条新 scaffold 做一轮单变量候选筛选，比较几个最有信息量的补丁点在当前 cost proxy 下的精确成本门槛。
+exec
+/bin/bash -lc "rg -n \"shared_lowrank_product_key_expert_jumprelu|shared_lowrank_cascade_product_key_expert_jumprelu|dual_shared_lowrank_product_key_expert_jumprelu\" research/history/results.tsv research/history/round_summaries -g '"'!research/history/timeline.jsonl'"'" in /root/sparsify-ascend
+ succeeded in 0ms:
+research/history/results.tsv:278:r277_1775047327	1775047327	ok	keep	0.20129787921905518	0.223148	0.30314800000000003	342592.0	0.08	178752.0	0.04	163840.0	0.04	32	shared_lowrank_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0277/round0277_standard_1775046682_dp2_bs1_ga8_ef1_k32_20260401_203129	310011185e64ee056f246794481171374287af9f			已新增并接通 `shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“廉价 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08168x` 的低成本档位把 objective 真正压低。	这轮符合当前运行优先级。r274-r276 已经在 dual-shared scaffold 上连续给出不够强的 objective 信号，其中 r275 虽有正向 exceed 改善，但仍未接近 incumbent，而 r276 的 adaptive 变体又回退；按规则此时应优先换结构槽位，而不是继续在同一 scaffold 上做 split/active-path 邻域细扫。选择 `shared_lowrank_product_key_expert_jumprelu` 而不是继续堆 dual-shared 变体，是因为它更直接对应当前高优先级方向“shared bottleneck + expert-specific head”，同时保留当前已验证有效的 PK cleanup 语义，并且本地 exact cost 复核落在 `~0.08x`，明显优于 `shared_lowrank_*` 旧家族在当前 1024-expert recipe 下的 `~0.19x` 高成本负信号。代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke；没有新增 tunable env key，因此不需要改 `config_resolution`、`runner` 或 `scripts/autoresearch_test.sh`。主要风险是低秩 shared bottleneck 可能过弱，shared coarse 只是在 cost 上更左却换不回足够的 exceed 改善；但这正是一个高信息量、近同成本的新结构 probe。	/root/sparsify-ascend/research/history/logs/round0277_standard_1775046682.log
+research/history/results.tsv:279:r278_1775048226	1775048226	ok	keep	0.20013664662837982	0.221794	0.301794	345728.0	0.08	181888.0	0.04	163840.0	0.04	32	dual_shared_lowrank_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0278/round0278_standard_1775047583_dp2_bs1_ga8_ef1_k32_20260401_204629	d1ede15e0f228c71c6ff713331ff80db4ae9f346			已新增并接通 `dual_shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚的 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08243x` 的低成本档位修复 r277 的 exceed 崩塌。	这轮符合当前阶段优先级。r274-r277 已连续探索了 dual-shared、adaptive、single-shared-lowrank 三个不同槽位，其中只有 dual-shared 给出一定正向 exceed 信号，而最新 r277 证明“single lowrank shared coarse + PK cleanup”虽然极便宜，但 exceed 崩得太厉害。选择 `dual_shared_lowrank_product_key_expert_jumprelu` 的理由不是继续做邻域插值，而是用一个最小新结构直接回答 r277 暴露出的核心问题：失败是来自 lowrank shared 表达本身，还是来自 shared coarse 容量太薄。相对 r263 只改 `ARCHITECTURE`，满足单变量规则；代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke。主要风险是即便 shared coarse 翻倍，lowrank shared 表达仍可能不够，导致 exceed 仍远高于 target；但这轮会以很低的额外成本给出一个高信息量结论。	/root/sparsify-ascend/research/history/logs/round0278_standard_1775047583.log
+research/history/results.tsv:286:r285_1775055311	1775055311	ok	archive	0.19589456915855408	0.216635	0.296635	344104.0	0.08	180264.0	0.04	163840.0	0.04	32	shared_lowrank_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0285/round0285_standard_1775054491_dp2_bs1_ga8_ef1_k32_20260401_224138	22808866464cd2ab27611cc9493c56540410eacf			建议以 r282 为 reference，只改 `ARCHITECTURE=shared_lowrank_product_key_expert_jumprelu`，在同一 2048 many-tiny scaffold 上做一轮新的 matched architecture probe，直接测试更轻的 shared low-rank bottleneck 能否把 total_cost_ratio 明显左移而不让 exceed 恶化到失去 objective 优势。	这轮满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续沿 `shared_product_key_expert_jumprelu` 做 `NUM_EXPERTS` 或 `STAGE1_RATIO` 近邻细扫，是因为当前 `consecutive_no_improve=2`，按策略应优先换结构槽位。之所以不再试 factorized expert heads 或 adaptive-active 变体，是因为它们已经在当前 hookpoint 上给出更直接的负信号；之所以不再继续 dual-shared，是因为 r284 已经说明“更厚 shared coarse”虽然能降 exceed，但交换率不足。`shared_lowrank_product_key_expert_jumprelu` 的价值在于：它是建立在 winning shared+PK scaffold 上的真正不同结构升级，且 exact 成本显著更低，因此即便 exceed 只部分恢复，也仍有机会形成更优 objective。主要风险是 r277 的旧负信号会在 2048 scaffold 上重演；但如果如此，这轮也能更干净地终结 shared-lowrank 方向。	/root/sparsify-ascend/research/history/logs/round0285_standard_1775054491.log
+research/history/results.tsv:290:r289_1775059561	1775059561	ok	discard	0.20297104120254517	0.226389	0.486389	1079296.0	0.26	915456.0	0.22	163840.0	0.04	32	shared_lowrank_two_stage_residual_expert	1				/root/sparsify-ascend/checkpoints/research_agent/round_0289/round0289_standard_1775058741_dp2_bs1_ga8_ef1_k32_20260401_235227	ac18080e0d07286f86ee7db63498d5d9447ccbcd			从 r282 做单变量 architecture switch 到 shared_lowrank_two_stage_residual_expert。该 family 直接兼容 LUTurbo：最终重构仍是共享静态向量库与 expert 静态子库上的有限加权和，可导出为 shared lookup + routed expert lookup + weighted sum。按当前 target 的，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。	风险在于 shared low-rank coarse 分支曾给过弱信号，而该 family 还没有当前 target 的真实 objective 证据；但它和已失利的 shared_lowrank_product_key_expert_jumprelu 不同，专家阶段是显式 residual cleanup，信息增量足够，且本地成本/烟测都成立。	/root/sparsify-ascend/research/history/logs/round0289_standard_1775058741.log
+research/history/results.tsv:308:r308_1775094326	1775094326	ok	keep	0.17800554633140564	0.195853	0.278161	345224.000000	0.082308	181384.000000	0.043245	163840.000000	0.039062	32	shared_lowrank_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0308/round0308_standard_1775093170_dp2_bs1_ga8_ef1_k32_20260402_092616	3983a89f9efea3998e1d7c358f3c4fe7b1a55dfd			已实现并接通 `shared_lowrank_cascade_product_key_expert_jumprelu`。建议以 r305 为 reference，只改 `ARCHITECTURE`，做一轮低成本 architecture probe，直接裁决“low-rank shared trunk + ordered PK cascade cleanup”是否能用约 `0.0823x` 的 total_cost_ratio 换回足够低的 exceed，从而优于当前 cascade incumbent。	这轮是高信息增量的新结构槽位，不是继续围绕 incumbent 做近邻插值。主要风险很明确：虽然 low-rank shared trunk 把 cost 大幅压低，但 expert pair 是从低秩 hidden `h(x)` 上路由出来的，而不是像 full cascade 那样直接从残差空间决定；如果 hard-token 的 tail signal 在低秩 hidden 里丢失，这条线会重复 plain shared-lowrank family 的老问题，exceed 仍可能明显偏高。即便如此，这一轮仍值得做，因为当前 prompt 已明确要求在最近两轮未改进后优先换结构槽位，而这条线同时满足“shared low-rank trunk + tiny routed experts”与“真正新的 cascade tail-cleanup 语义”，且本地 smoke、allowlist、policy 校验都已通过。	/root/sparsify-ascend/research/history/logs/round0308_standard_1775093170.log
+research/history/round_summaries/round_0278.json:7:  "family_name": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:20:    "hypothesis": "最终重构公式设为 x_hat = Σ_{s=1..2} Σ_{i∈S_s(h(x))} α_{s,i}^{sh}(h(x)) b_{s,i}^{sh} + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j}(r_sh(x)) b_{e,j}，其中 h(x)=ReLU(Bx) 是低秩 shared bottleneck，{b_{s,i}^{sh}} 是两个静态 shared coarse 子库，r_sh(x)=x-Σ_sΣ_i α_{s,i}^{sh}b_{s,i}^{sh}，{B_e} 是静态 PK-routed expert 子库，E_pk(·) 由 low-rank hidden 上的 left/right product-key 路由选出少量 experts，JumpReLU 只改变 expert 内局部 support。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared coarse 子库查表 + PK expert 选择 + expert 子库查表 + 有限加权和 + 选择性补偿”流水线，不依赖动态字典，因此该 family 判定为直接兼容。本轮唯一主假设是：相对 r263 仅把 `ARCHITECTURE` 从 `product_key_expert_jumprelu` 切到新 family `dual_shared_lowrank_product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=1024`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=56`、`STAGE1_RATIO=0.25`、`FACTORIZED_HIDDEN_DIM=256`、`OPTIMIZER=adam`、`LR=8e-4` 与其余 recipe 不变，用极轻的 dual low-rank shared coarse branch 替代 plain PK 的无主干设置，同时保留 full-expert PK cleanup，能够在 exact `total_cost_ratio=0.082427978515625` 的近同成本档位比 r277 的 single-shared lowrank 变体显著更稳住 exceed，并争取在保持低成本的同时压低 exceed_alpha_0.50 到 `0.19357784271240236` 以下以击败 r263。",
+research/history/round_summaries/round_0278.json:21:    "summary": "已新增并接通 `dual_shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚的 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08243x` 的低成本档位修复 r277 的 exceed 崩塌。",
+research/history/round_summaries/round_0278.json:24:    "family_name": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:26:    "self_review": "这轮符合当前阶段优先级。r274-r277 已连续探索了 dual-shared、adaptive、single-shared-lowrank 三个不同槽位，其中只有 dual-shared 给出一定正向 exceed 信号，而最新 r277 证明“single lowrank shared coarse + PK cleanup”虽然极便宜，但 exceed 崩得太厉害。选择 `dual_shared_lowrank_product_key_expert_jumprelu` 的理由不是继续做邻域插值，而是用一个最小新结构直接回答 r277 暴露出的核心问题：失败是来自 lowrank shared 表达本身，还是来自 shared coarse 容量太薄。相对 r263 只改 `ARCHITECTURE`，满足单变量规则；代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke。主要风险是即便 shared coarse 翻倍，lowrank shared 表达仍可能不够，导致 exceed 仍远高于 target；但这轮会以很低的额外成本给出一个高信息量结论。",
+research/history/round_summaries/round_0278.json:31:        "value": "dual_shared_lowrank_product_key_expert_jumprelu"
+research/history/round_summaries/round_0278.json:41:      "已实际落盘新 family `dual_shared_lowrank_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`、`research/AutoResearch/prior_research_history.md`。",
+research/history/round_summaries/round_0278.json:42:      "该 family 与 `shared_lowrank_product_key_expert_jumprelu` 的精确差异是：low-rank shared coarse 子库从 1 个扩到 2 个；与 `dual_shared_product_key_expert_jumprelu` 的精确差异是：shared coarse 分支改为 low-rank bottleneck 上的 factorized heads，而 routed cleanup 仍保留 full-expert PK JumpReLU encoders。",
+research/history/round_summaries/round_0278.json:43:      "exact-string smoke 已通过：`SparseCoderConfig(architecture='dual_shared_lowrank_product_key_expert_jumprelu', k=32, expansion_factor=1, stage1_ratio=0.25, factorized_hidden_dim=256, num_experts=1024, active_experts=2, latents_per_expert=56)` 可成功 instantiate、forward、backward。",
+research/history/round_summaries/round_0278.json:44:      "本地 allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'dual_shared_lowrank_product_key_expert_jumprelu'}], fallback_architecture='shared_lowrank_product_key_expert_jumprelu')` 返回 `[]`。",
+research/history/round_summaries/round_0278.json:48:      "r277 已给出强负信号：`shared_lowrank_product_key_expert_jumprelu` 在 `0.081680x` 下 exceed 达到 `0.223148`，说明 single-shared lowrank coarse 明显容量不足；本轮新 family 正是最小成本地测试这个结论是否能通过双 shared heads 被修复。"
+research/history/round_summaries/round_0278.json:72:    "architecture": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:80:    "description": "已新增并接通 `dual_shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚的 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08243x` 的低成本档位修复 r277 的 exceed 崩塌。",
+research/history/round_summaries/round_0278.json:81:    "self_review": "这轮符合当前阶段优先级。r274-r277 已连续探索了 dual-shared、adaptive、single-shared-lowrank 三个不同槽位，其中只有 dual-shared 给出一定正向 exceed 信号，而最新 r277 证明“single lowrank shared coarse + PK cleanup”虽然极便宜，但 exceed 崩得太厉害。选择 `dual_shared_lowrank_product_key_expert_jumprelu` 的理由不是继续做邻域插值，而是用一个最小新结构直接回答 r277 暴露出的核心问题：失败是来自 lowrank shared 表达本身，还是来自 shared coarse 容量太薄。相对 r263 只改 `ARCHITECTURE`，满足单变量规则；代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke。主要风险是即便 shared coarse 翻倍，lowrank shared 表达仍可能不够，导致 exceed 仍远高于 target；但这轮会以很低的额外成本给出一个高信息量结论。",
+research/history/round_summaries/round_0278.json:118:    "ARCHITECTURE": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:143:    "architecture": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:155:    "family_name": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0278.json:178:    "ARCHITECTURE": "dual_shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0288.json:42:      "该 family 的精确结构语义是：保留 `shared_product_key_expert_jumprelu` 的 shared coarse + PK expert cleanup，再追加一个 tiny factorized global residual cleanup；它不是 `shared_stacked_product_key_expert_jumprelu` 或 `shared_lowrank_product_key_expert_jumprelu` 的重命名。",
+research/history/round_summaries/round_0285.json:7:  "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:19:    "hypothesis": "最终重构公式设为 `x_hat = Σ_{i∈S_sh(h(x))} α_i^sh(h(x)) b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j}(x) b_{e,j}`，其中 `h(x)=ReLU(Bx)` 是 shared low-rank bottleneck，`{b_i^sh}` 是静态 shared coarse 子库，`{b_{e,j}}` 是 product-key 路由到的静态 expert 子库；在线侧仍是“low-rank shared coarse 查表 + PK expert 选择 + expert 子库查表/加权和 + 选择性补偿”的有限静态向量库流水线，因此兼容性判断为直接兼容。相对 r282，本轮只改 `ARCHITECTURE=shared_lowrank_product_key_expert_jumprelu`，保持 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256` 与训练配方不变，直接回答在已经验证有效的 2048 many-tiny scaffold 上，把 full shared coarse 改成更便宜的 low-rank shared bottleneck，是否能在不伤太多 exceed 的前提下把 objective 真正往左下推。它与已失败的 r277 不同，不只是重跑旧 family，而是在更强的 2048 micro-expert 容量组织下重新验证“shared bottleneck + expert-specific head”这个当前高优先级结构槽位；它也不同于刚失败的 r284，因为本轮不是继续加 shared coarse 厚度，而是测试更轻 shared/coarse 表达是否反而带来更优 cost/exceed 交换率。本地成本复核显示该 family 在 r282 同 recipe 下 `selection_accesses=180264`、`deployment_accesses=163840`、`combined_accesses=344104`、`当前口径下的 total_cost_ratio 已重新复核，明显处于 `0.08~0.14` 主战场内；若按该 exact 成本计，要打赢当前 incumbent objective≈0.268418，需要把 `exceed_alpha_0.50` 压到约 `0.186377` 以下。",
+research/history/round_summaries/round_0285.json:20:    "summary": "建议以 r282 为 reference，只改 `ARCHITECTURE=shared_lowrank_product_key_expert_jumprelu`，在同一 2048 many-tiny scaffold 上做一轮新的 matched architecture probe，直接测试更轻的 shared low-rank bottleneck 能否把 total_cost_ratio 明显左移而不让 exceed 恶化到失去 objective 优势。",
+research/history/round_summaries/round_0285.json:23:    "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:25:    "self_review": "这轮满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续沿 `shared_product_key_expert_jumprelu` 做 `NUM_EXPERTS` 或 `STAGE1_RATIO` 近邻细扫，是因为当前 `consecutive_no_improve=2`，按策略应优先换结构槽位。之所以不再试 factorized expert heads 或 adaptive-active 变体，是因为它们已经在当前 hookpoint 上给出更直接的负信号；之所以不再继续 dual-shared，是因为 r284 已经说明“更厚 shared coarse”虽然能降 exceed，但交换率不足。`shared_lowrank_product_key_expert_jumprelu` 的价值在于：它是建立在 winning shared+PK scaffold 上的真正不同结构升级，且 exact 成本显著更低，因此即便 exceed 只部分恢复，也仍有机会形成更优 objective。主要风险是 r277 的旧负信号会在 2048 scaffold 上重演；但如果如此，这轮也能更干净地终结 shared-lowrank 方向。",
+research/history/round_summaries/round_0285.json:30:        "value": "shared_lowrank_product_key_expert_jumprelu"
+research/history/round_summaries/round_0285.json:37:      "本地成本复核：`shared_lowrank_product_key_expert_jumprelu K=32 NUM_EXPERTS=2048 ACTIVE_EXPERTS=2 LATENTS_PER_EXPERT=56 FACTORIZED_HIDDEN_DIM=256 STAGE1_RATIO=0.25` 的 `combined_accesses=344104`、`当前口径下的 total_cost_ratio 已重新复核，明显低于 r282。",
+research/history/round_summaries/round_0285.json:62:    "architecture": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:71:    "description": "建议以 r282 为 reference，只改 `ARCHITECTURE=shared_lowrank_product_key_expert_jumprelu`，在同一 2048 many-tiny scaffold 上做一轮新的 matched architecture probe，直接测试更轻的 shared low-rank bottleneck 能否把 total_cost_ratio 明显左移而不让 exceed 恶化到失去 objective 优势。",
+research/history/round_summaries/round_0285.json:72:    "self_review": "这轮满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续沿 `shared_product_key_expert_jumprelu` 做 `NUM_EXPERTS` 或 `STAGE1_RATIO` 近邻细扫，是因为当前 `consecutive_no_improve=2`，按策略应优先换结构槽位。之所以不再试 factorized expert heads 或 adaptive-active 变体，是因为它们已经在当前 hookpoint 上给出更直接的负信号；之所以不再继续 dual-shared，是因为 r284 已经说明“更厚 shared coarse”虽然能降 exceed，但交换率不足。`shared_lowrank_product_key_expert_jumprelu` 的价值在于：它是建立在 winning shared+PK scaffold 上的真正不同结构升级，且 exact 成本显著更低，因此即便 exceed 只部分恢复，也仍有机会形成更优 objective。主要风险是 r277 的旧负信号会在 2048 scaffold 上重演；但如果如此，这轮也能更干净地终结 shared-lowrank 方向。",
+research/history/round_summaries/round_0285.json:109:    "ARCHITECTURE": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:134:    "architecture": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:146:    "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0285.json:169:    "ARCHITECTURE": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0286.json:19:    "hypothesis": "最终重构公式写为 `x_hat = Σ_{e∈E_pk(x)} Σ_{j∈S_e^τ(x)} α_{e,j}(x) b_{e,j}`。其中 `{b_{e,j}}` 是静态 expert 子库原子，`E_pk(x)` 由两路 product-key router 选出少量 experts，expert 内再用 JumpReLU 形成局部 support；导出到 LUTurbo/Lottable 时仍是“product-key 选择少量静态 expert 子库 -> expert 内 sparse support -> 查表加权和 -> 选择性在线补偿”的静态子库有限加权和链路，因此 `product_key_expert_jumprelu` 判定为直接兼容。相对 r282 本轮只把 `ARCHITECTURE` 从 `shared_product_key_expert_jumprelu` 切到 `product_key_expert_jumprelu`，保持 `NUM_EXPERTS=2048, K=32, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, EXPANSION_FACTOR=1, OPTIMIZER=adam, LR=8e-4` 不变，做一个 clean matched control probe：最近 2048-scaffold 上的 `shared_adaptive_active_product_key_expert_jumprelu`、`dual_shared_product_key_expert_jumprelu`、`shared_lowrank_product_key_expert_jumprelu` 都没把 objective 拉低，当前更高信息量的问题是 incumbent 的收益到底来自 always-on shared coarse 主干本身，还是主要来自 2048 many-tiny PK capacity。已有本地成本复核显示该 2048 plain-PK recipe 的 total_cost_ratio 约为 `0.09x`，低于当前 incumbent 的 `0.10x`；如果 exceed_alpha_0.50 能压到约 `0.18` 左右，就有机会在单目标上逼近或击败当前 best。明确不兼容 family 仍只作历史参考，不能驱动当前兼容 leaderboard。",
+research/history/round_summaries/round_0277.json:7:  "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:20:    "hypothesis": "最终重构公式设为 x_hat = Σ_{i∈S_shared(h(x))} α_i^sh(h(x)) b_i^sh + Σ_{e∈E_pk(h(x))} Σ_{j∈S_e^τ(r_sh(x))} α_{e,j}(r_sh(x)) b_{e,j}，其中 h(x)=ReLU(Bx) 是低秩 shared bottleneck，{b_i^sh} 是静态 shared coarse 子库，r_sh(x)=x-Σ_i α_i^sh b_i^sh，{B_e} 是静态 PK-routed expert 子库，E_pk(·) 由 low-rank hidden 上的 left/right product-key 路由选出少量 experts，JumpReLU 只改变 expert 内局部 support。在线侧仍可直接导出到 LUTurbo/Lottable 的“shared coarse 子库查表 + PK expert 选择 + expert 子库查表 + 有限加权和 + 选择性补偿”流水线，不依赖动态字典，因此该 family 判定为直接兼容。本轮唯一主假设是：相对 r263 仅把 `ARCHITECTURE` 从 `product_key_expert_jumprelu` 切到新 family `shared_lowrank_product_key_expert_jumprelu`，保持 `K=32`、`EXPANSION_FACTOR=1`、`NUM_EXPERTS=1024`、`ACTIVE_EXPERTS=2`、`LATENTS_PER_EXPERT=56`、`STAGE1_RATIO=0.25`、`FACTORIZED_HIDDEN_DIM=256`、`OPTIMIZER=adam`、`LR=8e-4` 与其余 recipe 不变，用廉价 low-rank shared coarse branch 替代 plain PK 的无 shared 主干，同时保留 full-expert PK cleanup，能够在 exact `total_cost_ratio=0.0816802978515625` 的近同成本档位比 r263/r266 更有效地压低 exceed_alpha_0.50，并形成更有价值的新 objective 点。",
+research/history/round_summaries/round_0277.json:21:    "summary": "已新增并接通 `shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“廉价 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08168x` 的低成本档位把 objective 真正压低。",
+research/history/round_summaries/round_0277.json:24:    "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:26:    "self_review": "这轮符合当前运行优先级。r274-r276 已经在 dual-shared scaffold 上连续给出不够强的 objective 信号，其中 r275 虽有正向 exceed 改善，但仍未接近 incumbent，而 r276 的 adaptive 变体又回退；按规则此时应优先换结构槽位，而不是继续在同一 scaffold 上做 split/active-path 邻域细扫。选择 `shared_lowrank_product_key_expert_jumprelu` 而不是继续堆 dual-shared 变体，是因为它更直接对应当前高优先级方向“shared bottleneck + expert-specific head”，同时保留当前已验证有效的 PK cleanup 语义，并且本地 exact cost 复核落在 `~0.08x`，明显优于 `shared_lowrank_*` 旧家族在当前 1024-expert recipe 下的 `~0.19x` 高成本负信号。代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke；没有新增 tunable env key，因此不需要改 `config_resolution`、`runner` 或 `scripts/autoresearch_test.sh`。主要风险是低秩 shared bottleneck 可能过弱，shared coarse 只是在 cost 上更左却换不回足够的 exceed 改善；但这正是一个高信息量、近同成本的新结构 probe。",
+research/history/round_summaries/round_0277.json:31:        "value": "shared_lowrank_product_key_expert_jumprelu"
+research/history/round_summaries/round_0277.json:41:      "已实际落盘新 family `shared_lowrank_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`、`research/AutoResearch/prior_research_history.md`。",
+research/history/round_summaries/round_0277.json:44:      "exact-string smoke 已通过：`SparseCoderConfig(architecture='shared_lowrank_product_key_expert_jumprelu', k=32, expansion_factor=1, stage1_ratio=0.25, factorized_hidden_dim=256, num_experts=1024, active_experts=2, latents_per_expert=56)` 可成功 instantiate、forward、backward。",
+research/history/round_summaries/round_0277.json:45:      "本地 allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'shared_lowrank_product_key_expert_jumprelu'}], fallback_architecture='shared_product_key_expert_jumprelu')` 返回 `[]`。",
+research/history/round_summaries/round_0277.json:72:    "architecture": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:80:    "description": "已新增并接通 `shared_lowrank_product_key_expert_jumprelu`。建议以 r263 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“廉价 low-rank shared coarse + full-expert PK cleanup”能否在 `0.08168x` 的低成本档位把 objective 真正压低。",
+research/history/round_summaries/round_0277.json:81:    "self_review": "这轮符合当前运行优先级。r274-r276 已经在 dual-shared scaffold 上连续给出不够强的 objective 信号，其中 r275 虽有正向 exceed 改善，但仍未接近 incumbent，而 r276 的 adaptive 变体又回退；按规则此时应优先换结构槽位，而不是继续在同一 scaffold 上做 split/active-path 邻域细扫。选择 `shared_lowrank_product_key_expert_jumprelu` 而不是继续堆 dual-shared 变体，是因为它更直接对应当前高优先级方向“shared bottleneck + expert-specific head”，同时保留当前已验证有效的 PK cleanup 语义，并且本地 exact cost 复核落在 `~0.08x`，明显优于 `shared_lowrank_*` 旧家族在当前 1024-expert recipe 下的 `~0.19x` 高成本负信号。代码侧只新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke；没有新增 tunable env key，因此不需要改 `config_resolution`、`runner` 或 `scripts/autoresearch_test.sh`。主要风险是低秩 shared bottleneck 可能过弱，shared coarse 只是在 cost 上更左却换不回足够的 exceed 改善；但这正是一个高信息量、近同成本的新结构 probe。",
+research/history/round_summaries/round_0277.json:118:    "ARCHITECTURE": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:143:    "architecture": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:155:    "family_name": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0277.json:178:    "ARCHITECTURE": "shared_lowrank_product_key_expert_jumprelu",
+research/history/round_summaries/round_0289.json:25:    "self_review": "风险在于 shared low-rank coarse 分支曾给过弱信号，而该 family 还没有当前 target 的真实 objective 证据；但它和已失利的 shared_lowrank_product_key_expert_jumprelu 不同，专家阶段是显式 residual cleanup，信息增量足够，且本地成本/烟测都成立。",
+research/history/round_summaries/round_0289.json:70:    "self_review": "风险在于 shared low-rank coarse 分支曾给过弱信号，而该 family 还没有当前 target 的真实 objective 证据；但它和已失利的 shared_lowrank_product_key_expert_jumprelu 不同，专家阶段是显式 residual cleanup，信息增量足够，且本地成本/烟测都成立。",
+research/history/round_summaries/round_0308.json:7:  "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:20:    "hypothesis": "\u6700\u7ec8\u91cd\u6784\u516c\u5f0f\u8bbe\u4e3a `h(x)=ReLU(Ux)`\uff0c`x_hat = \u03a3_{i\u2208S_sh(h(x))} \u03b1_i^sh b_i^sh + \u03a3_{j\u2208S_{e1(h(x))}^{\u03c41}(r1)} \u03b2_j c_{e1,j} + \u03a3_{m\u2208S_{e2(h(x))}^{\u03c42}(r2)} \u03b3_m c_{e2,m}`\uff0c\u5176\u4e2d `r1(x)=x-shared(h(x))`\uff0c`r2(x)=r1(x)-expert1(r1;e1)`\uff0c`(e1,e2)=PK_top2(h(x))` \u662f\u540c\u4e00\u6b21 low-rank product-key \u8def\u7531\u5728\u9759\u6001 expert \u5b50\u5e93\u4e0a\u9009\u51fa\u7684\u6709\u5e8f top-2 expert\u3002\u5728\u7ebf\u5bfc\u51fa\u4ecd\u662f\u201c\u4f4e\u79e9 shared trunk \u8ba1\u7b97\u8f7b\u91cf hidden -> shared \u9759\u6001\u5e93\u67e5\u8868 -> PK \u9009\u62e9\u6709\u5e8f expert \u5b50\u5e93 -> \u7b2c\u4e00\u4f4d expert cleanup -> \u7b2c\u4e8c\u4f4d expert \u5bf9\u5269\u4f59\u6b8b\u5dee\u518d cleanup -> \u6709\u9650\u52a0\u6743\u6c42\u548c -> \u9009\u62e9\u6027\u8865\u507f\u201d\uff0c\u4e0d\u6d89\u53ca\u52a8\u6001\u5b57\u5178\u751f\u6210\uff0c\u56e0\u6b64\u517c\u5bb9\u6027\u5224\u65ad\u4e3a `\u76f4\u63a5\u517c\u5bb9`\u3002\u5b83\u4e0e `shared_lowrank_product_key_expert_jumprelu` \u7684\u7cbe\u786e\u5dee\u5f02\u4e0d\u662f\u91cd\u547d\u540d\uff0c\u800c\u662f\u628a flat \u7684 routed stage \u6539\u6210 ordered two-expert cascade cleanup\uff1b\u5b83\u4e5f\u4e0d\u540c\u4e8e `shared_cascade_product_key_expert_jumprelu`\uff0c\u56e0\u4e3a shared/coarse \u4e3b\u5e72\u4e0e PK \u8def\u7531\u90fd\u6539\u4e3a\u57fa\u4e8e\u4f4e\u79e9 hidden `h(x)`\uff0c\u4ece\u800c\u663e\u8457\u964d\u4f4e encoder \u9009\u62e9\u6210\u672c\u3002\u76f8\u5bf9 r305 \u672c\u8f6e\u53ea\u6539 `ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu`\uff0c\u5176\u4f59 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` \u4fdd\u6301\u4e0d\u53d8\uff0c\u76f4\u63a5\u6d4b\u8bd5\u201clow-rank shared trunk + ordered PK cascade cleanup\u201d\u80fd\u5426\u5728\u660e\u663e\u66f4\u4f4e cost \u4e0b\u4ecd\u538b\u4f4f hard-token exceed\u3002\u8be5\u914d\u7f6e\u672c\u5730\u7cbe\u786e\u6210\u672c\u590d\u6838\u4e3a `selection_accesses=181384`\u3001`deployment_accesses=163840`\u3001`combined_accesses=345224`\u3001`exact total_cost_ratio=0.08230781555175781`\uff1b\u82e5\u6309\u5f53\u524d incumbent r304 \u7684 `objective=0.264928525686264` \u4e3a\u57fa\u51c6\uff0c\u8981\u51fb\u8d25\u5b83\u9700\u8981\u628a `exceed_alpha_0.50` \u538b\u5230 `0.1826207101345062` \u4ee5\u4e0b\u3002",
+research/history/round_summaries/round_0308.json:21:    "summary": "\u5df2\u5b9e\u73b0\u5e76\u63a5\u901a `shared_lowrank_cascade_product_key_expert_jumprelu`\u3002\u5efa\u8bae\u4ee5 r305 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE`\uff0c\u505a\u4e00\u8f6e\u4f4e\u6210\u672c architecture probe\uff0c\u76f4\u63a5\u88c1\u51b3\u201clow-rank shared trunk + ordered PK cascade cleanup\u201d\u662f\u5426\u80fd\u7528\u7ea6 `0.0823x` \u7684 total_cost_ratio \u6362\u56de\u8db3\u591f\u4f4e\u7684 exceed\uff0c\u4ece\u800c\u4f18\u4e8e\u5f53\u524d cascade incumbent\u3002",
+research/history/round_summaries/round_0308.json:24:    "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:31:        "value": "shared_lowrank_cascade_product_key_expert_jumprelu"
+research/history/round_summaries/round_0308.json:40:      "\u5df2\u5b9e\u9645\u843d\u76d8\u65b0 family `shared_lowrank_cascade_product_key_expert_jumprelu`\uff0c\u771f\u5b9e\u6539\u52a8\u6587\u4ef6\u4e3a `sparsify/config.py`\u3001`sparsify/sparse_coder.py`\u3001`research/AutoResearch/override_registry.py`\u3002",
+research/history/round_summaries/round_0308.json:41:      "\u8be5 family \u7684\u7cbe\u786e\u7ed3\u6784\u5dee\u5f02\u662f\uff1a\u4fdd\u7559 `shared_lowrank_product_key_expert_jumprelu` \u7684 low-rank shared trunk \u4e0e low-rank PK scorer\uff0c\u4f46\u628a routed cleanup \u4ece\u5355\u6bb5 flat expert top-k \u6539\u6210 ordered top-2 expert cascade\uff1b\u7b2c\u4e8c\u6bb5 expert \u53ea\u5904\u7406\u7b2c\u4e00\u6bb5 cleanup \u540e\u7684\u5269\u4f59\u6b8b\u5dee\u3002",
+research/history/round_summaries/round_0308.json:42:      "\u672c\u5730 exact-string smoke \u5df2\u901a\u8fc7\uff1a`shared_lowrank_cascade_product_key_expert_jumprelu` \u5728 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256` \u4e0b\u53ef\u6210\u529f instantiate\u3001forward\u3001backward\u3002",
+research/history/round_summaries/round_0308.json:44:      "\u672c\u5730 override allowlist \u6821\u9a8c\u5df2\u901a\u8fc7\uff1a`validate_env_overrides([{key:'ARCHITECTURE', value:'shared_lowrank_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu') == []`\uff0c\u4e14\u5bf9\u5305\u542b `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/STAGE1_RATIO/FACTORIZED_HIDDEN_DIM` \u7684 full resolved config \u590d\u6838\u4e5f\u8fd4\u56de `[]`\u3002",
+research/history/round_summaries/round_0308.json:46:      "\u672c\u5730 `validate_action(...)` \u590d\u6838\u5df2\u901a\u8fc7\uff1a\u4ee5 `reference_round=305` \u4e14\u4ec5\u6539 `ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu` \u7684\u63d0\u6848\u4e0d\u4f1a\u88ab\u5f53\u524d policy \u62e6\u622a\u3002"
+research/history/round_summaries/round_0308.json:70:    "architecture": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:78:    "description": "\u5df2\u5b9e\u73b0\u5e76\u63a5\u901a `shared_lowrank_cascade_product_key_expert_jumprelu`\u3002\u5efa\u8bae\u4ee5 r305 \u4e3a reference\uff0c\u53ea\u6539 `ARCHITECTURE`\uff0c\u505a\u4e00\u8f6e\u4f4e\u6210\u672c architecture probe\uff0c\u76f4\u63a5\u88c1\u51b3\u201clow-rank shared trunk + ordered PK cascade cleanup\u201d\u662f\u5426\u80fd\u7528\u7ea6 `0.0823x` \u7684 total_cost_ratio \u6362\u56de\u8db3\u591f\u4f4e\u7684 exceed\uff0c\u4ece\u800c\u4f18\u4e8e\u5f53\u524d cascade incumbent\u3002",
+research/history/round_summaries/round_0308.json:116:    "ARCHITECTURE": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:141:    "architecture": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:153:    "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+research/history/round_summaries/round_0308.json:176:    "ARCHITECTURE": "shared_lowrank_cascade_product_key_expert_jumprelu",
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+for ov in [
+    [{'key':'K','value':'48'}],
+    [{'key':'FACTORIZED_HIDDEN_DIM','value':'384'}],
+    [{'key':'NUM_EXPERTS','value':'4096'}],
+    [{'key':'STAGE1_RATIO','value':'0.125'}],
+]:
+    print(ov, '->', validate_env_overrides(ov, fallback_architecture='shared_lowrank_cascade_product_key_expert_jumprelu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+[{'key': 'K', 'value': '48'}] -> []
+[{'key': 'FACTORIZED_HIDDEN_DIM', 'value': '384'}] -> []
+[{'key': 'NUM_EXPERTS', 'value': '4096'}] -> []
+[{'key': 'STAGE1_RATIO', 'value': '0.125'}] -> []
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost, extract_cost_extra_config
+base = {
+    'ARCHITECTURE': 'shared_lowrank_cascade_product_key_expert_jumprelu',
+    'EXPANSION_FACTOR': '1',
+    'NUM_EXPERTS': '3072',
+    'ACTIVE_EXPERTS': '2',
+    'LATENTS_PER_EXPERT': '56',
+    'STAGE1_RATIO': '0.25',
+    'FACTORIZED_HIDDEN_DIM': '256',
+}
+for label, k, fhd, ne, s1 in [
+    ('base',32,256,3072,0.25),
+    ('K48',48,256,3072,0.25),
+    ('K64',64,256,3072,0.25),
+    ('FHD384',32,384,3072,0.25),
+    ('FHD512',32,512,3072,0.25),
+    ('NE4096',32,256,4096,0.25),
+    ('S1_0.125',32,256,3072,0.125),
+    ('S1_0.375',32,256,3072,0.375),
+]:
+    cfg = dict(base)
+    cfg['K']=str(k)
+    cfg['FACTORIZED_HIDDEN_DIM']=str(fhd)
+    cfg['NUM_EXPERTS']=str(ne)
+    cfg['STAGE1_RATIO']=str(s1)
+    extra = extract_cost_extra_config(cfg)
+    out = compute_selection_cost(cfg['ARCHITECTURE'], k=k, ef=1, d_in=1024, n_output=4096, extra_config=extra)
+    print(label, out.get('combined_accesses'), out.get('combined_ratio'), out.get('selection_cost', out.get('total_accesses')), out.get('deployment_accesses'))
+PY" in /root/sparsify-ascend
+codex
+候选点里，`K`、`FACTORIZED_HIDDEN_DIM`、`NUM_EXPERTS`、`STAGE1_RATIO` 的 allowlist 都是通的。现在只差看这些点各自的精确 cost 门槛，选信息增量最高的单变量补丁。
+codex
+成本批量脚本还在跑，我继续等结果。当前判断倾向于先做 `r308` 自身的一次 knee 校准，而不是立刻再开新 family；关键就看 `K=48` 和 `FACTORIZED_HIDDEN_DIM` 哪个门槛更现实。
+ succeeded in 42495ms:
+base 345224 0.08 181384 163840
+K48 427144 0.1 181384 245760
+K64 509064 0.12 181384 327680
+FHD384 345224 0.08 181384 163840
+FHD512 345224 0.08 181384 163840
+NE4096 346176 0.08 182336 163840
+S1_0.125 345224 0.08 181384 163840
+S1_0.375 345224 0.08 181384 163840
+
+codex
+我倾向把这轮用在 `r308` 上的一次“micro-expert 粒度”校准：`NUM_EXPERTS=4096`。理由是它几乎不抬 cost，但能最直接回答 lowrank+cascade 当前是卡在 expert 粒度还是卡在 lowrank 路由本身。
+exec
+/bin/bash -lc "python - <<'PY'
+orig=4194304
+comb=346176
+sel=182336
+deploy=163840
+print('comb_ratio', comb/orig)
+print('sel_ratio', sel/orig)
+print('deploy_ratio', deploy/orig)
+print('beat_r308_exceed_threshold', 0.2781607508659363 - comb/orig)
+print('beat_r304_exceed_threshold', 0.264928525686264 - comb/orig)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+comb_ratio 0.0825347900390625
+sel_ratio 0.0434722900390625
+deploy_ratio 0.0390625
+beat_r308_exceed_threshold 0.19562596082687378
+beat_r304_exceed_threshold 0.18239373564720152
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.types import Action
+from research.AutoResearch.state import StateManager
+from research.AutoResearch.policy import validate_action
+
+action = Action.from_dict({
+  'command': 'run',
+  'hypothesis': 'x',
+  'summary': 'x',
+  'change_type': 'param_only',
+  'expected_win': 'lower_objective',
+  'family_name': 'shared_lowrank_cascade_product_key_expert_jumprelu',
+  'family_stage': 'prototype',
+  'self_review': 'x',
+  'needs_sanity': False,
+  'env_overrides': [{'key':'NUM_EXPERTS','value':'4096'}],
+  'touched_files': [],
+  'notes_to_memory': [],
+  'next_hypotheses': [],
+  'reference_round': 308,
+})
+state = StateManager(persist_load_fixes=False)
+validated, rejection = validate_action(action, state)
+print('rejection=', rejection)
+print('candidate_family=', validated.family_name if validated else None)
+PY" in /root/sparsify-ascend
+ succeeded in 5780ms:
+rejection= None
+candidate_family= shared_lowrank_cascade_product_key_expert_jumprelu
+
+codex
+{
+  "command": "run",
+  "hypothesis": "最终重构公式保持为 `h(x)=ReLU(Ux)`，`x_hat = Σ_{i∈S_sh(h(x))} α_i^sh b_i^sh + Σ_{j∈S_{e1(h(x))}^{τ1}(r1)} β_j c_{e1,j} + Σ_{m∈S_{e2(h(x))}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(h(x))`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)=PK_top2(h(x))` 是同一次 low-rank product-key 路由选出的有序 top-2 静态 expert 子库。在线导出仍是“低秩 shared trunk 计算 hidden -> shared 静态库查表 -> PK 选择有序 expert 子库 -> 第一位 expert cleanup -> 第二位 expert 对剩余残差再 cleanup -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。相对 r308 本轮只改 `NUM_EXPERTS=4096`，其余 `ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu, K=32, EF=1, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试 lowrank+cascade 当前是卡在 expert 粒度不足，还是卡在 low-rank hidden 路由本身。该点本地精确成本复核为 `selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`，几乎与 r308 同成本；若按 r308 的 exact `objective≈0.2781607508659363` 为基准，只需把 `exceed_alpha_0.50` 压到 `0.19562596082687378` 以下即可刷新该 family 自身最好点；若要击败当前 incumbent r304，则需要把 exceed 压到 `0.18239373564720152` 以下。",
+  "summary": "建议以 r308 为 reference，只改 `NUM_EXPERTS=4096`。这是在当前新 scaffold 上的一次高信息量、近同成本 knee 校准，直接回答“更细的 many-tiny PK expert 分片”能否在几乎不抬 cost 的前提下明显降低 tail exceed。",
+  "change_type": "param_only",
+  "expected_win": "lower_objective",
+  "family_name": "shared_lowrank_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮继续留在 r308 family 内，但不是低信息量的局部细扫。之所以允许做这一个 patch，是因为 r308 刚建立了一个新的低成本 scaffold，且它的失败形状很具体：cost 已经足够左，但 exceed 仍明显偏高。此时最值得优先回答的不是再开一个不相干 family，而是判断当前 short-path PK cleanup 的瓶颈到底来自 expert 粒度，还是来自 low-rank hidden 本身。`NUM_EXPERTS=4096` 的价值在于它几乎不增加 total_cost，却能显式测试 DeepSeekMoE 式“更细 expert 分片”是否能更好地服务 hard-token cleanup。主要风险是 low-rank hidden 已经把 tail routing 信号压扁，导致再增 expert 数也几乎不改善 exceed；但如果结果如此，这轮就能较干净地终结“只靠更细 micro-experts 就能救活 lowrank+cascade”这条分支。",
+  "needs_sanity": false,
+  "env_overrides": [
+    {
+      "key": "NUM_EXPERTS",
+      "value": "4096"
+    }
+  ],
+  "touched_files": [],
+  "notes_to_memory": [
+    "r308 `shared_lowrank_cascade_product_key_expert_jumprelu` 的 exact 结果为 objective≈0.2781607508659363、cost_ratio=0.08230781555175781、exceed=0.19585293531417847；后续比较应以这组 persisted exact 值为准。",
+    "本轮选择 `NUM_EXPERTS=4096` 的原因不是继续扫常规容量轴，而是利用该 family 的 cost 结构特性：expert 数从 3072 提到 4096 时，selection_accesses 只从 181384 微升到 182336，combined_accesses 仅到 346176，仍处于约 `0.08253x` 的低成本档。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'NUM_EXPERTS', value:'4096'}], fallback_architecture='shared_lowrank_cascade_product_key_expert_jumprelu') == []`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=308` 且仅改 `NUM_EXPERTS=4096` 的 param_only 提案不会被当前 policy 拦截。",
+    "本地成本复核：`selection_accesses=182336`、`deployment_accesses=163840`、`combined_accesses=346176`、`exact total_cost_ratio=0.0825347900390625`；若要优于 r308，只需 `exceed_alpha_0.50 <= 0.19562596082687378`。",
+    "当前 lowrank 方向的历史证据是：plain `shared_lowrank_product_key_expert_jumprelu` 在当前 target 上 exceed 很差，r308 的 cascade 语义已把 exceed 从旧 lowrank 线的 `0.216~0.223` 压到 `0.1959`；本轮进一步测试更细 expert 粒度是否还能在近同成本下继续压 tail。"
+  ],
+  "next_hypotheses": [
+    "如果该点在几乎同成本下把 exceed 压到 `<=0.19563` 并刷新 r308，下一轮优先保留该 family，只改 `K=48`，测试在 expert 粒度已细化后追加少量 deploy lookup 预算，是否能把 objective 继续压向 incumbent。",
+    "如果该点 exceed 有明显下降但仍未接近 incumbent 门槛 `0.1824`，说明更细 micro-experts 有帮助但不足以单独解决 lowrank+cascade 的 tail 问题；后续应优先考虑带有更强条件补偿语义的新结构，而不是继续只扫 bank 粒度。",
+    "如果该点与 r308 持平或更差，则可更明确地判断当前 lowrank+cascade 的主瓶颈不在 expert 粒度，而更可能在 low-rank hidden 路由本身；后续应下调该 family 的继续预算优先级。"
+  ],
+  "reference_round": 308
+}
+tokens used
+1,423,674
