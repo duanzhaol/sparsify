@@ -1,0 +1,37 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 `x_hat = Σ_{i∈S_sh(x)} α_i^sh b_i^sh + Σ_{j∈S_{e1(r1)}^{τ1}(r1)} β_j c_{e1,j} + 1[top1_share(r1) < 0.8] · Σ_{m∈S_{e2(r1)}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(x)`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)` 是同一次 product-key 路由在 `r1` 上选出的有序 top-2 静态 expert 子库，`top1_share(r1)` 是第一路路由置信度在 top-2 expert 概率质量中的占比。在线导出仍是“shared 静态库查表 -> PK 选有序静态 expert 子库 -> 第一位 expert cleanup -> 仅当路由置信度不够高时才打开第二位 expert -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。它与 `shared_cascade_product_key_expert_jumprelu` 的精确差异不是重命名，而是把第二位 expert 从 always-on 改成基于 router confidence 的 adaptive 1-or-2 cascade；它也不同于 `shared_conditional_cascade_product_key_expert_jumprelu`，因为触发信号不再看第一阶段 cleanup 后的残差能量，而是预先看路由是否已经高度确信单 expert 足够。相对 r305 本轮只改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu`，其余 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试“ordered cascade + difficulty-aware active path”能否比 current cascade scaffold 更有效压低 hard-token exceed。该配置本地精确成本复核为 `selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`，仍在预算内；若按当前 incumbent r304 的 `objective=0.264928525686264` 为基准，要击败它需要把 `exceed_alpha_0.50` 压到 `0.15775079131126404` 以下。",
+  "summary": "已实现并接通 `shared_adaptive_cascade_product_key_expert_jumprelu`。建议以 r305 为 reference，只改 `ARCHITECTURE`，做一轮 matched-cost architecture probe，直接裁决“ordered cascade + confidence-triggered second expert”是否能比 current cascade scaffold 更有效压低 `exceed_alpha_0.50`。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "shared_adaptive_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮不是继续在 lowrank+cascade 上做第三个近邻点，而是按照当前规则把预算切回新的结构槽位。主要风险很明确：adaptive-active 语义在旧的 non-cascade shared+PK 线上只给过有限正信号，而当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这条线必须主要通过更低 exceed 来取胜。如果 router-confidence 触发与 ordered cascade cleanup 不形成正交收益，这轮很可能只会复现 `shared_adaptive_active_product_key_expert_jumprelu` 的旧平台。但这仍值得做，因为 r308-r309 已经给出清晰新证据：lowrank hidden 会明显伤害 tail cleanup，而 conditional residual-energy trigger 也已经失败；当前最有信息量的未验证假设，就是把 variable-active path 直接绑到当前最强的 full cascade scaffold 上。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "shared_adaptive_cascade_product_key_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py",
+    "research/AutoResearch/override_registry.py"
+  ],
+  "notes_to_memory": [
+    "已实际落盘新 family `shared_adaptive_cascade_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`。",
+    "该 family 的精确结构差异是：保留 `shared_cascade_product_key_expert_jumprelu` 的 shared coarse + ordered PK top-2 cleanup scaffold，但把第二位 expert 的开启条件从 always-on 改成 router-confidence adaptive 1-or-2 path；它不是 `shared_conditional_cascade_product_key_expert_jumprelu` 的重命名，因为后者看的是 first-cleanup 后的残差能量，而这里看的是 pre-cleanup 的 top1 路由置信度。",
+    "本地 exact-string smoke 已通过：`shared_adaptive_cascade_product_key_expert_jumprelu` 在 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25` 下可成功 instantiate、forward、backward。",
+    "本地源码校验已通过：`python -m py_compile research/AutoResearch/override_registry.py sparsify/config.py sparsify/sparse_coder.py` 成功，无语法错误。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'shared_adaptive_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu') == []`，且对包含 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/STAGE1_RATIO/FACTORIZED_HIDDEN_DIM` 的 full resolved config 复核也返回 `[]`。",
+    "本地成本复核：`selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`；与 r305 处于同一成本档，若要击败 r304 需 `exceed_alpha_0.50 <= 0.15775079131126404`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=305` 且仅改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu` 的提案不会被当前 policy 拦截。"
+  ],
+  "next_hypotheses": [
+    "如果该 family 在同成本下把 exceed 压到 `<=0.1578` 并赢过 r304，下一轮优先保留该 scaffold，只做一次最小容量校准，例如 `NUM_EXPERTS=4096` 或 `K=48` 二选一，测试 variable-active cascade 是否真的把 capacity knee 推右了。",
+    "如果该 family 的 exceed 明显优于 r305 但 objective 仍未赢 incumbent，说明 difficulty-aware active path 与 cascade 语义存在正交收益，但交换率还不够；后续应优先继续围绕该语义做少量 scaffold-level follow-up，而不是回到 plain adaptive-active 或 conditional residual-energy 邻域。",
+    "如果该 family 与 r305 持平或更差，则可更明确地下调‘variable-active path on cascade scaffold’这条支线的优先级；后续默认应转向别的 matched architecture probe，而不是继续补这一邻域。"
+  ],
+  "reference_round": 305
+}

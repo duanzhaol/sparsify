@@ -1,0 +1,1790 @@
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 `x_hat = Σ_{i∈S_sh(x)} α_i^sh b_i^sh + Σ_{j∈S_{e1(r1)}^{τ1}(r1)} β_j c_{e1,j} + 1[top1_share(r1) < 0.8] · Σ_{m∈S_{e2(r1)}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(x)`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)` 是同一次 product-key 路由在 `r1` 上选出的有序 top-2 静态 expert 子库，`top1_share(r1)` 是第一路路由置信度在 top-2 expert 概率质量中的占比。在线导出仍是“shared 静态库查表 -> PK 选有序静态 expert 子库 -> 第一位 expert cleanup -> 仅当路由置信度不够高时才打开第二位 expert -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。它与 `shared_cascade_product_key_expert_jumprelu` 的精确差异不是重命名，而是把第二位 expert 从 always-on 改成基于 router confidence 的 adaptive 1-or-2 cascade；它也不同于 `shared_conditional_cascade_product_key_expert_jumprelu`，因为触发信号不再看第一阶段 cleanup 后的残差能量，而是预先看路由是否已经高度确信单 expert 足够。相对 r305 本轮只改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu`，其余 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试“ordered cascade + difficulty-aware active path”能否比 current cascade scaffold 更有效压低 hard-token exceed。该配置本地精确成本复核为 `selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`，仍在预算内；若按当前 incumbent r304 的 `objective=0.264928525686264` 为基准，要击败它需要把 `exceed_alpha_0.50` 压到 `0.15775079131126404` 以下。",
+  "summary": "已实现并接通 `shared_adaptive_cascade_product_key_expert_jumprelu`。建议以 r305 为 reference，只改 `ARCHITECTURE`，做一轮 matched-cost architecture probe，直接裁决“ordered cascade + confidence-triggered second expert”是否能比 current cascade scaffold 更有效压低 `exceed_alpha_0.50`。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "shared_adaptive_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮不是继续在 lowrank+cascade 上做第三个近邻点，而是按照当前规则把预算切回新的结构槽位。主要风险很明确：adaptive-active 语义在旧的 non-cascade shared+PK 线上只给过有限正信号，而当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这条线必须主要通过更低 exceed 来取胜。如果 router-confidence 触发与 ordered cascade cleanup 不形成正交收益，这轮很可能只会复现 `shared_adaptive_active_product_key_expert_jumprelu` 的旧平台。但这仍值得做，因为 r308-r309 已经给出清晰新证据：lowrank hidden 会明显伤害 tail cleanup，而 conditional residual-energy trigger 也已经失败；当前最有信息量的未验证假设，就是把 variable-active path 直接绑到当前最强的 full cascade scaffold 上。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "shared_adaptive_cascade_product_key_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py",
+    "research/AutoResearch/override_registry.py"
+  ],
+  "notes_to_memory": [
+    "已实际落盘新 family `shared_adaptive_cascade_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`。",
+    "该 family 的精确结构差异是：保留 `shared_cascade_product_key_expert_jumprelu` 的 shared coarse + ordered PK top-2 cleanup scaffold，但把第二位 expert 的开启条件从 always-on 改成 router-confidence adaptive 1-or-2 path；它不是 `shared_conditional_cascade_product_key_expert_jumprelu` 的重命名，因为后者看的是 first-cleanup 后的残差能量，而这里看的是 pre-cleanup 的 top1 路由置信度。",
+    "本地 exact-string smoke 已通过：`shared_adaptive_cascade_product_key_expert_jumprelu` 在 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25` 下可成功 instantiate、forward、backward。",
+    "本地源码校验已通过：`python -m py_compile research/AutoResearch/override_registry.py sparsify/config.py sparsify/sparse_coder.py` 成功，无语法错误。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'shared_adaptive_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu') == []`，且对包含 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/STAGE1_RATIO/FACTORIZED_HIDDEN_DIM` 的 full resolved config 复核也返回 `[]`。",
+    "本地成本复核：`selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`；与 r305 处于同一成本档，若要击败 r304 需 `exceed_alpha_0.50 <= 0.15775079131126404`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=305` 且仅改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu` 的提案不会被当前 policy 拦截。"
+  ],
+  "next_hypotheses": [
+    "如果该 family 在同成本下把 exceed 压到 `<=0.1578` 并赢过 r304，下一轮优先保留该 scaffold，只做一次最小容量校准，例如 `NUM_EXPERTS=4096` 或 `K=48` 二选一，测试 variable-active cascade 是否真的把 capacity knee 推右了。",
+    "如果该 family 的 exceed 明显优于 r305 但 objective 仍未赢 incumbent，说明 difficulty-aware active path 与 cascade 语义存在正交收益，但交换率还不够；后续应优先继续围绕该语义做少量 scaffold-level follow-up，而不是回到 plain adaptive-active 或 conditional residual-energy 邻域。",
+    "如果该 family 与 r305 持平或更差，则可更明确地下调‘variable-active path on cascade scaffold’这条支线的优先级；后续默认应转向别的 matched architecture probe，而不是继续补这一邻域。"
+  ],
+  "reference_round": 305
+}
+
+--- STDERR ---
+OpenAI Codex v0.117.0 (research preview)
+--------
+workdir: /root/sparsify-ascend
+model: gpt-5.4
+provider: ehein
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019d4b92-27b6-7db0-af8d-b0690f44c48e
+--------
+user
+继续 LUTurbo 研究会话。当前轮次：Round 310。
+
+返回一个符合 action schema 的 JSON 对象，不要使用 markdown 代码块。
+
+务必显式包含全部 schema 字段；resume 模式下也不要省略 `needs_sanity`、`reference_round`、`notes_to_memory`、`next_hypotheses` 等字段。
+
+提醒：每轮只改一个 env 参数；不要声明 primary_variable；param_only 默认应显式给出 reference_round。只有当前 target 冷启动且暂无 reference_round 时，才允许显式返回 reference_round=null，相对 target_profile_baseline 只改 1 个 env 参数。默认只改 sparsify/；只有在新增 tunable 参数或修复参数接线时，才允许改 research/AutoResearch/ 与 scripts/autoresearch_test.sh 的必要文件。如果返回 `edit_sae_code` / `edit_perf_code`，JSON 必须对应已经实际落盘的代码修改；不要只写计划。如果新增 env key，先本地确认 allowlist/wiring 已接通，再返回该 key。当前结果判定与 leaderboard 更新逻辑在 research/AutoResearch/controller.py，不在旧的 research/controller.py。当前单目标是 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断。必须显式返回全部 schema 字段，即使为空也不要省略。最终返回 JSON。
+
+LUTurbo 兼容性硬约束：
+1. 提案前必须先写出最终重构公式，并说明它如何导出到 LUTurbo/Lottable 推理链路。
+2. 每个 family 必须先判断兼容性：直接兼容 / 扩展兼容 / 不兼容。
+3. 明确标记为不兼容的 family，不得继续占据当前 objective leaderboard，也不得继续作为主线推进。
+4. 当前 leaderboard 只代表兼容 family 的 objective 排名；不兼容 family 只能作为历史参考，不能驱动后续决策。
+当前 target：训练 hookpoint 为 layers.[3].self_attn.q_proj。
+成本 proxy：train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output。
+5. 成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n（原始 matmul 的 1.5 倍）。
+   超过此阈值的配置将被 policy 拦截。
+   降低 encoder 成本：减小 EXPANSION_FACTOR / TRUNK_RANK / NUM_CODES、使用低秩 scorer、探索非全字典选择机制。
+   降低部署成本：减小 K / TRUNK_RANK / NUM_CODES；部署侧按静态库条目同时计入输入原子访问与输出查表结果。
+   可通过 TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM 等 env_overrides 调节。
+6. 当前单目标为 objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 只作诊断与 tie-break，不再是主优化轴。
+
+策略引导：
+Round 310 策略模式：Exceed 探索
+原因：当前 incumbent objective=0.2649，其中 exceed=0.1649 明显高于 cost=0.1000；下一步应优先降 exceed_alpha_0.50。
+当前 objective anchor family：shared_cascade_product_key_expert_jumprelu
+当前 anchor 摘要：ARCHITECTURE=shared_cascade_product_key_expert_jumprelu K=32 EXPANSION_FACTOR=1 OPTIMIZER=adam LR=8e-4
+说明：这里只给 matched baseline / 归因校准用的紧凑 anchor。若本轮要做新的结构 probe，不要把它当默认 continuation plan；如需 param_only patch，完整 reference_round 配置见后文。
+本轮要求：
+1. 首要目标是降低 exceed_alpha_0.50；只要 objective_score 下降，允许适度增加 cost，但必须留在预算内。
+2. FVU 只作诊断：当 exceed 明显下降而 FVU 只小幅波动时，不要被旧的 FVU 直觉误导。
+3. 优先考虑能减少 tail-error / online compensation 需求的结构，而不是只做线性 cost 压缩。
+4. 允许新开 family；但任何新结构都必须仍能导出为静态子库有限加权和。
+5. 如果最近几轮都只是同一 family 上的轻微参数插值且 objective 没有实质下降，应优先换结构槽位。
+
+单目标：objective_score = total_cost_ratio + exceed_alpha_0.50。
+成本硬约束：total_cost (encoder + deployment) 不得超过 1.5×h×n，超过将被拦截。
+
+兼容性注册表：直接兼容 19 个，扩展兼容 26 个，不兼容 3 个。
+
+Agent 状态：round=309, consecutive_crashes=0, consecutive_no_improve=1, rounds_since_new_family=1
+
+当前 target profile：
+  training_hookpoint=layers.[3].self_attn.q_proj
+  cost_proxy=train on q_proj activations; cost proxy uses fused QKV deployment matrix 1024x4096 and counts deploy libraries as d_in+n_output
+  original_matmul=1024x4096 (4194304 accesses)
+
+当前研究阶段：单目标 `objective_score = total_cost_ratio + exceed_alpha_0.50` 优先。
+  当前要回答的是“谁能把 objective 真正降下来”，而不是“谁的 FVU 最低”或“谁只把 cost 压得更左”。
+  当前距离 `objective<0.22` 仍差约 0.045；这已经不是抠几个千分点能解决的问题，需要显著改变当前 cost/exceed tradeoff 的结构或容量突破。
+  当前已验证 incumbent 是 `shared_cascade_product_key_expert_jumprelu` (K=32)，objective≈0.264929 = cost 0.10x + exceed 0.164929。
+  如果最近 2 轮没有把 objective 明显拉低，下一轮默认优先换结构槽位，而不是继续做同 family 的局部插值。
+  对 0.005~0.015 级别的小改进不要过度满足；在 `0.22` 目标下，这类改进通常只够校准，不够构成主线胜利。
+  如果当前最佳线最近是靠 architecture probe 而不是局部插值取得改进，那么后续默认应把它当对照 scaffold：只保留极少量必要的 knee 校准，其余预算优先投向建立在该 scaffold 之上的新结构升级。
+
+当前高优先级方向：
+  1. 新的 matched-objective architecture probe；优先回答新的结构槽位值不值得继续，而不是继续沿同一 family 做线性插值。
+  2. 当前可优先关注 `total_cost_ratio≈0.08~0.14` 这一带；若新结构想占用更高 cost，必须能非常明确地换回更低 exceed。
+  3. 若当前已有 winning scaffold，优先测试“建立在该 scaffold 上”的同成本或近同成本结构升级，而不是回到完全无关的旧 family 从头开始。
+  4. 难度自适应预算：不要默认所有 token 都走同一 active path；优先考虑“简单样本极便宜、困难样本才追加 cleanup”的结构。
+  5. 显式两阶段 / 条件级联补偿：第一阶段负责超便宜 shared/coarse 重构，第二阶段只在第一阶段失败时才打开 routed residual cleanup。
+  6. 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，tiny routed experts 只做 tail / hard-token residual cleanup，active path 尽量短。
+  7. 更激进的 coarse-to-fine / product-key / bucketed routing / local residual dictionary；目标是扩大容量、缩小 hard-token 候选集，而不是继续 flat retrieval。
+  8. `shared bottleneck + expert-specific head`、expert 内部 low-rank、以及更轻的 scorer / router；但 plain shared-lowrank 近邻线若没有新的条件触发 / tail-cleanup 语义，不应再作为默认主线。
+  9. 能明显降低 exceed_alpha_0.50 的结构，即使 total_cost_ratio 有适度上升，只要 objective 更低且仍满足预算。
+  10. 能在较小 K 下仍把 exceed 控住的结构，而不是只做线性降 K。
+  11. 当前优先方向应同时包括：一是继续压榨 incumbent 主线附近真正高价值的 knee / 容量点；二是只在能明确解释为何会改善 small-K tradeoff 时才做新结构 probe。
+
+当前应下调优先级的方向：
+  1. 只改善 FVU、却没有改善 objective_score 的局部 recipe 微调。
+  2. 连续在同一 family 上补 `K` / `LATENTS_PER_EXPERT` / rank / lr 插值点，但 objective 没有扩展的细扫。
+  3. 在已经出现局部 knee 信号后，继续围绕同一个 scaffold 做 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的多轮近邻扫点。
+  4. 只把 active path、shared split 或 expert 宽度做轻微改动，但没有明确解释为什么会更慢地恶化 exceed 的低信息增量实验。
+  5. 任何明显抬高 total_cost_ratio、却没有换回更低 exceed 的结构探针。
+  6. 在当前目标差距仍很大时，还继续围绕 incumbent 做保守小步扫描。
+  7. 把 reference_round 当成默认延续路线，而不是只把它当 patch anchor / 对照基线。
+  8. 任何无法导出为静态子库有限加权和的 MoE / dynamic-dictionary 方向。
+  9. 把 fixed `ACTIVE_EXPERTS` 或固定 `K` 的轻微插值误当成新 regime；若没有难度自适应或条件级联语义，它通常只是局部校准。
+
+论文与结构灵感（当前优先消化）：
+最值得吸收的 4 个方向：
+1. `DeepSeekMoE`：shared experts + 更细粒度 expert 分片。
+   来源：ACL 2024, DeepSeekMoE
+   https://aclanthology.org/2024.acl-long.70/
+   关键点：
+   - 不是只做普通 top-k experts，而是同时把 experts 切得更细，并单独保留 shared experts 负责公共知识。
+   - 可转成：`1 个 always-on shared/coarse 分支 + 很多很小的 routed micro-experts`。
+   - 重点不是让单个 expert 更大，而是让 expert 更碎、更专门化；每个 token 仍只激活很短路径，但总容量显著变大。
+   - 这和当前想要的“不对称分工”最贴近。
+
+2. `Expert Choice Routing`：不是 token 选 expert，而是 expert 选 token。
+   来源：Google Research Blog, Expert Choice Routing
+   https://research.google/blog/mixture-of-experts-with-expert-choice-routing/?hl=pt_BR
+   关键点：
+   - 更均衡的 load balancing。
+   - 每个 token 可以有可变数量的 experts。
+   - 难 token 应允许更多 experts，简单 token 只用 1-2 个。
+   - 对当前目标特别 relevant：可以把“小 K 基础路径 + 按难度追加少量 expert / 补偿路径”作为核心思路。
+   - 这比固定所有 token 都用同样 `ACTIVE_EXPERTS` 更贴近真实目标。
+
+3. `Product Key Memory`：两级 / 乘积式索引的大容量 memory。
+   来源：NeurIPS 2019, Large Memory Layers with Product Keys
+   https://papers.nips.cc/paper/9061-large-memory-layers-with-product-keys
+   关键点：
+   - 用 product keys 做超大 memory。
+   - 容量很大，但访问成本仍然很低。
+   - 不一定非要 flat top-k 直接从一大坨 latent 里选。
+   - 可以做：`coarse codebook A × coarse codebook B -> 候选子库 -> 小 K 精选`。
+   - 本质是组合式 dictionary / compositional memory，非常适合“小 K 但想保留大容量”。
+
+4. `Omni-SMoLA`：shared backbone + 轻量 low-rank experts 做 residual specialization。
+   来源：Google Research, Omni-SMoLA
+   https://research.google/pubs/omni-smola-boosting-generalist-multimodal-models-with-soft-mixture-of-low-rank-experts/
+   关键点：
+   - 不复制完整 experts。
+   - 用很多轻量 low-rank experts 残差式地补 backbone。
+   - 可转成：`shared low-rank trunk + many tiny low-rank expert residuals`。
+   - 每个 expert 不是完整 `d_in -> latents`，而是 rank 很小的 residual adapter。
+
+当前最值得优先尝试的 4 个具体结构想法：
+1. `shared coarse library + routed micro-experts`
+   - 灵感来自 DeepSeekMoE。
+   - shared 分支吃公共部分，routed experts 切得很细，每次只开 1-2 个。
+2. `variable-active-experts by difficulty`
+   - 灵感来自 Expert Choice。
+   - 不是所有 token 都固定 2 experts，而是简单 token 1 个，难 token 2-4 个。
+3. `product-key / compositional dictionary`
+   - 灵感来自 PKM。
+   - 先粗定位，再小 K 精选，换容量而不线性增加 deploy lookup。
+4. `shared low-rank trunk + tiny low-rank expert residuals`
+   - 灵感来自 Omni-SMoLA。
+   - 不是 full expert，而是很多 rank 很小的 expert adapters。
+   - 注意：在当前 target 上 plain shared-lowrank 近邻线已经给过负信号；只有当它与 genuinely new 语义绑定，例如条件触发 cleanup、difficulty-aware budget、或更强 tail-specialization 时，才值得继续试。
+
+一个重要判断：
+- 这些灵感里，和当前目标最匹配的，不是“对称多专家一起干活”，而是：
+- `shared / coarse / trunk` 负责主干。
+- `tiny routed experts` 负责难点 / residual / tail cleanup。
+- `variable active path` 只在困难样本上打开。
+- 这和当前 `objective = cost + exceed` 很一致，因为它本质上就是在最小化：
+- 普通 token 的基础成本。
+- 困难 token 的额外补偿需求。
+
+如何使用这些灵感：
+- 如果当前已经有一条 recent 有效的 scaffold（例如 `shared coarse + product-key tiny cleanup`），优先思考如何把这些论文思路接到这条 scaffold 上，而不是完全回退到无关 family 重新冷启动。
+- 当前更有价值的问题通常不是“还能不能把同一 recipe 稍微再压一点”，而是“哪种结构升级能在近同成本下更强地降低 hard-token exceed”。
+- 因此：shared/coarse 表达方式的升级、cleanup 语义的升级、以及 difficulty-aware active path，通常比继续扫同一个 `K / split / width` 更值得优先回答。
+- 当前已知较弱、应避免默认回流的旧槽位包括：plain shared-lowrank 邻域、dual-shared / residual-dual-shared 的局部变体、以及没有条件触发语义的同 scaffold 微小插值。
+
+别名与复用提醒：
+- 提出 literature-inspired probe 前，先检查它是不是已经被现有 family 近似覆盖，只是名字不同。
+- 例如：`shared coarse + residual experts` 常接近 `shared_two_stage_residual_expert`。
+- `shared low-rank trunk + routed experts` 常接近 `shared_lowrank_routed_expert_topk` 或其 residual 变体。
+- `cheap trunk + routed experts` 常接近 `lowrank_expert_topk`。
+- `shared expert + routed experts` 常接近 `shared_routed_expert_topk`。
+- 如果只是重命名或轻微同构变体，不要当成 brand-new architecture；必须明确写出与现有实现的精确差异。
+
+补充一个实现提醒：
+- 即使尝试复杂结构，也应尽量保持：
+- `very short active path`
+- `very cheap router`
+- `very clean decomposition`
+
+
+训练代理 leaderboard（single objective: objective_score = total_cost_ratio + exceed_alpha_0.50；FVU 仅诊断）：
+  r304 objective=0.264928525686264 = cost 0.1x + exceed 0.16492852568626404 | fvu=0.15110117197036743 | arch=shared_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r305 objective=0.26992915630340575 = cost 0.11x + exceed 0.15992915630340576 | fvu=0.1468515694141388 | arch=shared_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r308 objective=0.2758529353141785 = cost 0.08x + exceed 0.19585293531417847 | fvu=0.17800554633140564 | arch=shared_lowrank_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r279 objective=0.2811864471435547 = cost 0.11x + exceed 0.1711864471435547 | fvu=0.15307489037513733 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r274 objective=0.28746201157569884 = cost 0.11x + exceed 0.17746201157569885 | fvu=0.16134148836135864 | arch=dual_shared_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r306 objective=0.2944666302204132 = cost 0.11x + exceed 0.1844666302204132 | fvu=0.16265490651130676 | arch=shared_conditional_cascade_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r278 objective=0.3017943370342255 = cost 0.08x + exceed 0.22179433703422546 | fvu=0.20013664662837982 | arch=dual_shared_lowrank_product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+  r246 objective=0.3143901073932648 = cost 0.14x + exceed 0.17439010739326477 | fvu=0.1560433954000473 | arch=product_key_expert_jumprelu K=32 EF=1 | FEASIBLE
+
+目标状态：
+  当前 incumbent → shared_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.264928525686264 = cost 0.1x + exceed 0.16492852568626404 | encoder=0.06x | deploy=0.04x | fvu=0.15110117197036743
+  最低 cost leader → shared_lowrank_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.2758529353141785 = cost 0.08x + exceed 0.19585293531417847 | encoder=0.04x | deploy=0.04x | fvu=0.17800554633140564
+  最低 exceed leader → shared_cascade_product_key_expert_jumprelu (K=32, EF=1):
+    objective=0.26992915630340575 = cost 0.11x + exceed 0.15992915630340576 | encoder=0.07x | deploy=0.04x | fvu=0.1468515694141388
+  单目标：objective_score = total_cost_ratio + exceed_alpha_0.50
+  降低 encoder 成本: 降 EF / TRUNK_RANK / NUM_CODES / STAGE1_RATIO / FACTORIZED_HIDDEN_DIM
+  降低部署成本: 降 K / TRUNK_RANK / NUM_CODES
+  降低 exceed_alpha_0.50: 优先减少 tail error / online compensation 需求，而不是只看最终 FVU
+
+阶段目标：把 objective_score 压到 0.22 以下。
+  当前 incumbent 约为 objective=0.264929 (cost=0.10x, exceed=0.164929)；距离目标仍差 0.044929。
+  这意味着后续实验不能只满足于很小的局部改进；需要明确回答“这轮是否在逼近 0.22 所需的 tradeoff”。
+  若想达到该目标，不同 cost 档位大致需要满足：
+    - 若 cost≈0.08x，则 exceed 需压到 ≤0.14
+    - 若 cost≈0.10x，则 exceed 需压到 ≤0.12
+    - 若 cost≈0.12x，则 exceed 需压到 ≤0.10
+    - 若 cost≈0.14x，则 exceed 需压到 ≤0.08
+  因此：若新结构 cost 升到约 0.14x，却仍无法把 exceed 压到约 0.08 附近，则通常不够支撑 0.22 目标。
+  只有那些明显缩小这一缺口的结构 probe，才值得获得后续 follow-up 预算。
+
+当前成本 profile：hookpoint=layers.[3].self_attn.q_proj | proxy=1024x4096
+基础 family 的 Encoder 侧成本速查表（非最终 budget，ratio 指 encoder-only）：
+  架构                                        EF=1    EF=2    EF=3    EF=4    EF=6    EF=8    EF=12 
+  topk                                      0.25x+   0.5x+    0.75x+   1.0x+    1.5x+    2.0x-    3.0x-  
+  gated                                     0.5x+    1.0x+    1.5x+    2.0x-    3.0x-    4.0x-    6.0x-  
+  factorized_topk                           0.25x+   0.38x+   0.5x+    0.62x+   0.88x+   1.12x+   1.62x- 
+  lowrank_residual                          0.38x+   0.62x+   0.88x+   1.12x+   1.62x-   2.12x-   3.12x- 
+  lowrank_soft_codebook_residual            0.41x+   0.66x+   0.91x+   1.16x+   1.66x-   2.16x-   3.16x- 
+  lowrank_two_stage_soft_codebook_residual  0.66x+   1.16x+   1.66x-   2.16x-   3.16x-   4.16x-   6.16x- 
+  注意：以上仅为 encoder 选择成本（不依赖 K）。最终 budget 以 total_cost = selection + deployment 为准。
+  部署侧 sparse 路径额外贡献约：K=32 +4%，K=64 +8%，K=128 +16%（按 K×(d+n) 近似）。
+  说明：本表只覆盖基础 family，不覆盖 expert / routed / shared+routed 家族。
+  这些家族的 encoder 成本还受 NUM_EXPERTS / ACTIVE_EXPERTS / LATENTS_PER_EXPERT / FACTORIZED_HIDDEN_DIM 等影响，应优先参考 leaderboard 条目与 reference_round 完整配置。
+
+最近几轮（兼容架构，7）：
+  r302 shared_adaptive_active_product_key_expert_jumprelu param_only -> archive objective=0.272618 cost=0.11x exceed=0.162618 fvu=0.14764496684074402 1152s
+  r304 shared_cascade_product_key_expert_jumprelu param_only -> keep objective=0.267223 cost=0.102295x exceed=0.164929 fvu=0.15110117197036743 1403s
+  r305 shared_cascade_product_key_expert_jumprelu param_only -> keep objective=0.267107 cost=0.107178x exceed=0.159929 fvu=0.1468515694141388 1547s
+  r306 shared_conditional_cascade_product_key_expert_jumprelu edit_sae_code -> keep objective=0.291644 cost=0.107178x exceed=0.184467 fvu=0.16265490651130676 1894s
+  r307 shared_cascade_product_key_expert_jumprelu param_only -> archive objective=0.267775 cost=0.107178x exceed=0.160597 fvu=0.14866027235984802 1404s
+  r308 shared_lowrank_cascade_product_key_expert_jumprelu edit_sae_code -> keep objective=0.278161 cost=0.082308x exceed=0.195853 fvu=0.17800554633140564 1671s
+  r309 shared_lowrank_cascade_product_key_expert_jumprelu param_only -> archive objective=0.278909 cost=0.082535x exceed=0.196375 fvu=0.18036961555480957 1366s
+
+操作提示：
+  1. 当前主目标仍是 `objective_score = total_cost_ratio + exceed_alpha_0.50`。判断成败先看 objective，再拆看 cost 与 exceed；不要把 low-cost、low-FVU 或单纯更低的平均误差当成成功。当前阶段目标仍是把 objective 压向 `0.22` 以下；这通常不可能靠 incumbent 邻域的小步参数插值自然得到。若多轮结果仍停留在 `0.27~0.33` 一带，应优先寻找新的 regime shift，特别是那些能专门降低 hard-token / tail exceed 的结构。
+  2. 把当前 best `shared_product_key_expert_jumprelu` 视作 winning scaffold / objective anchor，而不是局部细扫终点。已有证据表明：plain PK、dual-shared、residual-dual-shared、shared-lowrank、shared-stacked 这些近邻升级大多没有赢它。因此后续预算不应继续主要花在 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的线性微调上，而应优先测试建立在这个 scaffold 之上的 genuinely new structure semantics。
+  3. 当前最值得优先尝试的新 regime 之一，是“难度自适应预算 + 条件级联补偿”。不要默认所有 token 都走固定 `K`、固定 `ACTIVE_EXPERTS`、固定 cleanup 深度。更值得测试的是：简单 token 只走极便宜基础路径，困难 token 才追加少量 expert / residual / 更大 K；或先做超便宜 coarse 重构，只在第一阶段失败时才打开第二阶段 cleanup。目标不是平均意义上更低 FVU，而是专门更高效地压低 `exceed_alpha_0.50`。
+  4. 关于 `ACTIVE_EXPERTS` / `K` 轴，不要把“固定 AE=1/2/3 或固定 K 的小插值”误当成新 regime。已有证据表明，在现有 PK / shared+PK many-tiny 语义下，简单的 fixed `AE` 调整信息增量有限。若要重新动这根轴，应优先让它服务于新的结构语义，例如按难度自适应地追加 experts、只在失败样本上打开第二阶段 cleanup、或让 coarse/shared 主干决定是否触发 extra budget。
+
+最近可用 reference_round 的完整配置（仅作 patch anchor / 对照基线，不代表默认延续路线）：
+  只有当你明确选择 param_only patch 时才需要这些完整配置；若本轮是新结构 probe，不必围绕这些点继续微调。
+  r304 shared_cascade_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_cascade_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=2048
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+  r308 shared_lowrank_cascade_product_key_expert_jumprelu (decision=keep, source=resolved_candidate_env_config)
+  ARCHITECTURE=shared_lowrank_cascade_product_key_expert_jumprelu
+  EXPANSION_FACTOR=1
+  K=32
+  HOOKPOINTS=layers.[3].self_attn.q_proj
+  OPTIMIZER=adam
+  LR=8e-4
+  BATCH_SIZE=1
+  GRAD_ACC_STEPS=8
+  MICRO_ACC_STEPS=1
+  AUXK_ALPHA=0.03125
+  DEAD_FEATURE_THRESHOLD=10000000
+  USE_HADAMARD=0
+  COMPILE_MODEL=1
+  ACTIVE_EXPERTS=2
+  FACTORIZED_HIDDEN_DIM=256
+  LATENTS_PER_EXPERT=56
+  NUM_EXPERTS=3072
+  STAGE1_RATIO=0.25
+  TRUNK_RANK=16
+
+当前背景文档（弱先验，不是结论）：
+兼容性表已省略；具体 compatibility 以当前 runtime registry 与 hard rules 为准。
+
+## 1. 文档用途
+
+这份文档的作用不是告诉 Agent “当前最优主线是什么”，而是提供一份低偏置背景说明。
+
+应这样使用它：
+
+- 把它当成兼容性约束、工程不变量、和未决问题清单
+- 不要把旧位置、旧轮次、旧 leaderboard 的 family 排名当成当前 target 的默认真理
+- 不要把这里出现的方向理解成固定 opening order
+- 当前 target 上的结论，必须依赖当前 target 自己的新结果
+
+当前固定事实：
+
+- 训练 hookpoint 固定为 `layers.[3].self_attn.q_proj`
+- 成本 proxy 固定按 fused QKV 部署矩阵 `1024 x 4096` 统计
+- 成本硬约束固定为 `total_cost <= 1.5 x (1024 x 4096)`
+- 当前单目标固定为 `objective_score = total_cost_ratio + exceed_alpha_0.50`
+- 其中 `total_cost_ratio = total_cost / (1024 x 4096)`
+- `FVU` 继续保留，但只作诊断与 tie-break，不再是主优化轴
+
+一句话：现在要优化的是“总部署代理成本 + 在线补偿需求”，不是单独的 low-cost，也不是单独的 low-FVU。
+
+## 1.1 当前 target 的阅读方式
+
+下面这些是当前 target 的阅读方式，不是结论：
+
+- 比较两个候选时，先拆开看 `total_cost_ratio` 和 `exceed_alpha_0.50`，再看它们合成后的 `objective_score`
+- 如果一个结构让 cost 略升，但 exceed 明显下降，只要 objective 更低且仍在预算内，就值得保留
+- 如果一个结构只让 FVU 更低，但 objective 没降，就不应当作主要成功
+- 不要把“更靠左”或“更低 FVU”误当成新的全局主线；真正的 incumbent 只由 objective 决定
+- 连续多轮只在同一 family 上做 `K / LATENTS_PER_EXPERT / rank / lr` 小插值、而 objective 没有扩展时，应优先换结构槽位
+
+## 3. 可信的继承项
+
+下面这些可以从旧 run 继承，因为它们是工程不变量，不依赖旧位置的性能结论：
+
+- 单变量原则必须继续执行；`param_only` 一次只改一个 env 参数
+- 新增 tunable 参数必须打通 `sparsify/ + override_registry + config_resolution + runner + scripts/autoresearch_test.sh`
+- 第一轮引入新参数后，必须检查 round config 与 checkpoint config 中该参数真的生效
+- invalid round、silent fallback、schema mismatch、launcher 未透传，这些问题会直接污染结论
+- `total_cost` 必须拆成 encoder 与 deployment 两部分看
+- `objective_score` 必须拆成 `total_cost_ratio` 与 `exceed_alpha_0.50` 两部分看
+- compatibility 与 performance 是两回事；结构兼容不代表一定值得继续
+
+## 4. 不可信的旧结论
+
+下面这些都不应直接继承到当前 target：
+
+- 旧位置上的 family 排名
+- 旧位置上的最优点或历史“objective 分布形状”
+- “复杂 backbone 一定优于简单结构”这类总括判断
+- “简单结构已经证伪”这类总括判断
+- “当前主战场一定是某个固定 low-cost 区间”这类结论
+- 对 whitening / codebook / lowrank / two-stage / routed / MoE-like 的好坏预判
+- 某个 family 在旧位置失败，就默认它在新位置也失败
+- 某个 family 在旧位置表现强，就默认它在新位置仍是 opening 主线
+- 固定 opening order、固定主线 family、固定 deferred family 列表
+
+一句话：旧 run 只能提供工程经验和搜索空间，不能提供当前 target 的性能真理。
+
+## 5. 当前 target 上真正未知的事
+
+这些问题都还没有在当前 target 上被证明：
+
+- 哪类结构最能降低当前 `objective_score`
+- 当前 incumbent 的主要瓶颈更常见地来自 cost，还是来自 exceed
+- 允许适度增 cost 来换更低 exceed 的最佳交换率大致在哪
+- `shared bottleneck + expert-specific head` 是否比现有 shared+routed recipe 更高效
+- expert 内部 low-rank、或 `shared low-rank trunk + routed residual experts` 是否能给出更好的 objective
+- 哪些结构能在更小 `K` 下仍控制住 `exceed_alpha_0.50`
+- preprocessing / loss 切换会不会比结构切换更重要
+- asymmetric MoE-like / routed 子库方案能否在保持导出约束的前提下形成更低 objective 的新点
+
+Agent 应把这些当成未决问题，而不是已有答案。
+
+## 6. 当前高优先级方向
+
+当前优先级最高的方向不是“默认继续压某个固定成本区间”，而是明确围绕单目标做结构性探索：
+
+- 新的 matched-objective architecture probe，而不是继续沿同一 family 做线性插值
+- 不对称分工的 sparse MoE-like 结构：shared/coarse 分支吃平滑主干，routed experts 只做 residual cleanup，active path 尽量短
+- `shared bottleneck + expert-specific head`
+- expert 内部 low-rank
+- `shared low-rank trunk + routed residual experts`
+- 更轻的 scorer / router
+- 能在较小 `K` 下仍把 `exceed_alpha_0.50` 控住的结构
+- 宁可做中等风险但高信息增量的新原型，也不要把预算继续花在 incumbent 邻域的低信息细扫上
+
+这些方向优先级高，不是因为它们已经被证明最好，而是因为：
+
+- 它们更直接回答“怎样同时控制 cost 与 exceed”
+- 它们更可能带来新的结构信息，而不是同一 recipe 上的局部插值
+- 它们能测试“容量是否能增大，但 active path 仍保持很短”这个核心问题
+- 当 objective 长时间不动时，它们比继续补 `K / rank / lr / LATENTS_PER_EXPERT` 插值更有信息价值
+
+如果要实现新的原型，应优先满足：
+
+- `ACTIVE_EXPERTS` 很小，例如 1 或 2
+- router 足够轻，不要把省下来的选择成本重新吃掉
+- 总激活路径仍短，不要因为多 expert 让总 `K` 无限制膨胀
+- shared / coarse 分支若存在，应主要负责平滑主干，不要和 routed experts 对称地共同承担主表示
+- 最终形式仍能写成若干静态子库上的有限加权和
+
+## 7. 当前默认做法
+
+如果当前 target 还没有足够本地证据，默认做法应当是：
+
+- 先建立当前 target 自己的 objective anchors
+- 再根据当前 target 自己的 leaderboard 形状决定下一步往哪里扩
+- incumbent 只当 matched baseline / objective anchor，不要把它自动理解成默认 continuation plan
+- 优先选择归因清晰、能补充新结构信息的实验；在工程可控的前提下，允许选择中等接线风险的新结构原型
+- 如果最近 2 轮都属于同一 family 且只是局部参数插值，同时 objective 没有明显扩展，则下一轮默认应优先换结构槽位
+- 继续留在同一 family 的前提是：你能明确指出还有哪个高价值、未验证、且足以改变 objective 结论的结构假设
+- 如果一个方向只让 FVU 下降、却没有让 objective 下降，不应继续主导预算
+- 如果一个方向让 cost 上升，但 exceed 明显下降且 objective 更低，则可以继续
+- 不要让旧位置的主线故事替代当前 target 的新证据
+
+架构集成检查清单：
+# SAE Architecture Integration
+
+Use this skill for only two situations:
+
+- adding a new architecture family under `sparsify/`
+- repairing a run that crashed with `Unknown architecture: ...`
+
+Do not use this skill for ordinary hyperparameter sweeps.
+
+## Goal
+
+Close the full integration loop for a new SAE family so the architecture:
+
+- is accepted by config parsing
+- is constructible by runtime dispatch
+- can instantiate, run forward, and backward
+- uses the exact architecture string that training will launch
+
+## Mandatory checklist
+
+When a new architecture name is introduced, complete all of these before saying the family is runnable:
+
+1. Add the architecture string to the whitelist in `sparsify/config.py`.
+2. Add factory dispatch in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+3. Ensure the concrete sparse coder class exists in `sparsify/sparse_coder.py`.
+4. Ensure the exact launch string in `env_overrides` matches the whitelist and dispatch string exactly.
+5. Run an instantiate/forward/backward smoke test using the exact architecture string.
+6. If this is a repair, verify against the same failing target `(architecture, K, EF)` rather than a nearby proxy.
+
+If any one of these is skipped, treat the integration as incomplete.
+
+## Repo-specific search points
+
+Always inspect these locations first:
+
+- `sparsify/config.py`
+- `sparsify/sparse_coder.py`
+
+Search pattern:
+
+```bash
+rg -n "Unknown architecture|valid_archs|_get_sae_class|class .*SparseCoder" sparsify/config.py sparsify/sparse_coder.py
+```
+
+## Required smoke test
+
+Run this exact style of test before declaring success:
+
+```bash
+python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+
+arch = "REPLACE_ME"
+k = 32
+ef = 12
+
+cfg = SparseCoderConfig(architecture=arch, k=k, expansion_factor=ef)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print("integration_smoke: OK", arch, k, ef, device)
+PY
+```
+
+Rules:
+
+- use the exact architecture string from the planned run
+- use the same `K` and `EF` as the failing run when repairing
+- do not replace this with a weaker import-only test
+
+## Unknown-architecture repair workflow
+
+If the traceback contains `Unknown architecture: 'name'`:
+
+1. Do not debug optimizer, training loop, or autograd first.
+2. Confirm whether `name` is present in `valid_archs` in `sparsify/config.py`.
+3. Confirm whether `name` is handled in `_get_sae_class()` in `sparsify/sparse_coder.py`.
+4. Confirm the concrete class name exists and is reachable.
+5. Re-run the smoke test with the exact same architecture string.
+6. Only after that, re-run the real training target.
+
+Default assumption: this is a registration-chain bug until proven otherwise.
+
+## Launch-contract check
+
+Before running training, verify the proposed `env_overrides` are minimal and valid:
+
+- `ARCHITECTURE`
+- `K`
+- `EXPANSION_FACTOR`
+- `OPTIMIZER`
+- `LR`
+- `AUXK_ALPHA`
+
+If a prior run failed with `invalid_env_overrides`, first retry with the minimal override set instead of adding more keys.
+
+## Completion criteria
+
+A new family is considered integrated only when all of the following are true:
+
+- config whitelist updated
+- factory dispatch updated
+- class implementation present
+- exact architecture string smoke-tested
+- the next real run no longer fails at parse/dispatch time
+
+If the smoke passes but the full run still fails, summarize the new blocker precisely. Do not keep claiming "registration repair" after the failure mode has changed.
+warning: Codex could not find system bubblewrap at /usr/bin/bwrap. Please install bubblewrap with your package manager. Codex will use the vendored bubblewrap in the meantime.
+codex
+我先做最小本地筛选：围绕当前已验证 family 和现成架构，比较几个“只改 1 个 env”的候选在当前 cost proxy 下的精确成本门槛，避免再走低信息量插值。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+checks = [
+ ('shared_lowrank_cascade_product_key_expert_jumprelu',[{'key':'K','value':'48'}]),
+ ('shared_lowrank_cascade_product_key_expert_jumprelu',[{'key':'STAGE1_RATIO','value':'0.375'}]),
+ ('shared_cascade_product_key_expert_jumprelu',[{'key':'K','value':'48'}]),
+ ('shared_cascade_product_key_expert_jumprelu',[{'key':'ARCHITECTURE','value':'shared_adaptive_active_product_key_expert_jumprelu'}]),
+ ('shared_cascade_product_key_expert_jumprelu',[{'key':'ARCHITECTURE','value':'dual_shared_product_key_expert_jumprelu'}]),
+]
+for fallback, ov in checks:
+    print(fallback, ov, '->', validate_env_overrides(ov, fallback_architecture=fallback))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+shared_lowrank_cascade_product_key_expert_jumprelu [{'key': 'K', 'value': '48'}] -> []
+shared_lowrank_cascade_product_key_expert_jumprelu [{'key': 'STAGE1_RATIO', 'value': '0.375'}] -> []
+shared_cascade_product_key_expert_jumprelu [{'key': 'K', 'value': '48'}] -> []
+shared_cascade_product_key_expert_jumprelu [{'key': 'ARCHITECTURE', 'value': 'shared_adaptive_active_product_key_expert_jumprelu'}] -> []
+shared_cascade_product_key_expert_jumprelu [{'key': 'ARCHITECTURE', 'value': 'dual_shared_product_key_expert_jumprelu'}] -> []
+
+exec
+/bin/bash -lc 'rg -n "r301_|r302_|r304_|r305_|r306_|r307_|r308_|r309_|shared_adaptive_active_product_key_expert_jumprelu|dual_shared_product_key_expert_jumprelu|shared_lowrank_cascade_product_key_expert_jumprelu" research/history/results.tsv' in /root/sparsify-ascend
+ succeeded in 0ms:
+273:r272_1775040260	1775040260	ok	archive	0.16397443413734436	0.180959	0.280959	401408.0	0.1	237568.0	0.06	163840.0	0.04	32	shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0272/round0272_standard_1775039621_dp2_bs1_ga8_ef1_k32_20260401_183347	51674efc767e4216fe83b1291c562198eb7f7206			已新增并本地验证 `shared_adaptive_active_product_key_expert_jumprelu`。建议以 r266 为 reference，只改 `ARCHITECTURE=shared_adaptive_active_product_key_expert_jumprelu`，做一轮新的 matched architecture probe，直接回答“shared coarse + PK cleanup + variable-active path by difficulty”是否能在同成本下压低 exceed。	这轮满足当前 round-272 的默认规则：最近两轮没有把 objective 明显拉低，因此优先切换到新的结构槽位，而不是继续沿 `shared_product_key_expert_jumprelu` 做 `K/LATENTS/STAGE1_RATIO` 细扫。之所以选这个新 family，而不是再回到 hash、PK-factorized、shared-lowrank 或旧的 adaptive-active non-shared 方向，是因为它直接承接当前唯一 recent 正信号 `shared+PK`，同时把变化局限在 prompt 明确高优先级、但尚未在这条主线上被验证过的“按难度自适应 active path”这一条结构轴上。工程改动被限制在必要文件：`sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`；没有新增 tunable env key，只是为新 architecture 接通现有 expert/STAGE1/JUMPRELU 参数集。主要风险是当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这轮若成功只能体现为 exceed 改善而非 cost 下降；但这恰好让结构判断更干净。如果连这个“shared+PK 的更强 Expert-Choice 变体”都无法在 same-cost lane 改善 objective，就可以更有把握地下调 variable-active 方向在当前 hookpoint 上的优先级。	/root/sparsify-ascend/research/history/logs/round0272_standard_1775039621.log
+275:r274_1775044528	1775044528	ok	keep	0.16134148836135864	0.177462	0.287462	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0274/round0274_standard_1775043885_dp2_bs1_ga8_ef1_k32_20260401_194451	54bfe51ba6537328767f0d62bbe65e4489260e7f			已新增并接通 `dual_shared_product_key_expert_jumprelu`。建议以 r269 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“在 shared+PK scaffold 上把 always-on shared coarse 从 1 个微专家扩到 2 个”能否在与 r273 同成本的 `0.109375x` 档位更有效地压低 exceed。	这轮满足代码与实验两层约束。代码侧新增了一个最小新 family，并完成 whitelist、factory dispatch、allowlist、compatibility registry 与 exact smoke；没有新增 tunable key，因此不需要改 `config_resolution`、`runner` 或 `scripts/autoresearch_test.sh`。实验侧相对 r269 仍只改一个 env 参数 `ARCHITECTURE`。选择这条线而不是回到 `shared_lowrank_*` / `shared_two_stage_*` 已注册家族，是因为按当前 1024-expert/56-width/K32 recipe 的本地 exact cost 复核，它们分别约在 `0.19x`、`0.33x`、`0.42x`，明显偏离当前 `0.08x~0.14x` 主战场；而本轮新 family 保持在 `0.109375x`，更符合“近同成本下争取更低 exceed”的要求。主要风险是 shared coarse 容量翻倍仍不足以把 exceed 拉到赢 incumbent 所需阈值，但即便失败，这轮也能高信息量地回答：在当前 winning scaffold 上，问题更像是 shared capacity 不足，还是 cleanup 语义本身不对。	/root/sparsify-ascend/research/history/logs/round0274_standard_1775043885.log
+276:r275_1775045355	1775045355	ok	archive	0.15469904243946075	0.172059	0.282059	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0275/round0275_standard_1775044716_dp2_bs1_ga8_ef1_k32_20260401_195842	1fdde6e3f089d38a755b8824271ae1ac7a26c16d			以 r274 为 reference，只改 `STAGE1_RATIO=0.25`，在 exact 同成本 `0.109375x` 下测试 dual-shared scaffold 是否只是 shared 激活预算不足。目标是回答：把 dual-shared coarse branch 从 4 个激活位提到 8 个、同时保留 24 个 PK cleanup 位，能否继续明显压低 exceed，并把 objective 拉回 incumbent 附近。	这轮满足单变量原则：相对 r274 只改 `STAGE1_RATIO`。虽然当前阶段整体应优先新结构槽位，但 dual-shared 是刚获得一轮真实正向 exceed 信号的新 scaffold，且 `STAGE1_RATIO` 在该 family 上已本地复核为 exact 同成本轴，因此这是一轮信息密度足够高、且不混入成本变化的必要 follow-up，而不是低价值邻域细扫。选择 `0.25` 而不是 `0.1875` 或 `0.375`，是因为当前已知单-shared best split 在 0.25，而 r274 的 `0.125` 很可能只是让更大的 shared bank 处于激活不足状态；优先回到历史更强的 shared-budget 工作点更有裁决力。主要风险是 dual-shared 的改进已经主要来自“多一个 shared bank”本身，split 只会带来很小变化；但若如此，这一轮也能干净地把结论收敛到“dual-shared scaffold 需要换结构，不值得继续调 split”。	/root/sparsify-ascend/research/history/logs/round0275_standard_1775044716.log
+277:r276_1775046246	1775046246	ok	archive	0.1581931710243225	0.174731	0.284731	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	dual_shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0276/round0276_standard_1775045606_dp2_bs1_ga8_ef1_k32_20260401_201333	c17c194be2a4ff6418cfef9140bdfbdfe759e803			已新增并接通 `dual_shared_adaptive_active_product_key_expert_jumprelu`。建议以 r275 为 reference，只改 `ARCHITECTURE` 做一轮 matched architecture probe，直接裁决“更厚 shared coarse 主干 + 按难度可变 1-or-2 PK cleanup path”能否在与 dual-shared fixed-AE 完全同成本的 `0.109375x` 档位继续显著压低 exceed。	这轮符合当前阶段约束。最近两轮 r274-r275 都停留在同一 dual-shared family 内，且 objective 仍未接近 incumbent；按策略此时应优先换结构槽位，而不是继续补 `STAGE1_RATIO` 近邻点。选择 `dual_shared_adaptive_active_product_key_expert_jumprelu` 而不是继续在 dual-shared 上做 `0.125/0.375` 分裂点，是因为它直接测试当前高优先级方向“variable-active path by difficulty”，同时完全建立在已有 winning scaffold 的近同成本升级上。代码侧仅新增最小 family，并完成 whitelist、factory dispatch、override allowlist、compatibility registry 与 exact-string smoke；没有新增 tunable key，因此不需要改 `config_resolution`、`runner` 或 `scripts/autoresearch_test.sh`。主要风险是 adaptive active 在单-shared 版本上曾给过弱负信号；但 dual-shared scaffold 已把 coarse 主干抬强，当前最有价值的问题正是这是否能让 difficulty-aware cleanup 真正发挥作用。	/root/sparsify-ascend/research/history/logs/round0276_standard_1775045606.log
+280:r279_1775049240	1775049240	ok	keep	0.15307489037513733	0.171186	0.281186	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0279/round0279_standard_1775048595_dp2_bs1_ga8_ef1_k32_20260401_210322	f66f96c090e00b92955deef153b0b2cea91a4886			以 r275 为 reference，只改 `STAGE1_RATIO=0.375`，继续校准 `dual_shared_product_key_expert_jumprelu` 的 coarse/cleanup 分工 knee。这个点保持同一 family、同一成本档和同一 active path，直接回答更强 dual-shared coarse allocation 是否还能继续压低 exceed，并判断 r275 的 0.25 是否已是平台。	这轮严格满足单变量原则：相对 r275 只改 `STAGE1_RATIO`。之所以没有继续推进低秩 shared 线，是因为 r277/r278 已给出一致强负信号；之所以没有再开全新 family，是因为 `dual_shared_product_key_expert_jumprelu` 刚在 r275 给出当前最强的新 scaffold 信号，而 `0.125 -> 0.25` 的同成本改善说明 split 轴仍未判死。主要风险是 0.25 已经是该 family 的 knee，继续加 shared 比例可能挤压 expert cleanup 容量、让 exceed 回升；但这正是当前最值得用一轮干净 param_only 回答的问题。	/root/sparsify-ascend/research/history/logs/round0279_standard_1775048595.log
+281:r280_1775050206	1775050206	ok	archive	0.15337976813316345	0.171273	0.281273	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	residual_dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0280/round0280_standard_1775049536_dp2_bs1_ga8_ef1_k32_20260401_211903	2724a31faf5f351d39a2b275b54dbd1bcc63baa0			已落盘并自检新的 `residual_dual_shared_product_key_expert_jumprelu`。建议以 r279 为 reference，只改 `ARCHITECTURE`，做一轮与 dual-shared scaffold 同成本的 matched architecture probe，直接裁决“串联 residual shared coarse + PK cleanup”是否比现有并行 dual-shared 更能压低 exceed。	这轮代码改动和实验设计都满足约束。代码侧我只做了最小新 family 接入：`sparsify/config.py` whitelist、`sparsify/sparse_coder.py` dispatch+实现、`research/AutoResearch/override_registry.py` allowlist、`research/AutoResearch/prior_research_history.md` compatibility 行；没有新增 tunable env key，因此不需要改 `controller.py`、`config_resolution.py`、`runner.py` 或 `scripts/autoresearch_test.sh`。实验侧相对 r279 仍只改一个 env 参数 `ARCHITECTURE`。之所以现在值得开新 family，而不是继续扫 `STAGE1_RATIO` 或回到 low-rank/variable-active 线，是因为 r279 只给出很小的同 family 改善，且 r276/r277/r278 已分别对 adaptive-active 与 low-rank shared 给出负信号。主要风险是这个新 family 虽然保持 exact 同成本，但串联 shared residual 可能只改善均值误差而不改善 exceed；如果结果如此，就可以更果断地结束 dual-shared 邻域的继续打磨。	/root/sparsify-ascend/research/history/logs/round0280_standard_1775049536.log
+284:r283_1775053368	1775053368	ok	archive	0.15459926426410675	0.170913	0.270913	429056.0	0.1	265216.0	0.06	163840.0	0.04	32	shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0283/round0283_standard_1775052577_dp2_bs1_ga8_ef1_k32_20260401_220944	97340e6fcf7b24d7a112567149875869179462d3			建议以 r282 为 reference，只改 `ARCHITECTURE=shared_adaptive_active_product_key_expert_jumprelu`，做一轮完全同成本的 matched architecture probe，直接回答在更细粒度 micro-expert scaffold 上，difficulty-aware variable-active cleanup 能否继续压低 exceed_alpha_0.50。	这轮满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续把 `NUM_EXPERTS` 从 2048 往 3072/4096 线性扩，是因为 r282 已经提供了 recent 改进，当前更高信息量的问题应是“建立在该 scaffold 上的哪种结构升级能继续压低 exceed”，而不是立即把预算再次花在同 family 的容量插值上。之所以不选 `dual_shared_*` 或 `shared_stacked_*`，是因为这些升级在 r282 recipe 下都会把 cost 推到约 `0.12~0.13x`，要打赢当前 incumbent 需要 exceed 降到约 `0.15` 甚至更低，门槛明显更不现实；`shared_adaptive_active_product_key_expert_jumprelu` 则提供了一个完全同成本、归因最干净的 exceed probe。主要风险是 adaptive-active 在旧 scaffold 上给过负信号；但正因为 current best recent improvement 来自更细 micro-expert bank，这轮才有足够理由重新验证它是否与 finer-grained routing 产生正交收益。	/root/sparsify-ascend/research/history/logs/round0283_standard_1775052577.log
+285:r284_1775054389	1775054389	ok	archive	0.1473076492547989	0.162125	0.28212499999999996	486400.0	0.12	322560.0	0.08	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0284/round0284_standard_1775053448_dp2_bs1_ga8_ef1_k32_20260401_222415	ff2ff72add86c9f1d926f332e0a1a39ea11d8c20			建议以 r282 为 reference，只改 `ARCHITECTURE=dual_shared_product_key_expert_jumprelu`，在 `NUM_EXPERTS=2048` 的 finer-grained micro-expert scaffold 上做一轮 matched architecture probe，直接测试更厚 shared coarse 主干能否把 exceed_alpha_0.50 压到足以刷新当前 best objective。	这轮满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续在 `shared_product_key_expert_jumprelu` 上把 `NUM_EXPERTS` 从 2048 线性扩到 3072/4096，是因为 r282 已经给出 recent 改进，而 r283 又说明并非所有基于该 scaffold 的轻量 follow-up 都有效；按当前阶段规则，更有价值的是回答哪个结构升级值得继续，而不是让同 family 容量插值重新主导预算。之所以不选 `residual_dual_shared_product_key_expert_jumprelu` 或 `shared_stacked_product_key_expert_jumprelu`，是因为它们最近已给出更弱或近似持平的信号；`dual_shared_product_key_expert_jumprelu` 则是当前最干净、最贴近 prompt 中‘shared/coarse 表达升级’的 matched probe。主要风险是 exact cost 升到约 0.116x 后，需要 exceed 比 r282 再降约 0.016 才能赢；如果做不到，就能更明确地结束 dual-shared 这条 coarse-thickening 支线。	/root/sparsify-ascend/research/history/logs/round0284_standard_1775053448.log
+288:r287_1775057206	1775057206	ok	archive	0.14733079075813293	0.162560	0.28256000000000003	486400.0	0.12	322560.0	0.08	163840.0	0.04	32	residual_dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0287/round0287_standard_1775056416_dp2_bs1_ga8_ef1_k32_20260401_231343	bf397cc193354724cf61fe77fba34612bb439254			以 r282 为 reference，只改 `ARCHITECTURE=residual_dual_shared_product_key_expert_jumprelu`，在同一 2048 many-tiny scaffold 上执行一轮 matched architecture probe，直接测试“串联 residual shared cleanup + PK routed cleanup”能否比当前 incumbent 更慢地恶化 hard-token exceed。	这轮严格满足单变量原则：相对 r282 只改 `ARCHITECTURE`。之所以不继续围绕 `shared_product_key_expert_jumprelu` 做 `K/STAGE1_RATIO/LATENTS_PER_EXPERT` 近邻细扫，是因为最近 4 轮都未扩展 objective，且 prompt 明确要求此时优先换结构槽位。之所以不再回到 plain PK、shared-lowrank、stacked PK、factorized expert 或更老的 routed/shared-routed 线，是因为它们已经在当前 target 给出更强或更新的负信号；r286 还额外证明了 shared coarse 在当前 2048 many-tiny regime 下不是可随意去掉的。选择 `residual_dual_shared_product_key_expert_jumprelu` 的理由是：它仍建立在 current winning shared+PK scaffold 上，但改变的是 cleanup 语义而不是宽度/分摊比例的小插值，正符合当前“优先寻找更能降低 tail-error 的结构升级”要求。主要风险是该 family 在 1024-expert 上曾接近 dual-shared 平台，说明串联 residual shared 可能只改善均值误差而不足以改善 exceed；但若如此，本轮也能更干净地关闭 dual-shared/residual-shared 这一整片邻域。	/root/sparsify-ascend/research/history/logs/round0287_standard_1775056416.log
+292:r291_1775061397	1775061397	ok	archive	0.15680032968521118	0.173906	0.283906	458752.0	0.11	294912.0	0.07	163840.0	0.04	32	dual_shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0291/round0291_standard_1775060638_dp2_bs1_ga8_ef1_k32_20260402_002418	a050309bf344f601b32fe8b9210725b5a37b3978			从 r279 做单变量 architecture switch 到 `dual_shared_adaptive_active_product_key_expert_jumprelu`。这不是回到低信息细扫，而是沿当前最相关的 shared+PK scaffold 测试“更厚 shared coarse + variable-active residual cleanup”这一结构升级。按本地烟测与 cost 估计，`NUM_EXPERTS=1024, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375` 下 total_cost_ratio 约 `0.11x`，处于 matched-objective 带；若该 family 不能在近同成本下明显降低 exceed，就可以把这条 variable-active dual-shared 支线一并降级。	风险在于 `shared_adaptive_active_product_key_expert_jumprelu` 先前已给过负信号，而且当前 cost proxy 对 adaptive path 的计费与 dual_shared PK 基本相同，因此这轮几乎完全是在赌 exceed 改善。如果 exceed 仍停留在 `~0.16+`，这条线就不值得继续主导预算。	/root/sparsify-ascend/research/history/logs/round0291_standard_1775060638.log
+295:r294_1775064481	1775064481	ok	archive	0.14354434609413147	0.160198	0.280198	486400.0	0.12	322560.0	0.08	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0294/round0294_standard_1775063661_dp2_bs1_ga8_ef1_k32_20260402_011427	e0549347412eaabaa153d6d78abf7bcc09dc0e55			从 r279 做单变量 patch：`NUM_EXPERTS=2048`。这不是继续扫 `K / STAGE1_RATIO / LATENTS_PER_EXPERT` 的近邻点，而是在当前最可信的 dual-shared PK scaffold 上做容量组织升级，直接对应“shared coarse + finer micro-experts”这条 DeepSeekMoE 风格假设。按，基于当前成本口径复核，该配置仍位于预期成本带内并满足预算约束。	这轮的赌点很明确：以约 `+0.01x` 的 cost 换更低 exceed。如果 exceed 不能至少明显优于 r279 的 `0.1712`，那 dual-shared PK 线的容量加深基本就可以视为交换率不足，不应继续主导预算。之所以仍值得做，是因为它比继续扫 split 更像一次结构容量升级，而且保持了 shared+PK 主 scaffold 不变，归因最清楚。	/root/sparsify-ascend/research/history/logs/round0294_standard_1775063661.log
+296:r295_1775065637	1775065637	ok	archive	0.14155954122543335	0.159068	0.289068	546880.0	0.13	383040.0	0.09	163840.0	0.04	32	residual_dual_shared_product_key_expert_residual	1				/root/sparsify-ascend/checkpoints/research_agent/round_0295/round0295_standard_1775064696_dp2_bs1_ga8_ef1_k32_20260402_013142	232c7aa1ecf7caa3e162659bb51ed4fa8cb33c96			已实际新增并集成 `residual_dual_shared_product_key_expert_residual`，只修改 `sparsify/config.py` 与 `sparsify/sparse_coder.py`。该 family 是对 r294 `dual_shared_product_key_expert_jumprelu` 的结构升级：保留双 shared coarse + PK cleanup，只再追加一个 tiny factorized residual cleanup。按本地 exact-string smoke 与 cost 估计，在继承 r294 的 `K=32, EF=1, NUM_EXPERTS=2048, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.375, FACTORIZED_HIDDEN_DIM=256` 配置下 total_cost_ratio 约 `0.13x`，仍在当前目标带内；因此本轮是一次 matched-cost 附近、明确面向降低 exceed 的 scaffold-upgrade probe。	风险很直接：`cost≈0.13x` 已经要求 exceed 至少接近 `0.09~0.10` 才有机会逼近阶段目标，交换率门槛很高。如果这轮 exceed 只是比 r294 小幅下降几个点，仍不够支撑主线；但它是当前最贴近 winning scaffold 的高信息增量升级之一，值得用一轮回答。	/root/sparsify-ascend/research/history/logs/round0295_standard_1775064696.log
+297:r296_1775066578	1775066578	ok	archive	0.1473289132118225	0.162317	0.282317	486400.0	0.12	322560.0	0.08	163840.0	0.04	32	dual_shared_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0296/round0296_standard_1775065788_dp2_bs1_ga8_ef1_k32_20260402_014954	e1e5cf5591a2f0f24dd2f9bb60468386d781bcec			建议以 r294 为 reference，只改 `STAGE1_RATIO=0.25`，对 `dual_shared_product_key_expert_jumprelu` 做一轮必要的 knee 校准。这不是继续做广泛同 family 细扫，而是利用当前最强 recent scaffold，在近同成本下测试“少一点 coarse、多一点 PK cleanup”能否把 exceed 再压低一档，从而判断这条 dual-shared PK 线是否还有主线价值。	这轮严格满足单变量原则：相对 r294 的完整配置只改 `STAGE1_RATIO` 一个 env 参数，显式给出 `reference_round=294`，没有声明 primary_variable，也没有返回任何未落盘代码改动。选择 r294 而不是继续沿 r282 或新 family 冷启动，是因为 recent 证据里它是最接近 incumbent 的兼容 scaffold，而本轮只是一次信息密度仍然足够高的 knee 校准；如果这一步仍不能把 objective 明显拉低，就应停止继续在 dual-shared PK 上做局部比率细扫。	/root/sparsify-ascend/research/history/logs/round0296_standard_1775065788.log
+302:r301_1775071879	1775071879	ok	keep	0.14819805324077606	0.164642	0.274642	449536.0	0.11	285696.0	0.07	163840.0	0.04	32	shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0301/round0301_standard_1775070843_dp2_bs1_ga8_ef1_k32_20260402_031410	530043d704bc4746140e8354078b4b592b9cf9a8			建议以 r283 为 reference，只改 `NUM_EXPERTS=3072`。这轮不是回到 incumbent family 的容量细扫，而是对一个仍未闭环的问题做单变量交互验证：variable-active cleanup 是否只有在 finer micro-expert bank 上才会兑现为真实的 exceed 改善。	这轮严格满足单变量原则：相对 r283 只改 `NUM_EXPERTS`。之所以允许留在同一 family 再做一轮，不是因为要继续做低信息插值，而是因为这里存在一个清晰且尚未验证完的高价值结构交互假设：r283 已证明“仅有 variable-active cleanup”不够，r298 又证明“仅扩 finer micro-expert bank”有一定正信号但不足以击穿 incumbent；本轮正是把这两条证据拼起来，判断二者是否存在非线性正交互。没有继续回到 `shared_product_key_expert_jumprelu` 本体、也没有再去扫 `STAGE1_RATIO/K`，因为那会重新落回 prompt 明确下调优先级的近邻细扫。主要风险是 r299 已提示 fixed-AE 版本的 bank 扩容 knee 接近 3072~4096，adaptive-active 语义未必足以把这条 knee 明显右移；若如此，这轮也能更干净地结束 variable-active PK 这一支线。	/root/sparsify-ascend/research/history/logs/round0301_standard_1775070843.log
+303:r302_1775073032	1775073032	ok	archive	0.14764496684074402	0.162618	0.272618	466944.0	0.11	303104.0	0.07	163840.0	0.04	32	shared_adaptive_active_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0302/round0302_standard_1775071971_dp2_bs1_ga8_ef1_k32_20260402_033257	318902d4a07e7a76aa08bb67e29e896b7d17516c			建议以 r301 为 reference，只改 `NUM_EXPERTS=4096`。这轮不是回到低信息扫参，而是对 r301 新正信号做一次必要的 knee 校准，直接判断 adaptive-active cleanup 是否真的能把 finer micro-expert bank 的收益延长到 fixed-AE 版本已经开始回撤的区域。	这轮严格满足单变量原则：相对 r301 只改 `NUM_EXPERTS`。之所以允许继续留在同一 family 再补一轮，是因为 r301 刚刚把这条线抬成了当前最低 exceed leader，而且当前仍有一个清晰、未闭环、且足以改变结论的结构假设需要回答：adaptive-active cleanup 能否把 fixed-AE family 在 `3072 -> 4096` 上出现的 knee 明显向右推移。如果直接回到全新 family，会把这个高价值交互问题悬空；如果继续扫 `K/STAGE1_RATIO/LATENTS_PER_EXPERT`，又会落回 prompt 明确下调优先级的近邻细扫。主要风险是 fixed-AE 的 r299 已显示 4096 会明显回撤，而 adaptive-active 也可能同样进入收益递减区间；但若如此，本轮就能更干净地结束 variable-active PK 这条支线，而不是继续让它占据后续预算。	/root/sparsify-ascend/research/history/logs/round0302_standard_1775071971.log
+305:r305_1775077120	1775077120	ok	keep	0.1468515694141388	0.159929	0.267107	449536.000000	0.107178	285696.000000	0.068115	163840.000000	0.039062	32	shared_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0305/round0305_standard_1775075813_dp2_bs1_ga8_ef1_k32_20260402_043700	40fbc55b711bcab7e40698df8272a501783c7985			建议以 r304 为 reference，只改 `NUM_EXPERTS=3072`。这是对当前新 winning scaffold 的一个高信息容量点验证：不是继续扫低信息的 `K/STAGE1_RATIO` 邻域，而是直接测试 finer routed micro-experts 是否能在 cascade cleanup 语义上继续压低 hard-token exceed。	这轮严格满足单变量原则：相对 r304 的完整配置只改 `NUM_EXPERTS`。选择这条线而不是立刻再开新 family，有两个原因：一是当前 policy/历史上新 family 仍存在 incubation 风险，二是 r304 刚把 cascade scaffold 抬成当前 objective anchor，此时最有价值的不是回到 `K/STAGE1_RATIO` 细扫，而是回答一个仍未闭环的高优先级问题：更细粒度 routed micro-experts 是否会在 ordered cascade cleanup 上兑现为更低的 tail exceed。主要风险也很清楚：2048->3072 可能只是重复 fixed-AE 线上“cost 上升但 exceed 改善有限”的模式；如果如此，这轮就应被视为给该容量轴划出 knee，而不是继续线性扩 `NUM_EXPERTS`。	/root/sparsify-ascend/research/history/logs/round0305_standard_1775075813.log
+306:r306_1775091250	1775091250	ok	keep	0.16265490651130676	0.184467	0.291644	449536.000000	0.107178	285696.000000	0.068115	163840.000000	0.039062	32	shared_conditional_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0306/round0306_standard_1775089824_dp2_bs1_ga8_ef1_k32_20260402_083031	e764ddc126ad8e8a1ef448b66c27ee836d3f29b6			已实际修复 `shared_conditional_cascade_product_key_expert_jumprelu` 的 sanity 阻塞，且没有改 family_name 或 env_overrides。最小补丁只落在 `sparsify/sparse_coder.py`：为 cascade 家族在未显式传参时补齐 `active_experts=2` 的 family-local 默认。修复后，失败时同一条 bare-config sanity 命令和同一 `(architecture, K=32, EF=1)` integration smoke 都已本地通过。	这次 repair 没有重新设计实验，也没有改 family 或 override；只修了导致 sanity_failed 的最小实现缺口。风险主要在于这只是实例化阻塞修复，不代表结构效果已经被验证；但当前要求正是让原始实验能跑通，而这一步已经完成。	/root/sparsify-ascend/research/history/logs/round0306_standard_1775089824.log
+307:r307_1775092654	1775092654	ok	archive	0.14866027235984802	0.160597	0.267775	449536.000000	0.107178	285696.000000	0.068115	163840.000000	0.039062	32	shared_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0307/round0307_standard_1775091354_dp2_bs1_ga8_ef1_k32_20260402_085600	21762d737b885a8b5b6cefa25a12f84add482029			建议以 r305 为 reference，只改 `STAGE1_RATIO=0.125`。这是一次同成本、单变量、明确面向降低 exceed 的 knee 校准：不再减少 cleanup 深度，而是在当前 best cascade scaffold 上把更多 K 还给 routed residual cleanup，直接检验 hard-token tail 是否因此下降。	这轮仍留在 incumbent scaffold 邻域，但不是低信息细扫。之所以允许做这一个 patch，是因为 r306 已给出非常具体的新证据：条件关闭第二专家会显著恶化 exceed，说明当前值得优先验证的不是再发散开新 family，而是把同成本预算从 coarse 端挪回 cleanup 端，看交换率是否立刻改善。主要风险是 stage1 过薄后 shared coarse 主干退化，导致 exceed 不降反升；若如此，就应把 `STAGE1_RATIO` 这条轴视为已完成 knee 裁决，而不是继续围绕它补点。	/root/sparsify-ascend/research/history/logs/round0307_standard_1775091354.log
+308:r308_1775094326	1775094326	ok	keep	0.17800554633140564	0.195853	0.278161	345224.000000	0.082308	181384.000000	0.043245	163840.000000	0.039062	32	shared_lowrank_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0308/round0308_standard_1775093170_dp2_bs1_ga8_ef1_k32_20260402_092616	3983a89f9efea3998e1d7c358f3c4fe7b1a55dfd			已实现并接通 `shared_lowrank_cascade_product_key_expert_jumprelu`。建议以 r305 为 reference，只改 `ARCHITECTURE`，做一轮低成本 architecture probe，直接裁决“low-rank shared trunk + ordered PK cascade cleanup”是否能用约 `0.0823x` 的 total_cost_ratio 换回足够低的 exceed，从而优于当前 cascade incumbent。	这轮是高信息增量的新结构槽位，不是继续围绕 incumbent 做近邻插值。主要风险很明确：虽然 low-rank shared trunk 把 cost 大幅压低，但 expert pair 是从低秩 hidden `h(x)` 上路由出来的，而不是像 full cascade 那样直接从残差空间决定；如果 hard-token 的 tail signal 在低秩 hidden 里丢失，这条线会重复 plain shared-lowrank family 的老问题，exceed 仍可能明显偏高。即便如此，这一轮仍值得做，因为当前 prompt 已明确要求在最近两轮未改进后优先换结构槽位，而这条线同时满足“shared low-rank trunk + tiny routed experts”与“真正新的 cascade tail-cleanup 语义”，且本地 smoke、allowlist、policy 校验都已通过。	/root/sparsify-ascend/research/history/logs/round0308_standard_1775093170.log
+309:r309_1775095692	1775095692	ok	archive	0.18036961555480957	0.196375	0.278909	346176.000000	0.082535	182336.000000	0.043472	163840.000000	0.039062	32	shared_lowrank_cascade_product_key_expert_jumprelu	1				/root/sparsify-ascend/checkpoints/research_agent/round_0309/round0309_standard_1775094511_dp2_bs1_ga8_ef1_k32_20260402_094837	8353b33e76da1ee79d8b9b47f1d89d3d047bcf23			建议以 r308 为 reference，只改 `NUM_EXPERTS=4096`。这是在当前新 scaffold 上的一次高信息量、近同成本 knee 校准，直接回答“更细的 many-tiny PK expert 分片”能否在几乎不抬 cost 的前提下明显降低 tail exceed。	这轮继续留在 r308 family 内，但不是低信息量的局部细扫。之所以允许做这一个 patch，是因为 r308 刚建立了一个新的低成本 scaffold，且它的失败形状很具体：cost 已经足够左，但 exceed 仍明显偏高。此时最值得优先回答的不是再开一个不相干 family，而是判断当前 short-path PK cleanup 的瓶颈到底来自 expert 粒度，还是来自 low-rank hidden 本身。`NUM_EXPERTS=4096` 的价值在于它几乎不增加 total_cost，却能显式测试 DeepSeekMoE 式“更细 expert 分片”是否能更好地服务 hard-token cleanup。主要风险是 low-rank hidden 已经把 tail routing 信号压扁，导致再增 expert 数也几乎不改善 exceed；但如果结果如此，这轮就能较干净地终结“只靠更细 micro-experts 就能救活 lowrank+cascade”这条分支。	/root/sparsify-ascend/research/history/logs/round0309_standard_1775094511.log
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost, extract_cost_extra_config
+cands = [
+ ('shared_lowrank_cascade_product_key_expert_jumprelu', {'K':'48','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.25','FACTORIZED_HIDDEN_DIM':'256'}),
+ ('shared_lowrank_cascade_product_key_expert_jumprelu', {'K':'32','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.375','FACTORIZED_HIDDEN_DIM':'256'}),
+ ('shared_cascade_product_key_expert_jumprelu', {'K':'48','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.25','FACTORIZED_HIDDEN_DIM':'256'}),
+ ('shared_adaptive_active_product_key_expert_jumprelu', {'K':'32','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.25','FACTORIZED_HIDDEN_DIM':'256'}),
+ ('dual_shared_product_key_expert_jumprelu', {'K':'32','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.25','FACTORIZED_HIDDEN_DIM':'256'}),
+ ('shared_lowrank_product_key_expert_jumprelu', {'K':'32','NUM_EXPERTS':'3072','ACTIVE_EXPERTS':'2','LATENTS_PER_EXPERT':'56','STAGE1_RATIO':'0.25','FACTORIZED_HIDDEN_DIM':'256'}),
+]
+orig = 4194304
+for arch, cfg in cands:
+    extra = extract_cost_extra_config(cfg)
+    out = compute_selection_cost(arch, k=int(cfg['K']), ef=1, d_in=1024, n_output=4096, extra_config=extra)
+    print(arch, cfg['K'], out.get('combined_accesses'), out.get('combined_ratio'))
+PY" in /root/sparsify-ascend
+codex
+我已经拿到历史结果，下一步只看这些候选的 exact 成本，尽快在“回到 shared+PK 主 scaffold 的新结构槽位”和“继续低成本 lowrank 线”之间做裁决。
+codex
+这批 cost 计算比较慢，我继续等，但当前信息已经在收敛：lowrank+cascade 这条线两轮都没把 objective 扩出去，默认应把预算切回别的结构槽位。
+ succeeded in 32171ms:
+shared_lowrank_cascade_product_key_expert_jumprelu 48 427144 0.1
+shared_lowrank_cascade_product_key_expert_jumprelu 32 345224 0.08
+shared_cascade_product_key_expert_jumprelu 48 531456 0.13
+shared_adaptive_active_product_key_expert_jumprelu 32 449536 0.11
+dual_shared_product_key_expert_jumprelu 32 506880 0.12
+shared_lowrank_product_key_expert_jumprelu 32 345224 0.08
+
+codex
+我在看一个更高信息量的结构槽位：把当前最强的 cascade scaffold 与已有的 adaptive-active 语义合并，而不是继续做固定 `K` 或低秩线的局部插值。先读现有 `SharedAdaptiveActive...` 的实现差异，再决定是否值得做最小新 family。
+exec
+/bin/bash -lc "sed -n '2640,2768p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x_centered = x - self.b_dec
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual = x_centered - stage1_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
+        return EncoderOutput(combined_acts, combined_indices, combined_full)
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual = x_centered - stage1_out
+        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
+            residual
+        )
+
+        combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
+        combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
+        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
+
+        sparse_out = self._decode_sparse(combined_acts, combined_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
+            k_aux = y.shape[-1] // 2
+            scale = min(num_dead / k_aux, 1.0)
+            k_aux = min(k_aux, num_dead)
+            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
+            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            combined_acts,
+            combined_indices,
+            fvu,
+            auxk_loss,
+        )
+
+
+class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Shared coarse branch plus adaptive 1-or-2 PK-routed expert cleanup."""
+
+    def _encode_expert_stage(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        original_shape = residual.shape[:-1]
+        flat_x = residual.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+            expert_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage2_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+        )
+
+        target_shape = (*original_shape, self.stage2_k)
+        acts_shape = (*original_shape, self.expert_num_latents)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
+    SharedProductKeyExpertJumpReLUSparseCoder
+):
+    """Shared coarse branch plus ordered two-expert PK residual cleanup."""
+
+    architecture_name = "shared_cascade_product_key_expert_jumprelu"
+
+    def __init__(
+        self,
+        d_in: int,
+        cfg: SparseCoderConfig,
+        device: str | torch.device = "cpu",
+
+exec
+/bin/bash -lc "sed -n '1660,1728p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class AdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
+    ProductKeyExpertJumpReLUSparseCoder
+):
+    """PK-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+            expert_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx]
+        selected_threshold = self.threshold[selected_expert_idx]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        acts = positive * gate * selected_probs.unsqueeze(-1)
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        acts_shape = (*original_shape, self.num_latents)
+        return EncoderOutput(
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts.reshape(acts_shape),
+        )
+
+
+class AdaptiveActiveExpertJumpReLUSparseCoder(ExpertJumpReLUSparseCoder):
+    """Confidence-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
+
+    def encode(self, x: Tensor) -> EncoderOutput:
+        x = x - self.b_dec
+        original_shape = x.shape[:-1]
+        flat_x = x.reshape(-1, self.d_in)
+
+        router_logits = self.router(flat_x)
+        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+            router_logits, self.active_experts
+        )
+        selected_weight = self.expert_encoders[selected_expert_idx]
+
+exec
+/bin/bash -lc 'rg -n "_select_adaptive_active_expert_indices|adaptive_active" sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+452:    if architecture == "adaptive_active_product_key_expert_jumprelu":
+466:    if architecture == "shared_adaptive_active_product_key_expert_residual":
+482:    if architecture == "shared_adaptive_active_product_key_expert_jumprelu":
+484:    if architecture == "dual_shared_adaptive_active_product_key_expert_jumprelu":
+488:    if architecture == "adaptive_active_expert_jumprelu":
+1278:def _select_adaptive_active_expert_indices(
+1687:        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+1725:        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+2727:        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+3323:    architecture_name = "shared_adaptive_active_product_key_expert_residual"
+3337:        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+4193:    architecture_name = "dual_shared_adaptive_active_product_key_expert_jumprelu"
+
+exec
+/bin/bash -lc "sed -n '1268,1325p' sparsify/sparse_coder.py" in /root/sparsify-ascend
+ succeeded in 0ms:
+    )
+    return active_indices, active_probs / norm
+
+
+def _product_key_pair_grid(num_experts: int) -> tuple[int, int]:
+    left_keys = max(1, math.isqrt(num_experts))
+    right_keys = math.ceil(num_experts / left_keys)
+    return left_keys, right_keys
+
+
+def _select_adaptive_active_expert_indices(
+    router_logits: Tensor,
+    active_experts: int,
+    *,
+    easy_share_threshold: float = 0.8,
+) -> tuple[Tensor, Tensor]:
+    """Use one expert for confident tokens, otherwise keep the full routed set."""
+    if active_experts <= 1:
+        return _select_active_expert_indices(router_logits, active_experts)
+
+    router_probs = torch.softmax(router_logits, dim=-1)
+    active_probs, active_indices = torch.topk(
+        router_probs, active_experts, dim=-1, sorted=True
+    )
+    eps = torch.finfo(active_probs.dtype).eps
+    top1 = active_probs[:, :1]
+    tail = active_probs[:, 1:].sum(dim=-1, keepdim=True)
+    top1_share = top1 / (top1 + tail).clamp_min(eps)
+    use_single = top1_share >= easy_share_threshold
+
+    adaptive_probs = active_probs.clone()
+    adaptive_probs[:, 1:] = torch.where(
+        use_single,
+        torch.zeros_like(adaptive_probs[:, 1:]),
+        adaptive_probs[:, 1:],
+    )
+    norm = adaptive_probs.sum(dim=-1, keepdim=True).clamp_min(eps)
+    return active_indices, adaptive_probs / norm
+
+
+def _select_hashed_active_expert_indices(
+    x: Tensor,
+    hash_projections: Tensor,
+    num_experts: int,
+) -> tuple[Tensor, Tensor]:
+    """Select active experts from fixed sign hashes instead of a learned router."""
+    active_experts = hash_projections.shape[0]
+    num_hash_bits = hash_projections.shape[1]
+    hash_logits = torch.einsum("bd,ahd->bah", x, hash_projections)
+    bit_weights = (2 ** torch.arange(num_hash_bits, device=x.device)).view(1, 1, -1)
+    raw_indices = ((hash_logits > 0).long() * bit_weights).sum(dim=-1) % num_experts
+    selected_indices = raw_indices
+
+    for slot in range(1, active_experts):
+        duplicate = (selected_indices[:, slot : slot + 1] == selected_indices[:, :slot]).any(
+            dim=-1
+        )
+        while duplicate.any():
+
+codex
+我准备落盘一个最小新 family：`shared_adaptive_cascade_product_key_expert_jumprelu`。它复用当前 best `shared_cascade...` 的 ordered two-expert cleanup，只把第二位 expert 的开启条件改成“router 置信度不够高时才保留”，从而对应 difficulty-aware active path，而不是 residual-energy trigger。
+apply patch
+patch: completed
+/root/sparsify-ascend/research/AutoResearch/override_registry.py
+/root/sparsify-ascend/sparsify/config.py
+/root/sparsify-ascend/sparsify/sparse_coder.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..3c608f7a5376411916392ab335a5259f6e25b79c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..3c608f7a5376411916392ab335a5259f6e25b79c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+补丁已落盘。现在按新架构集成清单做四项复核：whitelist/dispatch、py_compile、exact-string smoke、allowlist+policy。
+exec
+/bin/bash -lc 'rg -n "shared_adaptive_cascade_product_key_expert_jumprelu|SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder" sparsify/config.py sparsify/sparse_coder.py research/AutoResearch/override_registry.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+research/AutoResearch/override_registry.py:60:    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+sparsify/config.py:234:            "shared_adaptive_cascade_product_key_expert_jumprelu",
+sparsify/sparse_coder.py:460:    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
+sparsify/sparse_coder.py:461:        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+sparsify/sparse_coder.py:3022:class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
+sparsify/sparse_coder.py:3027:    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
+
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+print('arch_only', validate_env_overrides([{'key':'ARCHITECTURE','value':'shared_adaptive_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu'))
+print('full_resolved', validate_env_overrides([
+  {'key':'ARCHITECTURE','value':'shared_adaptive_cascade_product_key_expert_jumprelu'},
+  {'key':'NUM_EXPERTS','value':'3072'},
+  {'key':'ACTIVE_EXPERTS','value':'2'},
+  {'key':'LATENTS_PER_EXPERT','value':'56'},
+  {'key':'STAGE1_RATIO','value':'0.25'},
+  {'key':'FACTORIZED_HIDDEN_DIM','value':'256'}
+], fallback_architecture='shared_cascade_product_key_expert_jumprelu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+arch_only []
+full_resolved ['FACTORIZED_HIDDEN_DIM']
+
+exec
+/bin/bash -lc 'python -m py_compile sparsify/config.py sparsify/sparse_coder.py research/AutoResearch/override_registry.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..3c608f7a5376411916392ab335a5259f6e25b79c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+我补一个必要的 wiring 小修：虽然新 family 本身不用 `FACTORIZED_HIDDEN_DIM`，但从 r305 继承完整 resolved config 时会带上这个键；为避免 candidate config 校验歧义，我把它加入该 family 的 allowlist。
+apply patch
+patch: completed
+/root/sparsify-ascend/research/AutoResearch/override_registry.py
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+现在重新跑 allowlist、exact-string smoke、成本和 policy 校验，确认这条新 family 真能直接用于本轮 JSON。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.override_registry import validate_env_overrides
+print('arch_only', validate_env_overrides([{'key':'ARCHITECTURE','value':'shared_adaptive_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu'))
+print('full_resolved', validate_env_overrides([
+  {'key':'ARCHITECTURE','value':'shared_adaptive_cascade_product_key_expert_jumprelu'},
+  {'key':'NUM_EXPERTS','value':'3072'},
+  {'key':'ACTIVE_EXPERTS','value':'2'},
+  {'key':'LATENTS_PER_EXPERT','value':'56'},
+  {'key':'STAGE1_RATIO','value':'0.25'},
+  {'key':'FACTORIZED_HIDDEN_DIM','value':'256'}
+], fallback_architecture='shared_cascade_product_key_expert_jumprelu'))
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+arch_only []
+full_resolved []
+
+exec
+/bin/bash -lc 'python -m py_compile research/AutoResearch/override_registry.py sparsify/config.py sparsify/sparse_coder.py' in /root/sparsify-ascend
+ succeeded in 0ms:
+exec
+/bin/bash -lc "python - <<'PY'
+import sys
+sys.path.insert(0, '.')
+import torch
+from sparsify import SparseCoder
+from sparsify.config import SparseCoderConfig
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+try:
+    import torch_npu
+    if torch.npu.is_available():
+        device = 'npu'
+except ImportError:
+    pass
+arch = 'shared_adaptive_cascade_product_key_expert_jumprelu'
+k = 32
+ef = 1
+cfg = SparseCoderConfig(
+    architecture=arch,
+    k=k,
+    expansion_factor=ef,
+    num_experts=3072,
+    active_experts=2,
+    latents_per_expert=56,
+    stage1_ratio=0.25,
+)
+sae = SparseCoder(1024, cfg, device=device, dtype=torch.float32)
+x = torch.randn(4, 1024, device=device)
+out = sae(x)
+out.fvu.backward()
+print('integration_smoke: OK', arch, k, ef, device)
+PY" in /root/sparsify-ascend
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+ succeeded in 5057ms:
+Using fused decoder on CUDA.
+integration_smoke: OK shared_adaptive_cascade_product_key_expert_jumprelu 32 1 cuda
+
+codex
+smoke 在跑。我再补一项：做 exact cost 和 policy 校验，确保最终提案是单变量、可运行、且门槛数字准确。
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.compatibility import compute_selection_cost, extract_cost_extra_config
+cfg = {
+    'ARCHITECTURE': 'shared_adaptive_cascade_product_key_expert_jumprelu',
+    'K': '32',
+    'EXPANSION_FACTOR': '1',
+    'NUM_EXPERTS': '3072',
+    'ACTIVE_EXPERTS': '2',
+    'LATENTS_PER_EXPERT': '56',
+    'STAGE1_RATIO': '0.25',
+    'FACTORIZED_HIDDEN_DIM': '256',
+}
+extra = extract_cost_extra_config(cfg)
+out = compute_selection_cost('shared_adaptive_cascade_product_key_expert_jumprelu', k=32, ef=1, d_in=1024, n_output=4096, extra_config=extra)
+print(out)
+PY" in /root/sparsify-ascend
+exec
+/bin/bash -lc "python - <<'PY'
+from research.AutoResearch.types import Action
+from research.AutoResearch.state import StateManager
+from research.AutoResearch.policy import validate_action
+
+action = Action.from_dict({
+  'command': 'run',
+  'hypothesis': 'x',
+  'summary': 'x',
+  'change_type': 'edit_sae_code',
+  'expected_win': 'lower_objective',
+  'family_name': 'shared_adaptive_cascade_product_key_expert_jumprelu',
+  'family_stage': 'prototype',
+  'self_review': 'x',
+  'needs_sanity': True,
+  'env_overrides': [{'key':'ARCHITECTURE','value':'shared_adaptive_cascade_product_key_expert_jumprelu'}],
+  'touched_files': ['sparsify/config.py','sparsify/sparse_coder.py','research/AutoResearch/override_registry.py'],
+  'notes_to_memory': [],
+  'next_hypotheses': [],
+  'reference_round': 305,
+})
+state = StateManager(persist_load_fixes=False)
+validated, rejection = validate_action(action, state)
+print('rejection=', rejection)
+print('family=', validated.family_name if validated else None)
+PY" in /root/sparsify-ascend
+ succeeded in 0ms:
+rejection= None
+family= shared_adaptive_cascade_product_key_expert_jumprelu
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+ succeeded in 5495ms:
+{'total_accesses': 285696, 'original_matmul_accesses': 4194304, 'ratio': 0.07, 'budget_ratio': 0.05, 'feasible': True, 'breakdown': [{'name': 'left_router', 'accesses': 56320, 'shape': '1024x55'}, {'name': 'right_router', 'accesses': 57344, 'shape': '1024x56'}, {'name': 'shared_expert_encoder', 'accesses': 57344, 'shape': 'shared=1×1024x56'}, {'name': 'active_expert_encoder', 'accesses': 114688, 'shape': 'active=2×1024x56'}], 'deployment_accesses': 163840, 'deployment_ratio': 0.04, 'deployment_breakdown': [{'name': 'sparse_lookup', 'accesses': 163840, 'shape': 'K=32×(d=1024+n=4096)'}], 'combined_accesses': 449536, 'combined_ratio': 0.11, 'combined_budget_ratio': 0.07, 'combined_feasible': True}
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+codex
+{
+  "command": "run",
+  "hypothesis": "最终重构公式设为 `x_hat = Σ_{i∈S_sh(x)} α_i^sh b_i^sh + Σ_{j∈S_{e1(r1)}^{τ1}(r1)} β_j c_{e1,j} + 1[top1_share(r1) < 0.8] · Σ_{m∈S_{e2(r1)}^{τ2}(r2)} γ_m c_{e2,m}`，其中 `r1(x)=x-shared(x)`，`r2(x)=r1(x)-expert1(r1;e1)`，`(e1,e2)` 是同一次 product-key 路由在 `r1` 上选出的有序 top-2 静态 expert 子库，`top1_share(r1)` 是第一路路由置信度在 top-2 expert 概率质量中的占比。在线导出仍是“shared 静态库查表 -> PK 选有序静态 expert 子库 -> 第一位 expert cleanup -> 仅当路由置信度不够高时才打开第二位 expert -> 有限加权求和 -> 选择性补偿”，不涉及动态字典生成，因此兼容性判断为 `直接兼容`。它与 `shared_cascade_product_key_expert_jumprelu` 的精确差异不是重命名，而是把第二位 expert 从 always-on 改成基于 router confidence 的 adaptive 1-or-2 cascade；它也不同于 `shared_conditional_cascade_product_key_expert_jumprelu`，因为触发信号不再看第一阶段 cleanup 后的残差能量，而是预先看路由是否已经高度确信单 expert 足够。相对 r305 本轮只改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu`，其余 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25, FACTORIZED_HIDDEN_DIM=256, OPTIMIZER=adam, LR=8e-4` 保持不变，直接测试“ordered cascade + difficulty-aware active path”能否比 current cascade scaffold 更有效压低 hard-token exceed。该配置本地精确成本复核为 `selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`，仍在预算内；若按当前 incumbent r304 的 `objective=0.264928525686264` 为基准，要击败它需要把 `exceed_alpha_0.50` 压到 `0.15775079131126404` 以下。",
+  "summary": "已实现并接通 `shared_adaptive_cascade_product_key_expert_jumprelu`。建议以 r305 为 reference，只改 `ARCHITECTURE`，做一轮 matched-cost architecture probe，直接裁决“ordered cascade + confidence-triggered second expert”是否能比 current cascade scaffold 更有效压低 `exceed_alpha_0.50`。",
+  "change_type": "edit_sae_code",
+  "expected_win": "lower_objective",
+  "family_name": "shared_adaptive_cascade_product_key_expert_jumprelu",
+  "family_stage": "prototype",
+  "self_review": "这轮不是继续在 lowrank+cascade 上做第三个近邻点，而是按照当前规则把预算切回新的结构槽位。主要风险很明确：adaptive-active 语义在旧的 non-cascade shared+PK 线上只给过有限正信号，而当前 cost proxy 仍按 worst-case `ACTIVE_EXPERTS=2` 计费，因此这条线必须主要通过更低 exceed 来取胜。如果 router-confidence 触发与 ordered cascade cleanup 不形成正交收益，这轮很可能只会复现 `shared_adaptive_active_product_key_expert_jumprelu` 的旧平台。但这仍值得做，因为 r308-r309 已经给出清晰新证据：lowrank hidden 会明显伤害 tail cleanup，而 conditional residual-energy trigger 也已经失败；当前最有信息量的未验证假设，就是把 variable-active path 直接绑到当前最强的 full cascade scaffold 上。",
+  "needs_sanity": true,
+  "env_overrides": [
+    {
+      "key": "ARCHITECTURE",
+      "value": "shared_adaptive_cascade_product_key_expert_jumprelu"
+    }
+  ],
+  "touched_files": [
+    "sparsify/config.py",
+    "sparsify/sparse_coder.py",
+    "research/AutoResearch/override_registry.py"
+  ],
+  "notes_to_memory": [
+    "已实际落盘新 family `shared_adaptive_cascade_product_key_expert_jumprelu`，真实改动文件为 `sparsify/config.py`、`sparsify/sparse_coder.py`、`research/AutoResearch/override_registry.py`。",
+    "该 family 的精确结构差异是：保留 `shared_cascade_product_key_expert_jumprelu` 的 shared coarse + ordered PK top-2 cleanup scaffold，但把第二位 expert 的开启条件从 always-on 改成 router-confidence adaptive 1-or-2 path；它不是 `shared_conditional_cascade_product_key_expert_jumprelu` 的重命名，因为后者看的是 first-cleanup 后的残差能量，而这里看的是 pre-cleanup 的 top1 路由置信度。",
+    "本地 exact-string smoke 已通过：`shared_adaptive_cascade_product_key_expert_jumprelu` 在 `K=32, EF=1, NUM_EXPERTS=3072, ACTIVE_EXPERTS=2, LATENTS_PER_EXPERT=56, STAGE1_RATIO=0.25` 下可成功 instantiate、forward、backward。",
+    "本地源码校验已通过：`python -m py_compile research/AutoResearch/override_registry.py sparsify/config.py sparsify/sparse_coder.py` 成功，无语法错误。",
+    "本地 override allowlist 校验已通过：`validate_env_overrides([{key:'ARCHITECTURE', value:'shared_adaptive_cascade_product_key_expert_jumprelu'}], fallback_architecture='shared_cascade_product_key_expert_jumprelu') == []`，且对包含 `NUM_EXPERTS/ACTIVE_EXPERTS/LATENTS_PER_EXPERT/STAGE1_RATIO/FACTORIZED_HIDDEN_DIM` 的 full resolved config 复核也返回 `[]`。",
+    "本地成本复核：`selection_accesses=285696`、`deployment_accesses=163840`、`combined_accesses=449536`、`exact total_cost_ratio=0.107177734375`；与 r305 处于同一成本档，若要击败 r304 需 `exceed_alpha_0.50 <= 0.15775079131126404`。",
+    "本地 `validate_action(...)` 复核已通过：以 `reference_round=305` 且仅改 `ARCHITECTURE=shared_adaptive_cascade_product_key_expert_jumprelu` 的提案不会被当前 policy 拦截。"
+  ],
+  "next_hypotheses": [
+    "如果该 family 在同成本下把 exceed 压到 `<=0.1578` 并赢过 r304，下一轮优先保留该 scaffold，只做一次最小容量校准，例如 `NUM_EXPERTS=4096` 或 `K=48` 二选一，测试 variable-active cascade 是否真的把 capacity knee 推右了。",
+    "如果该 family 的 exceed 明显优于 r305 但 objective 仍未赢 incumbent，说明 difficulty-aware active path 与 cascade 语义存在正交收益，但交换率还不够；后续应优先继续围绕该语义做少量 scaffold-level follow-up，而不是回到 plain adaptive-active 或 conditional residual-energy 邻域。",
+    "如果该 family 与 r305 持平或更差，则可更明确地下调‘variable-active path on cascade scaffold’这条支线的优先级；后续默认应转向别的 matched architecture probe，而不是继续补这一邻域。"
+  ],
+  "reference_round": 305
+}
+diff --git a/research/AutoResearch/override_registry.py b/research/AutoResearch/override_registry.py
+index e3e830fa35475e34b7bc9d26b5b56985f8508b65..4b7e846e844a6c4683910c880cf12c8c4323f28c
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+diff --git a/sparsify/config.py b/sparsify/config.py
+index 9a32a0e35d06c02f9a702c34fe2d7183490d5172..d484d4b287286a677820bd81251c059f510e8a39
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+diff --git a/sparsify/sparse_coder.py b/sparsify/sparse_coder.py
+index 2f0b3288d635e6701f66cf2c3243a6d63651e383..038686b042ac0ad5433325d88f2a476f10020ba8
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
+
+tokens used
+1,579,102

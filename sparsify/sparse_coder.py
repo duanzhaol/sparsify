@@ -457,6 +457,8 @@ def _get_sae_class(architecture: str) -> type:
         return SharedProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_cascade_product_key_expert_jumprelu":
         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
+    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
+        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
     if architecture == "shared_product_key_expert_residual":
@@ -3015,6 +3017,28 @@ class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
         )
         combined_full = torch.cat((stage1_full, stage2a_full + stage2b_full), dim=-1)
         return combined_acts, combined_indices, combined_full
+
+
+class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
+    SharedCascadeProductKeyExpertJumpReLUSparseCoder
+):
+    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
+
+    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
+
+    def _select_ordered_expert_pair(
+        self, residual: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        flat_x = residual.reshape(-1, self.d_in)
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        expert_logits = (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+        return _select_adaptive_active_expert_indices(
+            expert_logits, self.active_experts
+        )
 
 
 class SharedProductKeyExpertResidualSparseCoder(

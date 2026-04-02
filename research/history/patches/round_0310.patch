@@ -1,0 +1,62 @@
+--- a/research/AutoResearch/override_registry.py
++++ b/research/AutoResearch/override_registry.py
+@@ -57,6 +57,7 @@
+     "product_key_factorized_expert_topk": _FACTORIZED_EXPERT_KEYS,
+     "shared_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
++    "shared_adaptive_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_conditional_cascade_product_key_expert_jumprelu": _EXPERT_KEYS | {"STAGE1_RATIO", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+     "shared_product_key_expert_jumprelu_residual": _EXPERT_KEYS | {"STAGE1_RATIO", "FACTORIZED_HIDDEN_DIM", "JUMPRELU_INIT_THRESHOLD", "JUMPRELU_BANDWIDTH"},
+
+--- a/sparsify/config.py
++++ b/sparsify/config.py
+@@ -231,6 +231,7 @@
+             "product_key_factorized_expert_topk",
+             "shared_product_key_expert_jumprelu",
+             "shared_cascade_product_key_expert_jumprelu",
++            "shared_adaptive_cascade_product_key_expert_jumprelu",
+             "shared_conditional_cascade_product_key_expert_jumprelu",
+             "shared_product_key_expert_residual",
+             "shared_product_key_expert_jumprelu_residual",
+
+--- a/sparsify/sparse_coder.py
++++ b/sparsify/sparse_coder.py
+@@ -457,6 +457,8 @@
+         return SharedProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_cascade_product_key_expert_jumprelu":
+         return SharedCascadeProductKeyExpertJumpReLUSparseCoder
++    if architecture == "shared_adaptive_cascade_product_key_expert_jumprelu":
++        return SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_conditional_cascade_product_key_expert_jumprelu":
+         return SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder
+     if architecture == "shared_product_key_expert_residual":
+@@ -3017,6 +3019,28 @@
+         return combined_acts, combined_indices, combined_full
+ 
+ 
++class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
++    SharedCascadeProductKeyExpertJumpReLUSparseCoder
++):
++    """Cascade PK cleanup with adaptive 1-or-2 expert activation by routing confidence."""
++
++    architecture_name = "shared_adaptive_cascade_product_key_expert_jumprelu"
++
++    def _select_ordered_expert_pair(
++        self, residual: Tensor
++    ) -> tuple[Tensor, Tensor]:
++        flat_x = residual.reshape(-1, self.d_in)
++        left_logits = self.left_router(flat_x)
++        right_logits = self.right_router(flat_x)
++        expert_logits = (
++            left_logits[:, self.pair_left_index]
++            + right_logits[:, self.pair_right_index]
++        )
++        return _select_adaptive_active_expert_indices(
++            expert_logits, self.active_experts
++        )
++
++
+ class SharedProductKeyExpertResidualSparseCoder(
+     SharedProductKeyExpertJumpReLUSparseCoder
+ ):
