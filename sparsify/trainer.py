@@ -327,6 +327,9 @@ class Trainer(CheckpointMixin):
         avg_exceed: dict[str, dict[float, float]] = defaultdict(
             lambda: defaultdict(float)
         )
+        avg_monitoring: dict[str, dict[str, float]] = defaultdict(
+            lambda: defaultdict(float)
+        )
         avg_losses: dict[str, float] = {
             name: float("inf") for name in self.saes.keys()
         }
@@ -464,6 +467,7 @@ class Trainer(CheckpointMixin):
                     else wrapped.no_sync()
                 )
                 with sync_context:
+                    raw.set_training_tokens(self.total_tokens)
                     out = wrapped(
                         x=acts,
                         dead_mask=(
@@ -486,6 +490,12 @@ class Trainer(CheckpointMixin):
                         avg_auxk_loss[sae_key] += float(
                             out.auxk_loss.detach() / denom
                         )
+                    monitoring_metrics = raw.pop_monitoring_metrics()
+                    for metric_name, metric_value in monitoring_metrics.items():
+                        avg_monitoring[sae_key][metric_name] += (
+                            metric_value / denom
+                        )
+                    router_regularization_loss = raw.pop_regularization_loss()
 
                     # Compute exceed metrics if elbow thresholds available
                     if name in self.elbow_thresholds and self.cfg.exceed_alphas:
@@ -538,6 +548,14 @@ class Trainer(CheckpointMixin):
 
                     # Local backward pass (inside sync_context for DDP no_sync)
                     loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    if (
+                        router_regularization_loss is not None
+                        and self.cfg.sae.router_load_balance_alpha > 0
+                    ):
+                        loss = loss + (
+                            self.cfg.sae.router_load_balance_alpha
+                            * router_regularization_loss
+                        )
 
                     # Matryoshka multi-K loss
                     if self.cfg.matryoshka_ks:
@@ -779,6 +797,9 @@ class Trainer(CheckpointMixin):
                         reduced_exceed = reduce_nested_scalar_mapping(
                             dict(avg_exceed)
                         )
+                        reduced_monitoring = reduce_nested_scalar_mapping(
+                            dict(avg_monitoring)
+                        )
 
                         info = {}
 
@@ -806,17 +827,29 @@ class Trainer(CheckpointMixin):
                                 )
 
                         for name in self.saes:
+                            raw = self.saes[name]
                             mask = (
                                 self.num_tokens_since_fired[name]
                                 > self.cfg.dead_feature_threshold
                             )
                             info[f"{name}/dead_pct"] = mask.float().mean().item()
+                            for metric_name, metric_slice in raw.dead_metric_slices().items():
+                                metric_mask = mask[metric_slice]
+                                info[f"{name}/{metric_name}"] = (
+                                    metric_mask.float().mean().item()
+                                    if metric_mask.numel() > 0
+                                    else 0.0
+                                )
                             info[f"{name}/fvu"] = reduced_fvu.get(name, 0.0)
 
                             if self.cfg.auxk_alpha > 0:
                                 info[f"{name}/auxk"] = reduced_auxk.get(
                                     name, 0.0
                                 )
+
+                            if name in reduced_monitoring:
+                                for metric_name, val in reduced_monitoring[name].items():
+                                    info[f"{name}/{metric_name}"] = val
 
                             # Exceed metrics
                             if name in reduced_exceed:
@@ -836,6 +869,7 @@ class Trainer(CheckpointMixin):
                     avg_auxk_loss.clear()
                     avg_fvu.clear()
                     avg_exceed.clear()
+                    avg_monitoring.clear()
                     total_forward_time = 0.0
                     total_metrics_time = 0.0
                     timing_step_count = 0

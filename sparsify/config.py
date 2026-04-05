@@ -36,6 +36,19 @@ class SparseCoderConfig(Serializable):
     gated_init_logit: float = 2.0
     """Initial bias logit for gated encoders."""
 
+    router_load_balance_alpha: float = 0.01
+    """Weight of the router load-balancing loss.
+    Currently used by routed product-key families."""
+
+    router_warmup_tokens: int = 20_000_000
+    """Token budget over which routed product-key families anneal router
+    temperature from `router_warmup_init_temperature` back to 1.0.
+    Set to 0 to disable."""
+
+    router_warmup_init_temperature: float = 2.0
+    """Initial router temperature used at token 0 for routed product-key
+    warmup. Must be positive."""
+
     group_topk_size: int = 4
     """Number of latents per local competition group for group-topk encoders."""
 
@@ -309,6 +322,21 @@ class TrainConfig(Serializable):
             raise ValueError(
                 "gated_temperature must be positive, "
                 f"got {self.sae.gated_temperature}"
+            )
+        if self.sae.router_load_balance_alpha < 0:
+            raise ValueError(
+                "router_load_balance_alpha must be non-negative, "
+                f"got {self.sae.router_load_balance_alpha}"
+            )
+        if self.sae.router_warmup_tokens < 0:
+            raise ValueError(
+                "router_warmup_tokens must be non-negative, "
+                f"got {self.sae.router_warmup_tokens}"
+            )
+        if self.sae.router_warmup_init_temperature <= 0:
+            raise ValueError(
+                "router_warmup_init_temperature must be positive, "
+                f"got {self.sae.router_warmup_init_temperature}"
             )
         if self.sae.group_topk_size <= 0:
             raise ValueError(

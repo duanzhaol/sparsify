@@ -1,0 +1,51 @@
+WANDB_PROJECT=qwen3-0.6B-manual-qproj \
+SAVE_DIR=checkpoints/manual_qproj \
+RUN_NAME=manual_shared_cascade_pk_jumprelu_ne3072_lpe56_s025 \
+MAX_TOKENS=100000000 \
+ARCHITECTURE=shared_cascade_product_key_expert_jumprelu \
+K=32 \
+EXPANSION_FACTOR=1 \
+NUM_EXPERTS=2048 \
+ACTIVE_EXPERTS=2 \
+LATENTS_PER_EXPERT=56 \
+TRUNK_RANK=16 \
+STAGE1_RATIO=0.25 \
+FACTORIZED_HIDDEN_DIM=256 \
+OPTIMIZER=adam \
+LR=8e-4 \
+HOOKPOINTS='layers.[0-14].self_attn.q_proj' \
+BATCH_SIZE=1 \
+GRAD_ACC_STEPS=8 \
+MICRO_ACC_STEPS=1 \
+AUXK_ALPHA=0.03125 \
+DEAD_FEATURE_THRESHOLD=10000000 \
+USE_HADAMARD=0 \
+COMPILE_MODEL=1 \
+bash scripts/autoresearch_test.sh
+
+WANDB_PROJECT=qwen3-0.6B-manual-qproj \
+		SAVE_DIR=checkpoints/manual_qproj \
+		RUN_NAME=manual_shared_pk_jumprelu_ne2048_lpe56 \
+		MAX_TOKENS=200000000 \
+		ARCHITECTURE=shared_product_key_expert_jumprelu \
+		K=64 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=4 \
+		LATENTS_PER_EXPERT=56 \
+		TRUNK_RANK=16 \
+		STAGE1_RATIO=0.125 \
+		FACTORIZED_HIDDEN_DIM=256 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[3,14].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=1 \
+		bash scripts/autoresearch_test.sh
+
+    

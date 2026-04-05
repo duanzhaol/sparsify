@@ -54,6 +54,9 @@ NUM_GROUPS="${NUM_GROUPS:-}"
 ACTIVE_GROUPS="${ACTIVE_GROUPS:-}"
 JUMPRELU_INIT_THRESHOLD="${JUMPRELU_INIT_THRESHOLD:-}"
 JUMPRELU_BANDWIDTH="${JUMPRELU_BANDWIDTH:-}"
+ROUTER_LOAD_BALANCE_ALPHA="${ROUTER_LOAD_BALANCE_ALPHA:-}"
+ROUTER_WARMUP_TOKENS="${ROUTER_WARMUP_TOKENS:-}"
+ROUTER_WARMUP_INIT_TEMPERATURE="${ROUTER_WARMUP_INIT_TEMPERATURE:-}"
 ORTHO_LAMBDA="${ORTHO_LAMBDA:-}"
 MATRYOSHKA_KS="${MATRYOSHKA_KS:-}"
 MATRYOSHKA_WEIGHTS="${MATRYOSHKA_WEIGHTS:-}"
@@ -64,6 +67,101 @@ PROFILE="${PROFILE:-0}"
 PROFILE_OUTPUT="${PROFILE_OUTPUT:-logs/nsys/qwen3-0.6B-sae}"
 COMPILE_MODEL="${COMPILE_MODEL:-1}"
 RESUME="${RESUME:-0}"
+PRINT_COST_BREAKDOWN="${PRINT_COST_BREAKDOWN:-1}"
+
+if [[ "${PRINT_COST_BREAKDOWN}" == "1" ]]; then
+  ARCHITECTURE="${ARCHITECTURE}" \
+  K="${K}" \
+  EXPANSION_FACTOR="${EXPANSION_FACTOR}" \
+  HOOKPOINTS="${HOOKPOINTS}" \
+  TRUNK_RANK="${TRUNK_RANK}" \
+  NUM_CODES="${NUM_CODES}" \
+  STAGE1_RATIO="${STAGE1_RATIO}" \
+  FACTORIZED_HIDDEN_DIM="${FACTORIZED_HIDDEN_DIM}" \
+  NUM_EXPERTS="${NUM_EXPERTS}" \
+  ACTIVE_EXPERTS="${ACTIVE_EXPERTS}" \
+  LATENTS_PER_EXPERT="${LATENTS_PER_EXPERT}" \
+  python - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+
+try:
+    from research.AutoResearch.compatibility import extract_cost_extra_config
+    from research.AutoResearch.target_profile import resolve_target_profile
+    from sparsify.config import SparseCoderConfig
+    from sparsify.sparse_coder import _get_sae_class
+
+    cfg = {
+        "HOOKPOINTS": os.environ.get("HOOKPOINTS", ""),
+        "TRUNK_RANK": os.environ.get("TRUNK_RANK", ""),
+        "NUM_CODES": os.environ.get("NUM_CODES", ""),
+        "STAGE1_RATIO": os.environ.get("STAGE1_RATIO", ""),
+        "FACTORIZED_HIDDEN_DIM": os.environ.get("FACTORIZED_HIDDEN_DIM", ""),
+        "NUM_EXPERTS": os.environ.get("NUM_EXPERTS", ""),
+        "ACTIVE_EXPERTS": os.environ.get("ACTIVE_EXPERTS", ""),
+        "LATENTS_PER_EXPERT": os.environ.get("LATENTS_PER_EXPERT", ""),
+    }
+    profile = resolve_target_profile(cfg)
+    cfg_kwargs = {
+        "architecture": os.environ["ARCHITECTURE"],
+        "k": int(os.environ["K"]),
+        "expansion_factor": int(os.environ["EXPANSION_FACTOR"]),
+    }
+    cfg_kwargs.update(extract_cost_extra_config(cfg) or {})
+    sae_cfg = SparseCoderConfig(**cfg_kwargs)
+    cls = _get_sae_class(os.environ["ARCHITECTURE"])
+    model = cls(profile.d_in, sae_cfg, device="cpu")
+    cost = model.selection_cost_estimate(profile.n_output)
+
+    if cost.get("error"):
+        print(f"[cost] warning: failed to compute cost estimate: {cost['error']}")
+    else:
+        original = float(cost.get("original_matmul_accesses") or 0.0)
+        budget = 1.5 * original if original > 0 else 0.0
+        selection = float(cost.get("total_accesses") or 0.0)
+        deployment = float(cost.get("deployment_accesses") or 0.0)
+        combined = float(cost.get("combined_accesses") or (selection + deployment))
+
+        def ratio(value: float) -> str:
+            if original <= 0:
+                return "n/a"
+            return f"{value / original:.6f}x"
+
+        def budget_ratio(value: float) -> str:
+            if budget <= 0:
+                return "n/a"
+            return f"{value / budget:.6f}x"
+
+        print(
+            f"[cost] proxy: {profile.training_hookpoint} | "
+            f"{profile.cost_model_label}"
+        )
+        print(
+            f"[cost] original_matmul_accesses={int(original)} "
+            f"budget_accesses={int(budget)}"
+        )
+        print(
+            f"[cost] selection_accesses={int(selection)} "
+            f"selection_ratio={ratio(selection)} "
+            f"selection_budget_ratio={budget_ratio(selection)}"
+        )
+        print(
+            f"[cost] deployment_accesses={int(deployment)} "
+            f"deployment_ratio={ratio(deployment)}"
+        )
+        print(
+            f"[cost] total_accesses={int(combined)} "
+            f"total_ratio={ratio(combined)} "
+            f"total_budget_ratio={budget_ratio(combined)} "
+            f"feasible={combined <= budget if budget > 0 else 'n/a'}"
+        )
+except Exception as exc:
+    print(f"[cost] warning: failed to compute cost estimate: {exc}")
+PY
+fi
 
 cmd=(
   torchrun
@@ -152,6 +250,18 @@ fi
 
 if [[ -n "${JUMPRELU_BANDWIDTH}" ]]; then
   cmd+=(--jumprelu_bandwidth "${JUMPRELU_BANDWIDTH}")
+fi
+
+if [[ -n "${ROUTER_LOAD_BALANCE_ALPHA}" ]]; then
+  cmd+=(--router_load_balance_alpha "${ROUTER_LOAD_BALANCE_ALPHA}")
+fi
+
+if [[ -n "${ROUTER_WARMUP_TOKENS}" ]]; then
+  cmd+=(--router_warmup_tokens "${ROUTER_WARMUP_TOKENS}")
+fi
+
+if [[ -n "${ROUTER_WARMUP_INIT_TEMPERATURE}" ]]; then
+  cmd+=(--router_warmup_init_temperature "${ROUTER_WARMUP_INIT_TEMPERATURE}")
 fi
 
 if [[ -n "${ORTHO_LAMBDA}" ]]; then
