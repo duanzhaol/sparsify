@@ -58,6 +58,7 @@ ROUTER_LOAD_BALANCE_ALPHA="${ROUTER_LOAD_BALANCE_ALPHA:-}"
 ROUTER_WARMUP_TOKENS="${ROUTER_WARMUP_TOKENS:-}"
 ROUTER_WARMUP_INIT_TEMPERATURE="${ROUTER_WARMUP_INIT_TEMPERATURE:-}"
 ORTHO_LAMBDA="${ORTHO_LAMBDA:-}"
+MULTI_KS="${MULTI_KS:-}"
 MATRYOSHKA_KS="${MATRYOSHKA_KS:-}"
 MATRYOSHKA_WEIGHTS="${MATRYOSHKA_WEIGHTS:-}"
 RESIDUAL_FROM="${RESIDUAL_FROM:-}"
@@ -81,6 +82,7 @@ if [[ "${PRINT_COST_BREAKDOWN}" == "1" ]]; then
   NUM_EXPERTS="${NUM_EXPERTS}" \
   ACTIVE_EXPERTS="${ACTIVE_EXPERTS}" \
   LATENTS_PER_EXPERT="${LATENTS_PER_EXPERT}" \
+  MULTI_KS="${MULTI_KS}" \
   python - <<'PY'
 import os
 import sys
@@ -105,20 +107,35 @@ try:
         "LATENTS_PER_EXPERT": os.environ.get("LATENTS_PER_EXPERT", ""),
     }
     profile = resolve_target_profile(cfg)
-    cfg_kwargs = {
-        "architecture": os.environ["ARCHITECTURE"],
-        "k": int(os.environ["K"]),
-        "expansion_factor": int(os.environ["EXPANSION_FACTOR"]),
-    }
-    cfg_kwargs.update(extract_cost_extra_config(cfg) or {})
-    sae_cfg = SparseCoderConfig(**cfg_kwargs)
-    cls = _get_sae_class(os.environ["ARCHITECTURE"])
-    model = cls(profile.d_in, sae_cfg, device="cpu")
-    cost = model.selection_cost_estimate(profile.n_output)
+    all_ks = {int(os.environ["K"])}
+    if os.environ.get("MULTI_KS"):
+        all_ks.update(
+            int(v) for v in os.environ["MULTI_KS"].split(",") if v.strip()
+        )
 
-    if cost.get("error"):
-        print(f"[cost] warning: failed to compute cost estimate: {cost['error']}")
-    else:
+    print(
+        f"[cost] proxy: {profile.training_hookpoint} | "
+        f"{profile.cost_model_label}"
+    )
+    for current_k in sorted(all_ks):
+        cfg_kwargs = {
+            "architecture": os.environ["ARCHITECTURE"],
+            "k": current_k,
+            "expansion_factor": int(os.environ["EXPANSION_FACTOR"]),
+        }
+        cfg_kwargs.update(extract_cost_extra_config(cfg) or {})
+        sae_cfg = SparseCoderConfig(**cfg_kwargs)
+        cls = _get_sae_class(os.environ["ARCHITECTURE"])
+        model = cls(profile.d_in, sae_cfg, device="cpu")
+        cost = model.selection_cost_estimate(profile.n_output)
+
+        if cost.get("error"):
+            print(
+                f"[cost][k={current_k}] warning: failed to compute cost estimate: "
+                f"{cost['error']}"
+            )
+            continue
+
         original = float(cost.get("original_matmul_accesses") or 0.0)
         budget = 1.5 * original if original > 0 else 0.0
         selection = float(cost.get("total_accesses") or 0.0)
@@ -136,24 +153,20 @@ try:
             return f"{value / budget:.6f}x"
 
         print(
-            f"[cost] proxy: {profile.training_hookpoint} | "
-            f"{profile.cost_model_label}"
-        )
-        print(
-            f"[cost] original_matmul_accesses={int(original)} "
+            f"[cost][k={current_k}] original_matmul_accesses={int(original)} "
             f"budget_accesses={int(budget)}"
         )
         print(
-            f"[cost] selection_accesses={int(selection)} "
+            f"[cost][k={current_k}] selection_accesses={int(selection)} "
             f"selection_ratio={ratio(selection)} "
             f"selection_budget_ratio={budget_ratio(selection)}"
         )
         print(
-            f"[cost] deployment_accesses={int(deployment)} "
+            f"[cost][k={current_k}] deployment_accesses={int(deployment)} "
             f"deployment_ratio={ratio(deployment)}"
         )
         print(
-            f"[cost] total_accesses={int(combined)} "
+            f"[cost][k={current_k}] total_accesses={int(combined)} "
             f"total_ratio={ratio(combined)} "
             f"total_budget_ratio={budget_ratio(combined)} "
             f"feasible={combined <= budget if budget > 0 else 'n/a'}"
@@ -268,22 +281,23 @@ if [[ -n "${ORTHO_LAMBDA}" ]]; then
   cmd+=(--ortho_lambda "${ORTHO_LAMBDA}")
 fi
 
+if [[ -n "${MULTI_KS}" ]]; then
+  IFS=',' read -ra _independent_k_vals <<< "${MULTI_KS}"
+  cmd+=(--multi_ks "${_independent_k_vals[@]}")
+fi
+
 if [[ -n "${RESIDUAL_FROM}" ]]; then
   cmd+=(--residual_from "${RESIDUAL_FROM}")
 fi
 
 if [[ -n "${MATRYOSHKA_KS}" ]]; then
   IFS=',' read -ra _mk_vals <<< "${MATRYOSHKA_KS}"
-  for _mk in "${_mk_vals[@]}"; do
-    cmd+=(--matryoshka_ks "${_mk}")
-  done
+  cmd+=(--matryoshka_ks "${_mk_vals[@]}")
 fi
 
 if [[ -n "${MATRYOSHKA_WEIGHTS}" ]]; then
   IFS=',' read -ra _mw_vals <<< "${MATRYOSHKA_WEIGHTS}"
-  for _mw in "${_mw_vals[@]}"; do
-    cmd+=(--matryoshka_weights "${_mw}")
-  done
+  cmd+=(--matryoshka_weights "${_mw_vals[@]}")
 fi
 
 if [[ "${COMPILE_MODEL}" == "1" ]]; then

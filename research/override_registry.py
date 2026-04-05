@@ -70,6 +70,7 @@ CONFIG_JSON_TO_ENV = {
     "active_groups": "ACTIVE_GROUPS",
     "ortho_lambda": "ORTHO_LAMBDA",
     "residual_from": "RESIDUAL_FROM",
+    "multi_ks": "MULTI_KS",
     "matryoshka_ks": "MATRYOSHKA_KS",
     "matryoshka_weights": "MATRYOSHKA_WEIGHTS",
 }

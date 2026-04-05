@@ -3,7 +3,7 @@ import os
 import time
 from collections import defaultdict
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from fnmatch import fnmatchcase
 from typing import Sized
 
@@ -38,6 +38,36 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer(CheckpointMixin):
+    @staticmethod
+    def _split_sae_key(sae_key: str) -> tuple[str, str | None, list[str]]:
+        """Split ``hook[/kX][/seedY]`` into hook, optional K bucket, and remainder."""
+        hook, *suffix_parts = sae_key.split("/")
+        if not suffix_parts:
+            return hook, None, []
+        first = suffix_parts[0]
+        if first.startswith("k") and first[1:].isdigit():
+            return hook, first, suffix_parts[1:]
+        return hook, None, suffix_parts
+
+    @classmethod
+    def _wandb_metric_key(cls, sae_key: str, metric_name: str) -> str:
+        """Keep base hook metric names stable across K-specific wandb runs."""
+        hook, _, suffix_parts = cls._split_sae_key(sae_key)
+        if not suffix_parts:
+            return f"{hook}/{metric_name}"
+        suffix = "_".join(suffix_parts)
+        return f"{hook}/{metric_name}_{suffix}"
+
+    @classmethod
+    def _metrics_logger_key(cls, sae_key: str, metric_name: str) -> str:
+        """Metrics logger keeps unique per-SAE keys inside one local JSONL."""
+        return f"{sae_key}/{metric_name}"
+
+    @classmethod
+    def _wandb_run_key(cls, sae_key: str) -> str:
+        _, k_bucket, _ = cls._split_sae_key(sae_key)
+        return k_bucket or "default"
+
     def __init__(
         self,
         cfg: TrainConfig,
@@ -78,6 +108,11 @@ class Trainer(CheckpointMixin):
         self.resume_from = resume_from
 
         logger.info(f"Training on modules: {cfg.hookpoints}")
+        independent_ks = cfg.all_ks()
+        if len(independent_ks) > 1:
+            logger.info(
+                f"Independent multi-K training enabled: {independent_ks}"
+            )
 
         # Detect maximum layer index for partial forward optimization
         layers_name, _ = get_layer_list(model)
@@ -92,51 +127,62 @@ class Trainer(CheckpointMixin):
             logger.info(f"Tiled mode: splitting input into {cfg.num_tiles} tiles")
 
         self.saes = {}
+        self._independent_ks = independent_ks
         for hook in cfg.hookpoints:
-            for seed in cfg.init_seeds:
-                torch.manual_seed(seed)
-                name = f"{hook}/seed{seed}" if len(cfg.init_seeds) > 1 else hook
+            for k in independent_ks:
+                sae_cfg = replace(cfg.sae, k=k)
+                for seed in cfg.init_seeds:
+                    torch.manual_seed(seed)
+                    name_parts = [hook]
+                    if len(independent_ks) > 1:
+                        name_parts.append(f"k{k}")
+                    if len(cfg.init_seeds) > 1:
+                        name_parts.append(f"seed{seed}")
+                    name = "/".join(name_parts)
 
-                if cfg.num_tiles > 1:
-                    self.saes[name] = TiledSparseCoder(
-                        input_widths[hook],
-                        cfg.sae,
-                        cfg.num_tiles,
-                        device,
-                        dtype=torch.float32,
-                        global_topk=cfg.global_topk,
-                        input_mixing=cfg.input_mixing,
-                    )
-                else:
-                    sae_cls = _get_sae_class(cfg.sae.architecture)
-                    self.saes[name] = sae_cls(
-                        input_widths[hook],
-                        cfg.sae,
-                        device,
-                        dtype=torch.float32,
-                    )
+                    if cfg.num_tiles > 1:
+                        self.saes[name] = TiledSparseCoder(
+                            input_widths[hook],
+                            sae_cfg,
+                            cfg.num_tiles,
+                            device,
+                            dtype=torch.float32,
+                            global_topk=cfg.global_topk,
+                            input_mixing=cfg.input_mixing,
+                        )
+                    else:
+                        sae_cls = _get_sae_class(sae_cfg.architecture)
+                        self.saes[name] = sae_cls(
+                            input_widths[hook],
+                            sae_cfg,
+                            device,
+                            dtype=torch.float32,
+                        )
 
         assert isinstance(dataset, Sized)
 
-        # Optimizer with configurable backend and get_param_groups interface
-        pgs = []
+        # Keep independent K variants in separate optimizers so their updates
+        # remain equivalent to standalone training runs that share only activations.
+        self.optimizers = []
+        lrs = set()
         for sae in self.saes.values():
             base_lr = cfg.lr or 5e-3 / (sae.num_latents / (2**14)) ** 0.5
-            pgs.extend(sae.get_param_groups(base_lr))
-        lrs = [f"{lr:.2e}" for lr in sorted(set(pg["lr"] for pg in pgs))]
+            pgs = sae.get_param_groups(base_lr)
+            lrs.update(pg["lr"] for pg in pgs)
 
-        if cfg.optimizer == "adam":
-            # The reference ScheduleFree wrapper stores its own per-parameter
-            # state entries before delegating to the base optimizer. Adam
-            # interprets that as an already-initialized state dict and then
-            # crashes because exp_avg / exp_avg_sq were never created.
-            opt = torch.optim.Adam(pgs)
-        else:
-            # signum (default)
-            base_opt = SignSGD(pgs)
-            opt = ScheduleFreeWrapperReference(base_opt, momentum=0.95)
-            opt.train()
-        self.optimizers = [opt]
+            if cfg.optimizer == "adam":
+                # The reference ScheduleFree wrapper stores its own per-parameter
+                # state entries before delegating to the base optimizer. Adam
+                # interprets that as an already-initialized state dict and then
+                # crashes because exp_avg / exp_avg_sq were never created.
+                opt = torch.optim.Adam(pgs)
+            else:
+                # signum (default)
+                base_opt = SignSGD(pgs)
+                opt = ScheduleFreeWrapperReference(base_opt, momentum=0.95)
+                opt.train()
+            self.optimizers.append(opt)
+        lrs = [f"{lr:.2e}" for lr in sorted(lrs)]
 
         logger.info(
             f"Learning rate{'s' if len(lrs) > 1 else ''}: {', '.join(lrs)}"
@@ -198,13 +244,19 @@ class Trainer(CheckpointMixin):
             world_size = dist.get_world_size() if dist.is_initialized() else 1
             base_name = self.cfg.run_name or "unnamed"
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            k_values = self.cfg.all_ks()
+            k_tag = (
+                "k" + "-".join(str(k) for k in k_values)
+                if len(k_values) > 1
+                else f"k{self.cfg.sae.k}"
+            )
             self.full_run_name = (
                 f"{base_name}_dp{world_size}_bs{self.cfg.batch_size}"
                 f"_ga{self.cfg.grad_acc_steps}_ef{self.cfg.sae.expansion_factor}"
-                f"_k{self.cfg.sae.k}_{timestamp}"
+                f"_{k_tag}_{timestamp}"
             )
 
-        wandb = None
+        wandb_runs: dict[str, object] = {}
         if self.cfg.log_to_wandb:
             try:
                 import wandb as _wandb
@@ -223,18 +275,41 @@ class Trainer(CheckpointMixin):
                         self.cfg.wandb_project
                         or os.environ.get("WANDB_PROJECT", "sparsify")
                     )
-                    _wandb.init(
-                        entity=os.environ.get("WANDB_ENTITY", None),
-                        name=self.full_run_name,
-                        project=project_name,
-                        config=asdict(self.cfg),
-                        save_code=True,
-                    )
-                    wandb = _wandb
+                    if len(self._independent_ks) > 1:
+                        for idx, k in enumerate(self._independent_ks):
+                            run_config = asdict(self.cfg)
+                            run_config["sae"]["k"] = k
+                            run_config["multi_ks"] = []
+                            run_config["joint_multi_ks"] = list(self._independent_ks)
+                            run = _wandb.init(
+                                entity=os.environ.get("WANDB_ENTITY", None),
+                                name=f"{self.full_run_name}_k{k}",
+                                group=self.full_run_name,
+                                project=project_name,
+                                config=run_config,
+                                save_code=(idx == 0),
+                                reinit="create_new",
+                            )
+                            wandb_runs[f"k{k}"] = run
+                    else:
+                        run = _wandb.init(
+                            entity=os.environ.get("WANDB_ENTITY", None),
+                            name=self.full_run_name,
+                            project=project_name,
+                            config=asdict(self.cfg),
+                            save_code=True,
+                        )
+                        wandb_runs["default"] = run
                 except Exception:
                     logger.warning(
                         "wandb.init() failed, skipping logging."
                     )
+                    for run in wandb_runs.values():
+                        try:
+                            run.finish()
+                        except Exception:
+                            pass
+                    wandb_runs.clear()
                     self.cfg.log_to_wandb = False
 
             # Sync log_to_wandb across ranks so all_reduce calls stay consistent
@@ -245,6 +320,13 @@ class Trainer(CheckpointMixin):
                 )
                 dist.broadcast(flag, src=0)
                 self.cfg.log_to_wandb = bool(flag.item())
+
+        def finish_wandb_runs():
+            for run in wandb_runs.values():
+                try:
+                    run.finish()
+                except Exception:
+                    pass
 
         # Initialize MetricsLogger for structured local result saving
         metrics_logger = None
@@ -766,6 +848,7 @@ class Trainer(CheckpointMixin):
                                 }
                             )
                             metrics_logger.close()
+                        finish_wandb_runs()
                         if dist.is_initialized():
                             dist.destroy_process_group()
                         return
@@ -802,6 +885,11 @@ class Trainer(CheckpointMixin):
                         )
 
                         info = {}
+                        wandb_payloads = (
+                            {key: {} for key in wandb_runs}
+                            if self.cfg.log_to_wandb and wandb_runs
+                            else {}
+                        )
 
                         # Timing metrics
                         if timing_step_count > 0:
@@ -814,6 +902,8 @@ class Trainer(CheckpointMixin):
                             info["timing/forward_time"] = float(
                                 self.maybe_all_reduce(forward_time_tensor)
                             )
+                            for payload in wandb_payloads.values():
+                                payload["timing/forward_time"] = info["timing/forward_time"]
 
                             if total_metrics_time > 0:
                                 avg_metrics_time = (
@@ -825,41 +915,65 @@ class Trainer(CheckpointMixin):
                                 info["timing/metrics_time"] = float(
                                     self.maybe_all_reduce(metrics_time_tensor)
                                 )
+                                for payload in wandb_payloads.values():
+                                    payload["timing/metrics_time"] = info["timing/metrics_time"]
 
                         for name in self.saes:
                             raw = self.saes[name]
+                            run_key = self._wandb_run_key(name)
+                            wandb_info = wandb_payloads.get(run_key)
                             mask = (
                                 self.num_tokens_since_fired[name]
                                 > self.cfg.dead_feature_threshold
                             )
-                            info[f"{name}/dead_pct"] = mask.float().mean().item()
+                            dead_pct = mask.float().mean().item()
+                            info[self._metrics_logger_key(name, "dead_pct")] = dead_pct
+                            if wandb_info is not None:
+                                wandb_info[self._wandb_metric_key(name, "dead_pct")] = dead_pct
                             for metric_name, metric_slice in raw.dead_metric_slices().items():
                                 metric_mask = mask[metric_slice]
-                                info[f"{name}/{metric_name}"] = (
+                                metric_value = (
                                     metric_mask.float().mean().item()
                                     if metric_mask.numel() > 0
                                     else 0.0
                                 )
-                            info[f"{name}/fvu"] = reduced_fvu.get(name, 0.0)
+                                info[self._metrics_logger_key(name, metric_name)] = metric_value
+                                if wandb_info is not None:
+                                    wandb_info[self._wandb_metric_key(name, metric_name)] = metric_value
+                            fvu_value = reduced_fvu.get(name, 0.0)
+                            info[self._metrics_logger_key(name, "fvu")] = fvu_value
+                            if wandb_info is not None:
+                                wandb_info[self._wandb_metric_key(name, "fvu")] = fvu_value
 
                             if self.cfg.auxk_alpha > 0:
-                                info[f"{name}/auxk"] = reduced_auxk.get(
-                                    name, 0.0
-                                )
+                                auxk_value = reduced_auxk.get(name, 0.0)
+                                info[self._metrics_logger_key(name, "auxk")] = auxk_value
+                                if wandb_info is not None:
+                                    wandb_info[self._wandb_metric_key(name, "auxk")] = auxk_value
 
                             if name in reduced_monitoring:
                                 for metric_name, val in reduced_monitoring[name].items():
-                                    info[f"{name}/{metric_name}"] = val
+                                    info[self._metrics_logger_key(name, metric_name)] = val
+                                    if wandb_info is not None:
+                                        wandb_info[self._wandb_metric_key(name, metric_name)] = val
 
                             # Exceed metrics
                             if name in reduced_exceed:
                                 for alpha, val in reduced_exceed[name].items():
-                                    info[f"{name}/exceed_alpha_{alpha:.2f}"] = val
+                                    metric_name = f"exceed_alpha_{alpha:.2f}"
+                                    info[self._metrics_logger_key(name, metric_name)] = val
+                                    if wandb_info is not None:
+                                        wandb_info[self._wandb_metric_key(name, metric_name)] = val
 
                         if rank_zero:
                             info["_step"] = step
-                            if wandb is not None:
-                                wandb.log(info, step=self.total_tokens)
+                            for payload in wandb_payloads.values():
+                                payload["_step"] = step
+                            for run_key, payload in wandb_payloads.items():
+                                if payload:
+                                    wandb_runs[run_key].log(
+                                        payload, step=self.total_tokens
+                                    )
                             if metrics_logger is not None:
                                 metrics_logger.log_step(
                                     step, self.total_tokens, info
@@ -894,6 +1008,7 @@ class Trainer(CheckpointMixin):
                 }
             )
             metrics_logger.close()
+        finish_wandb_runs()
 
         pbar.close()
 

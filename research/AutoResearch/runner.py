@@ -645,6 +645,7 @@ def _build_env(
         "GATED_INIT_LOGIT": ("gated_init_logit", float),
         "ORTHO_LAMBDA": ("ortho_lambda", float),
         "RESIDUAL_FROM": ("residual_from", str),
+        "MULTI_KS": ("multi_ks", lambda x: [int(v) for v in x.split(",") if v]),
         "MATRYOSHKA_KS": ("matryoshka_ks", lambda x: [int(v) for v in x.split(",") if v]),
         "MATRYOSHKA_WEIGHTS": ("matryoshka_weights", lambda x: [float(v) for v in x.split(",") if v]),
         "NUM_EXPERTS": ("num_experts", int),

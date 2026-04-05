@@ -179,6 +179,11 @@ class TrainConfig(Serializable):
     optimizer: str = "signum"
     """Optimizer: 'signum' | 'adam'."""
 
+    # Independent multi-K training
+    multi_ks: list[int] = list_field()
+    """Additional independent K values to train alongside `sae.k`.
+    Each K spawns a separate SAE with its own parameters and optimizer state."""
+
     # Matryoshka multi-K training
     matryoshka_ks: list[int] = list_field()
     """List of K values for Matryoshka multi-K loss. Empty = disabled."""
@@ -197,6 +202,10 @@ class TrainConfig(Serializable):
     # Local metrics saving
     save_metrics_jsonl: bool = True
     """Save per-step metrics to JSONL file alongside W&B."""
+
+    def all_ks(self) -> list[int]:
+        """Return the sorted list of independently trained K values."""
+        return sorted({int(self.sae.k), *(int(k) for k in self.multi_ks)})
 
     def __post_init__(self):
         """Validate the configuration."""
@@ -376,12 +385,25 @@ class TrainConfig(Serializable):
                 f"Unknown optimizer: {self.optimizer!r}. Must be one of {valid_opts}"
             )
 
+        normalized_multi_ks: list[int] = []
+        for mk in self.multi_ks:
+            if mk <= 0:
+                raise ValueError(
+                    f"Each multi_k must be positive, got {mk}"
+                )
+            if mk == self.sae.k or mk in normalized_multi_ks:
+                continue
+            normalized_multi_ks.append(int(mk))
+        self.multi_ks = sorted(normalized_multi_ks)
+
         # Matryoshka validation
+        max_matryoshka_k = min(self.all_ks())
         if self.matryoshka_ks:
             for mk in self.matryoshka_ks:
-                if mk <= 0 or mk > self.sae.k:
+                if mk <= 0 or mk > max_matryoshka_k:
                     raise ValueError(
-                        f"Each matryoshka K must be in (0, sae.k={self.sae.k}], got {mk}"
+                        "Each matryoshka K must be in "
+                        f"(0, min(all_ks)={max_matryoshka_k}], got {mk}"
                     )
         if self.matryoshka_ks and self.matryoshka_weights:
             if len(self.matryoshka_ks) != len(self.matryoshka_weights):
