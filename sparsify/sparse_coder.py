@@ -1348,7 +1348,8 @@ def _finalize_routed_expert_acts(
     num_latents: int,
     *,
     index_offset: int = 0,
-) -> tuple[Tensor, Tensor, Tensor]:
+    return_full: bool = True,
+) -> tuple[Tensor, Tensor, Tensor | None]:
     flat_acts = acts.reshape(acts.shape[0], -1)
     top_acts, top_pos = torch.topk(flat_acts, total_k, dim=-1, sorted=False)
 
@@ -1360,9 +1361,119 @@ def _finalize_routed_expert_acts(
     ).reshape(acts.shape[0], -1)
     top_indices = flat_indices.gather(1, top_pos) + index_offset
 
-    full_acts = acts.new_zeros(acts.shape[0], num_latents)
-    full_acts.scatter_(1, flat_indices, flat_acts)
+    full_acts = None
+    if return_full:
+        full_acts = acts.new_zeros(acts.shape[0], num_latents)
+        full_acts.scatter_(1, flat_indices, flat_acts)
     return top_acts, top_indices, full_acts
+
+
+def _dense_candidate_pairs(acts: Tensor, *, index_offset: int = 0) -> tuple[Tensor, Tensor]:
+    flat_acts = acts.reshape(acts.shape[0], -1)
+    flat_indices = torch.arange(
+        flat_acts.shape[-1], device=acts.device, dtype=torch.long
+    ).view(1, -1).expand(flat_acts.shape[0], -1)
+    if index_offset:
+        flat_indices = flat_indices + index_offset
+    return flat_acts, flat_indices
+
+
+def _routed_candidate_pairs(
+    acts: Tensor,
+    selected_expert_idx: Tensor,
+    latents_per_expert: int,
+    *,
+    index_offset: int = 0,
+) -> tuple[Tensor, Tensor]:
+    flat_acts = acts.reshape(acts.shape[0], -1)
+    local_offsets = torch.arange(
+        latents_per_expert, device=acts.device, dtype=torch.long
+    ).view(1, 1, latents_per_expert)
+    flat_indices = (
+        selected_expert_idx.long().unsqueeze(-1) * latents_per_expert + local_offsets
+    ).reshape(acts.shape[0], -1)
+    if index_offset:
+        flat_indices = flat_indices + index_offset
+    return flat_acts, flat_indices
+
+
+def _compact_dead_latent_topk(
+    dead_mask: Tensor,
+    candidate_pairs: list[tuple[Tensor, Tensor]],
+    k_aux: int,
+) -> tuple[Tensor, Tensor]:
+    """Top-k over dead latents without materializing the full latent vector.
+
+    Candidate activations are assumed to already cover every nonzero path.
+    Dead latents that are not in the candidate set implicitly have zero
+    activation; padding with zero-weight indices preserves the decoded result.
+    """
+    first_acts = candidate_pairs[0][0]
+    batch_size = first_acts.shape[0]
+    dead_positions = dead_mask.nonzero(as_tuple=False).flatten()
+    if dead_positions.numel() == 0 or k_aux <= 0:
+        empty_acts = first_acts.new_zeros((batch_size, 0))
+        empty_indices = torch.empty(
+            (batch_size, 0), device=first_acts.device, dtype=torch.long
+        )
+        return empty_acts, empty_indices
+
+    filtered_acts: list[Tensor] = []
+    filtered_indices: list[Tensor] = []
+    for acts, indices in candidate_pairs:
+        flat_acts = acts.reshape(acts.shape[0], -1)
+        flat_indices = indices.reshape(indices.shape[0], -1).long()
+        is_dead = dead_mask[flat_indices]
+        if not bool(is_dead.any()):
+            continue
+        filtered_acts.append(torch.where(is_dead, flat_acts, flat_acts.new_zeros(())))
+        filtered_indices.append(flat_indices)
+
+    if filtered_acts:
+        all_acts = torch.cat(filtered_acts, dim=-1)
+        all_indices = torch.cat(filtered_indices, dim=-1)
+        take = min(k_aux, all_acts.shape[-1])
+        top_acts, top_pos = torch.topk(all_acts, take, dim=-1, sorted=False)
+        top_indices = all_indices.gather(1, top_pos)
+    else:
+        take = 0
+        top_acts = first_acts.new_zeros((batch_size, 0))
+        top_indices = torch.empty(
+            (batch_size, 0), device=first_acts.device, dtype=torch.long
+        )
+
+    if take < k_aux:
+        pad = k_aux - take
+        fill_index = int(dead_positions[0].item())
+        pad_acts = top_acts.new_zeros((batch_size, pad))
+        pad_indices = torch.full(
+            (batch_size, pad),
+            fill_index,
+            device=top_acts.device,
+            dtype=torch.long,
+        )
+        top_acts = torch.cat((top_acts, pad_acts), dim=-1)
+        top_indices = torch.cat((top_indices, pad_indices), dim=-1)
+    return top_acts, top_indices
+
+
+def _recommended_auxk_width(
+    y: Tensor,
+    num_dead: int,
+    active_k: int,
+    *,
+    min_auxk: int = 64,
+    max_active_k_multiplier: int = 4,
+) -> tuple[int, float]:
+    """Cap AuxK width so low-K runs don't pay a dense-like decode cost."""
+    target_k = min(
+        y.shape[-1] // 2,
+        max(min_auxk, active_k * max_active_k_multiplier),
+    )
+    if target_k <= 0 or num_dead <= 0:
+        return 0, 0.0
+    scale = min(num_dead / target_k, 1.0)
+    return min(target_k, num_dead), scale
 
 
 class ExpertTopKSparseCoder(SparseCoder):
@@ -2301,8 +2412,8 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
         return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
 
     def _encode_shared_stage(
-        self, x_centered: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        self, x_centered: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         original_shape = x_centered.shape[:-1]
         flat_x = x_centered.reshape(-1, self.d_in)
         shared_pre_acts = (
@@ -2315,16 +2426,46 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
             shared_acts, self.stage1_k, dim=-1, sorted=False
         )
         target_shape = (*original_shape, self.stage1_k)
-        acts_shape = (*original_shape, self.shared_num_latents)
+        full_acts = None
+        if return_full:
+            acts_shape = (*original_shape, self.shared_num_latents)
+            full_acts = shared_acts.reshape(acts_shape)
         return (
             top_acts.reshape(target_shape),
             top_indices.reshape(target_shape),
-            shared_acts.reshape(acts_shape),
+            full_acts,
         )
 
     def _encode_expert_stage(
+        self, residual: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        original_shape, acts, selected_expert_idx = self._expert_stage_candidates(
+            residual
+        )
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage2_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+            return_full=return_full,
+        )
+
+        target_shape = (*original_shape, self.stage2_k)
+        if return_full:
+            assert full_acts is not None
+            acts_shape = (*original_shape, self.expert_num_latents)
+            full_acts = full_acts.reshape(acts_shape)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts,
+        )
+
+    def _expert_stage_candidates(
         self, residual: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[tuple[int, ...], Tensor, Tensor]:
         original_shape = residual.shape[:-1]
         flat_x = residual.reshape(-1, self.d_in)
 
@@ -2336,22 +2477,7 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
         selected_bias = self.expert_encoder_bias[selected_expert_idx]
         pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
         acts = F.relu(pre_acts) * selected_probs.unsqueeze(-1)
-        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
-            acts,
-            selected_expert_idx,
-            self.stage2_k,
-            self.latents_per_expert,
-            self.expert_num_latents,
-            index_offset=self.shared_num_latents,
-        )
-
-        target_shape = (*original_shape, self.stage2_k)
-        acts_shape = (*original_shape, self.expert_num_latents)
-        return (
-            top_acts.reshape(target_shape),
-            top_indices.reshape(target_shape),
-            full_acts.reshape(acts_shape),
-        )
+        return original_shape, acts, selected_expert_idx
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x_centered = x - self.b_dec
@@ -2375,22 +2501,46 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
         x_centered = x - self.b_dec
+        num_dead = int(dead_mask.sum()) if dead_mask is not None else 0
         stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
-            x_centered
+            x_centered,
+            return_full=num_dead > 0,
         )
         stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
 
         residual = x_centered - stage1_out
-        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
-            residual
-        )
+        stage2_candidates = None
+        if num_dead > 0:
+            original_shape, stage2_candidate_acts, selected_expert_idx = (
+                self._expert_stage_candidates(residual)
+            )
+            stage2_top_acts, stage2_indices, _ = _finalize_routed_expert_acts(
+                stage2_candidate_acts,
+                selected_expert_idx,
+                self.stage2_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2_acts = stage2_top_acts.reshape((*original_shape, self.stage2_k))
+            stage2_indices = stage2_indices.reshape((*original_shape, self.stage2_k))
+            stage2_candidates = _routed_candidate_pairs(
+                stage2_candidate_acts,
+                selected_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2_acts, stage2_indices, _ = self._encode_expert_stage(
+                residual,
+                return_full=False,
+            )
 
         combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
         combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
-        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
-
-        sparse_out = self._decode_sparse(combined_acts, combined_indices)
-        sae_out = sparse_out + self.b_dec
+        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
+        sae_out = stage1_out + stage2_out + self.b_dec
 
         if y is None:
             y = x
@@ -2398,12 +2548,21 @@ class SharedTwoStageResidualExpertSparseCoder(SparseCoder):
         e = y - sae_out
         total_variance = (y - y.mean(0)).pow(2).sum()
 
-        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
-            k_aux = y.shape[-1] // 2
-            scale = min(num_dead / k_aux, 1.0)
-            k_aux = min(k_aux, num_dead)
-            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
-            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+        if num_dead > 0:
+            assert stage1_full is not None and stage2_candidates is not None
+            k_aux, scale = _recommended_auxk_width(
+                y,
+                num_dead,
+                combined_indices.shape[-1],
+            )
+            auxk_acts, auxk_indices = _compact_dead_latent_topk(
+                dead_mask,
+                [
+                    _dense_candidate_pairs(stage1_full),
+                    stage2_candidates,
+                ],
+                k_aux,
+            )
             e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
@@ -2578,8 +2737,8 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
 
     def _encode_shared_stage(
-        self, x_centered: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        self, x_centered: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         original_shape = x_centered.shape[:-1]
         flat_x = x_centered.reshape(-1, self.d_in)
         shared_pre_acts = (
@@ -2592,16 +2751,46 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             shared_acts, self.stage1_k, dim=-1, sorted=False
         )
         target_shape = (*original_shape, self.stage1_k)
-        acts_shape = (*original_shape, self.shared_num_latents)
+        full_acts = None
+        if return_full:
+            acts_shape = (*original_shape, self.shared_num_latents)
+            full_acts = shared_acts.reshape(acts_shape)
         return (
             top_acts.reshape(target_shape),
             top_indices.reshape(target_shape),
-            shared_acts.reshape(acts_shape),
+            full_acts,
         )
 
     def _encode_expert_stage(
+        self, residual: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        original_shape, acts, selected_expert_idx = self._expert_stage_candidates(
+            residual
+        )
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            selected_expert_idx,
+            self.stage2_k,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+            return_full=return_full,
+        )
+
+        target_shape = (*original_shape, self.stage2_k)
+        if return_full:
+            assert full_acts is not None
+            acts_shape = (*original_shape, self.expert_num_latents)
+            full_acts = full_acts.reshape(acts_shape)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts,
+        )
+
+    def _expert_stage_candidates(
         self, residual: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[tuple[int, ...], Tensor, Tensor]:
         original_shape = residual.shape[:-1]
         flat_x = residual.reshape(-1, self.d_in)
 
@@ -2623,22 +2812,7 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
         )
         acts = positive * gate * selected_probs.unsqueeze(-1)
-        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
-            acts,
-            selected_expert_idx,
-            self.stage2_k,
-            self.latents_per_expert,
-            self.expert_num_latents,
-            index_offset=self.shared_num_latents,
-        )
-
-        target_shape = (*original_shape, self.stage2_k)
-        acts_shape = (*original_shape, self.expert_num_latents)
-        return (
-            top_acts.reshape(target_shape),
-            top_indices.reshape(target_shape),
-            full_acts.reshape(acts_shape),
-        )
+        return original_shape, acts, selected_expert_idx
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x_centered = x - self.b_dec
@@ -2662,22 +2836,46 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
         x_centered = x - self.b_dec
+        num_dead = int(dead_mask.sum()) if dead_mask is not None else 0
         stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
-            x_centered
+            x_centered,
+            return_full=num_dead > 0,
         )
         stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
 
         residual = x_centered - stage1_out
-        stage2_acts, stage2_indices, stage2_full = self._encode_expert_stage(
-            residual
-        )
+        stage2_candidates = None
+        if num_dead > 0:
+            original_shape, stage2_candidate_acts, selected_expert_idx = (
+                self._expert_stage_candidates(residual)
+            )
+            stage2_top_acts, stage2_indices, _ = _finalize_routed_expert_acts(
+                stage2_candidate_acts,
+                selected_expert_idx,
+                self.stage2_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2_acts = stage2_top_acts.reshape((*original_shape, self.stage2_k))
+            stage2_indices = stage2_indices.reshape((*original_shape, self.stage2_k))
+            stage2_candidates = _routed_candidate_pairs(
+                stage2_candidate_acts,
+                selected_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2_acts, stage2_indices, _ = self._encode_expert_stage(
+                residual,
+                return_full=False,
+            )
 
         combined_acts = torch.cat((stage1_acts, stage2_acts), dim=-1)
         combined_indices = torch.cat((stage1_indices, stage2_indices), dim=-1)
-        combined_full = torch.cat((stage1_full, stage2_full), dim=-1)
-
-        sparse_out = self._decode_sparse(combined_acts, combined_indices)
-        sae_out = sparse_out + self.b_dec
+        stage2_out = self._decode_sparse(stage2_acts, stage2_indices)
+        sae_out = stage1_out + stage2_out + self.b_dec
 
         if y is None:
             y = x
@@ -2685,12 +2883,21 @@ class SharedProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         e = y - sae_out
         total_variance = (y - y.mean(0)).pow(2).sum()
 
-        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
-            k_aux = y.shape[-1] // 2
-            scale = min(num_dead / k_aux, 1.0)
-            k_aux = min(k_aux, num_dead)
-            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
-            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+        if num_dead > 0:
+            assert stage1_full is not None and stage2_candidates is not None
+            k_aux, scale = _recommended_auxk_width(
+                y,
+                num_dead,
+                combined_indices.shape[-1],
+            )
+            auxk_acts, auxk_indices = _compact_dead_latent_topk(
+                dead_mask,
+                [
+                    _dense_candidate_pairs(stage1_full),
+                    stage2_candidates,
+                ],
+                k_aux,
+            )
             e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
@@ -2714,9 +2921,9 @@ class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
 ):
     """Shared coarse branch plus adaptive 1-or-2 PK-routed expert cleanup."""
 
-    def _encode_expert_stage(
+    def _expert_stage_candidates(
         self, residual: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[tuple[int, ...], Tensor, Tensor]:
         original_shape = residual.shape[:-1]
         flat_x = residual.reshape(-1, self.d_in)
 
@@ -2738,22 +2945,7 @@ class SharedAdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
             (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
         )
         acts = positive * gate * selected_probs.unsqueeze(-1)
-        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
-            acts,
-            selected_expert_idx,
-            self.stage2_k,
-            self.latents_per_expert,
-            self.expert_num_latents,
-            index_offset=self.shared_num_latents,
-        )
-
-        target_shape = (*original_shape, self.stage2_k)
-        acts_shape = (*original_shape, self.expert_num_latents)
-        return (
-            top_acts.reshape(target_shape),
-            top_indices.reshape(target_shape),
-            full_acts.reshape(acts_shape),
-        )
+        return original_shape, acts, selected_expert_idx
 
 
 class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
@@ -2816,7 +3008,43 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
         *,
         slot: int,
         topk: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        return_full: bool = True,
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        original_shape, acts, expert_idx = self._ordered_expert_stage_candidates(
+            residual,
+            selected_expert_idx,
+            selected_probs,
+            slot=slot,
+        )
+        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
+            acts,
+            expert_idx,
+            topk,
+            self.latents_per_expert,
+            self.expert_num_latents,
+            index_offset=self.shared_num_latents,
+            return_full=return_full,
+        )
+
+        target_shape = (*original_shape, topk)
+        if return_full:
+            assert full_acts is not None
+            acts_shape = (*original_shape, self.expert_num_latents)
+            full_acts = full_acts.reshape(acts_shape)
+        return (
+            top_acts.reshape(target_shape),
+            top_indices.reshape(target_shape),
+            full_acts,
+        )
+
+    def _ordered_expert_stage_candidates(
+        self,
+        residual: Tensor,
+        selected_expert_idx: Tensor,
+        selected_probs: Tensor,
+        *,
+        slot: int,
+    ) -> tuple[tuple[int, ...], Tensor, Tensor]:
         original_shape = residual.shape[:-1]
         flat_x = residual.reshape(-1, self.d_in)
 
@@ -2831,28 +3059,14 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
             (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
         )
         acts = positive * gate * expert_prob.unsqueeze(-1)
-        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
-            acts,
-            expert_idx,
-            topk,
-            self.latents_per_expert,
-            self.expert_num_latents,
-            index_offset=self.shared_num_latents,
-        )
-
-        target_shape = (*original_shape, topk)
-        acts_shape = (*original_shape, self.expert_num_latents)
-        return (
-            top_acts.reshape(target_shape),
-            top_indices.reshape(target_shape),
-            full_acts.reshape(acts_shape),
-        )
+        return original_shape, acts, expert_idx
 
     def _encode_cascade(
-        self, x_centered: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        self, x_centered: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
-            x_centered
+            x_centered,
+            return_full=return_full,
         )
         stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
 
@@ -2865,6 +3079,7 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
             selected_probs,
             slot=0,
             topk=self.stage2a_k,
+            return_full=return_full,
         )
         stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
 
@@ -2876,13 +3091,23 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
             selected_probs,
             slot=1,
             topk=self.stage2b_k,
+            return_full=return_full,
         )
 
         combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
         combined_indices = torch.cat(
             (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
         )
-        combined_full = torch.cat((stage1_full, stage2a_full + stage2b_full), dim=-1)
+        combined_full = None
+        if return_full:
+            assert (
+                stage1_full is not None
+                and stage2a_full is not None
+                and stage2b_full is not None
+            )
+            combined_full = torch.cat(
+                (stage1_full, stage2a_full + stage2b_full), dim=-1
+            )
         return combined_acts, combined_indices, combined_full
 
     def encode(self, x: Tensor) -> EncoderOutput:
@@ -2892,17 +3117,126 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
         )
         return EncoderOutput(combined_acts, combined_indices, combined_full)
 
+    def _forward_cascade_state(
+        self, x_centered: Tensor, *, need_aux_candidates: bool = False
+    ) -> tuple[Tensor, Tensor, Tensor, list[tuple[Tensor, Tensor]] | None]:
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered,
+            return_full=need_aux_candidates,
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual = x_centered - stage1_out
+        selected_expert_idx, selected_probs = self._select_ordered_expert_pair(residual)
+
+        stage2a_candidates = None
+        if need_aux_candidates:
+            original_shape, stage2a_candidate_acts, stage2a_expert_idx = (
+                self._ordered_expert_stage_candidates(
+                    residual,
+                    selected_expert_idx,
+                    selected_probs,
+                    slot=0,
+                )
+            )
+            stage2a_top_acts, stage2a_indices, _ = _finalize_routed_expert_acts(
+                stage2a_candidate_acts,
+                stage2a_expert_idx,
+                self.stage2a_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2a_acts = stage2a_top_acts.reshape((*original_shape, self.stage2a_k))
+            stage2a_indices = stage2a_indices.reshape((*original_shape, self.stage2a_k))
+            stage2a_candidates = _routed_candidate_pairs(
+                stage2a_candidate_acts,
+                stage2a_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2a_acts, stage2a_indices, _ = self._encode_ordered_expert_stage(
+                residual,
+                selected_expert_idx,
+                selected_probs,
+                slot=0,
+                topk=self.stage2a_k,
+                return_full=False,
+            )
+        stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
+
+        residual_2 = residual - stage2a_out
+        stage2b_candidates = None
+        if need_aux_candidates:
+            original_shape, stage2b_candidate_acts, stage2b_expert_idx = (
+                self._ordered_expert_stage_candidates(
+                    residual_2,
+                    selected_expert_idx,
+                    selected_probs,
+                    slot=1,
+                )
+            )
+            stage2b_top_acts, stage2b_indices, _ = _finalize_routed_expert_acts(
+                stage2b_candidate_acts,
+                stage2b_expert_idx,
+                self.stage2b_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2b_acts = stage2b_top_acts.reshape((*original_shape, self.stage2b_k))
+            stage2b_indices = stage2b_indices.reshape((*original_shape, self.stage2b_k))
+            stage2b_candidates = _routed_candidate_pairs(
+                stage2b_candidate_acts,
+                stage2b_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2b_acts, stage2b_indices, _ = self._encode_ordered_expert_stage(
+                residual_2,
+                selected_expert_idx,
+                selected_probs,
+                slot=1,
+                topk=self.stage2b_k,
+                return_full=False,
+            )
+        stage2b_out = self._decode_sparse(stage2b_acts, stage2b_indices)
+
+        combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
+        )
+        candidate_pairs = None
+        if need_aux_candidates:
+            assert (
+                stage1_full is not None
+                and stage2a_candidates is not None
+                and stage2b_candidates is not None
+            )
+            candidate_pairs = [
+                _dense_candidate_pairs(stage1_full),
+                stage2a_candidates,
+                stage2b_candidates,
+            ]
+        sparse_sum = stage1_out + stage2a_out + stage2b_out
+        return combined_acts, combined_indices, sparse_sum, candidate_pairs
+
     @device_autocast
     def forward(
         self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
     ) -> ForwardOutput:
         x_centered = x - self.b_dec
-        combined_acts, combined_indices, combined_full = self._encode_cascade(
-            x_centered
+        num_dead = int(dead_mask.sum()) if dead_mask is not None else 0
+        combined_acts, combined_indices, sparse_sum, candidate_pairs = self._forward_cascade_state(
+            x_centered,
+            need_aux_candidates=num_dead > 0,
         )
 
-        sparse_out = self._decode_sparse(combined_acts, combined_indices)
-        sae_out = sparse_out + self.b_dec
+        sae_out = sparse_sum + self.b_dec
 
         if y is None:
             y = x
@@ -2910,12 +3244,18 @@ class SharedCascadeProductKeyExpertJumpReLUSparseCoder(
         e = y - sae_out
         total_variance = (y - y.mean(0)).pow(2).sum()
 
-        if dead_mask is not None and (num_dead := int(dead_mask.sum())) > 0:
-            k_aux = y.shape[-1] // 2
-            scale = min(num_dead / k_aux, 1.0)
-            k_aux = min(k_aux, num_dead)
-            auxk_latents = torch.where(dead_mask[None], combined_full, -torch.inf)
-            auxk_acts, auxk_indices = auxk_latents.topk(k_aux, sorted=False)
+        if num_dead > 0:
+            assert candidate_pairs is not None
+            k_aux, scale = _recommended_auxk_width(
+                y,
+                num_dead,
+                combined_indices.shape[-1],
+            )
+            auxk_acts, auxk_indices = _compact_dead_latent_topk(
+                dead_mask,
+                candidate_pairs,
+                k_aux,
+            )
             e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
@@ -2942,10 +3282,11 @@ class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
     architecture_name = "shared_conditional_cascade_product_key_expert_jumprelu"
 
     def _encode_cascade(
-        self, x_centered: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor]:
+        self, x_centered: Tensor, *, return_full: bool = True
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
         stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
-            x_centered
+            x_centered,
+            return_full=return_full,
         )
         stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
 
@@ -2962,6 +3303,7 @@ class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
             single_expert_probs,
             slot=0,
             topk=self.stage2a_k,
+            return_full=False,
         )
         probe_stage2a_out = self._decode_sparse(
             probe_stage2a_acts, probe_stage2a_indices
@@ -2995,6 +3337,7 @@ class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
             final_probs,
             slot=0,
             topk=self.stage2a_k,
+            return_full=return_full,
         )
         stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
 
@@ -3005,18 +3348,179 @@ class SharedConditionalCascadeProductKeyExpertJumpReLUSparseCoder(
             final_probs,
             slot=1,
             topk=self.stage2b_k,
+            return_full=return_full,
         )
 
         second_mask = need_second.to(stage2b_acts.dtype)
         stage2b_acts = stage2b_acts * second_mask
-        stage2b_full = stage2b_full * second_mask
+        if stage2b_full is not None:
+            stage2b_full = stage2b_full * second_mask
 
         combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
         combined_indices = torch.cat(
             (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
         )
-        combined_full = torch.cat((stage1_full, stage2a_full + stage2b_full), dim=-1)
+        combined_full = None
+        if return_full:
+            assert (
+                stage1_full is not None
+                and stage2a_full is not None
+                and stage2b_full is not None
+            )
+            combined_full = torch.cat(
+                (stage1_full, stage2a_full + stage2b_full), dim=-1
+            )
         return combined_acts, combined_indices, combined_full
+
+    def _forward_cascade_state(
+        self, x_centered: Tensor, *, need_aux_candidates: bool = False
+    ) -> tuple[Tensor, Tensor, Tensor, list[tuple[Tensor, Tensor]] | None]:
+        stage1_acts, stage1_indices, stage1_full = self._encode_shared_stage(
+            x_centered,
+            return_full=need_aux_candidates,
+        )
+        stage1_out = self._decode_sparse(stage1_acts, stage1_indices)
+
+        residual_1 = x_centered - stage1_out
+        selected_expert_idx, selected_probs = self._select_ordered_expert_pair(
+            residual_1
+        )
+
+        single_expert_probs = torch.zeros_like(selected_probs)
+        single_expert_probs[:, :1] = 1.0
+        probe_stage2a_acts, probe_stage2a_indices, _ = self._encode_ordered_expert_stage(
+            residual_1,
+            selected_expert_idx,
+            single_expert_probs,
+            slot=0,
+            topk=self.stage2a_k,
+            return_full=False,
+        )
+        probe_stage2a_out = self._decode_sparse(
+            probe_stage2a_acts, probe_stage2a_indices
+        )
+        probe_residual_2 = residual_1 - probe_stage2a_out
+
+        residual_eps = torch.finfo(residual_1.dtype).tiny
+        residual_1_energy = residual_1.detach().pow(2).mean(dim=-1, keepdim=True)
+        probe_residual_2_energy = probe_residual_2.detach().pow(2).mean(
+            dim=-1, keepdim=True
+        )
+        need_second = probe_residual_2_energy > (
+            0.5 * residual_1_energy.clamp_min(residual_eps)
+        )
+
+        final_probs = selected_probs.clone()
+        final_probs[:, :1] = torch.where(
+            need_second.reshape(-1, 1),
+            final_probs[:, :1],
+            torch.ones_like(final_probs[:, :1]),
+        )
+        final_probs[:, 1:] = torch.where(
+            need_second.reshape(-1, 1),
+            final_probs[:, 1:],
+            torch.zeros_like(final_probs[:, 1:]),
+        )
+
+        stage2a_candidates = None
+        if need_aux_candidates:
+            original_shape, stage2a_candidate_acts, stage2a_expert_idx = (
+                self._ordered_expert_stage_candidates(
+                    residual_1,
+                    selected_expert_idx,
+                    final_probs,
+                    slot=0,
+                )
+            )
+            stage2a_top_acts, stage2a_indices, _ = _finalize_routed_expert_acts(
+                stage2a_candidate_acts,
+                stage2a_expert_idx,
+                self.stage2a_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2a_acts = stage2a_top_acts.reshape((*original_shape, self.stage2a_k))
+            stage2a_indices = stage2a_indices.reshape((*original_shape, self.stage2a_k))
+            stage2a_candidates = _routed_candidate_pairs(
+                stage2a_candidate_acts,
+                stage2a_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2a_acts, stage2a_indices, _ = self._encode_ordered_expert_stage(
+                residual_1,
+                selected_expert_idx,
+                final_probs,
+                slot=0,
+                topk=self.stage2a_k,
+                return_full=False,
+            )
+        stage2a_out = self._decode_sparse(stage2a_acts, stage2a_indices)
+
+        residual_2 = residual_1 - stage2a_out
+        stage2b_candidates = None
+        if need_aux_candidates:
+            original_shape, stage2b_candidate_acts, stage2b_expert_idx = (
+                self._ordered_expert_stage_candidates(
+                    residual_2,
+                    selected_expert_idx,
+                    final_probs,
+                    slot=1,
+                )
+            )
+            stage2b_candidate_acts = stage2b_candidate_acts * need_second.to(
+                stage2b_candidate_acts.dtype
+            ).reshape(-1, 1, 1)
+            stage2b_top_acts, stage2b_indices, _ = _finalize_routed_expert_acts(
+                stage2b_candidate_acts,
+                stage2b_expert_idx,
+                self.stage2b_k,
+                self.latents_per_expert,
+                self.expert_num_latents,
+                index_offset=self.shared_num_latents,
+                return_full=False,
+            )
+            stage2b_acts = stage2b_top_acts.reshape((*original_shape, self.stage2b_k))
+            stage2b_indices = stage2b_indices.reshape((*original_shape, self.stage2b_k))
+            stage2b_candidates = _routed_candidate_pairs(
+                stage2b_candidate_acts,
+                stage2b_expert_idx,
+                self.latents_per_expert,
+                index_offset=self.shared_num_latents,
+            )
+        else:
+            stage2b_acts, stage2b_indices, _ = self._encode_ordered_expert_stage(
+                residual_2,
+                selected_expert_idx,
+                final_probs,
+                slot=1,
+                topk=self.stage2b_k,
+                return_full=False,
+            )
+            stage2b_acts = stage2b_acts * need_second.to(stage2b_acts.dtype)
+        stage2b_out = self._decode_sparse(stage2b_acts, stage2b_indices)
+
+        combined_acts = torch.cat((stage1_acts, stage2a_acts, stage2b_acts), dim=-1)
+        combined_indices = torch.cat(
+            (stage1_indices, stage2a_indices, stage2b_indices), dim=-1
+        )
+        candidate_pairs = None
+        if need_aux_candidates:
+            assert (
+                stage1_full is not None
+                and stage2a_candidates is not None
+                and stage2b_candidates is not None
+            )
+            candidate_pairs = [
+                _dense_candidate_pairs(stage1_full),
+                stage2a_candidates,
+                stage2b_candidates,
+            ]
+        sparse_sum = stage1_out + stage2a_out + stage2b_out
+        return combined_acts, combined_indices, sparse_sum, candidate_pairs
 
 
 class SharedAdaptiveCascadeProductKeyExpertJumpReLUSparseCoder(
