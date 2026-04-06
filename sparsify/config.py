@@ -169,7 +169,7 @@ class TrainConfig(Serializable):
     run_name: str | None = None
     wandb_project: str | None = None
     """WandB project name. If None, uses WANDB_PROJECT env var or defaults to 'sparsify'."""
-    wandb_log_frequency: int = 1
+    wandb_log_frequency: int = 10
 
     # Lifecycle
     finetune: str | None = None

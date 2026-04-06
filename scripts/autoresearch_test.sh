@@ -37,6 +37,7 @@ MAX_TOKENS="${MAX_TOKENS:-20000000}"
 AUXK_ALPHA="${AUXK_ALPHA:-0.03125}"
 DEAD_FEATURE_THRESHOLD="${DEAD_FEATURE_THRESHOLD:-10000000}"
 SAVE_EVERY="${SAVE_EVERY:-1000}"
+WANDB_LOG_FREQUENCY="${WANDB_LOG_FREQUENCY:-10}"
 
 # 可选架构/正则附加参数。
 #
@@ -210,7 +211,7 @@ cmd=(
   --run_name "${RUN_NAME}"
   --save_metrics_jsonl
   --log_to_wandb
-  --wandb_log_frequency 1
+  --wandb_log_frequency "${WANDB_LOG_FREQUENCY}"
   --max_tokens "${MAX_TOKENS}"
   --elbow_threshold_path "${ELBOW_THRESHOLD_PATH}"
 )

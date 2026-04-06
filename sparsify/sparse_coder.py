@@ -1793,6 +1793,99 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
     def threshold(self) -> Tensor:
         return F.softplus(self.log_threshold)
 
+    def _expert_logits_from_flat(self, flat_x: Tensor) -> Tensor:
+        left_logits = self.left_router(flat_x)
+        right_logits = self.right_router(flat_x)
+        return (
+            left_logits[:, self.pair_left_index]
+            + right_logits[:, self.pair_right_index]
+        )
+
+    def _select_expert_route(
+        self,
+        expert_logits: Tensor,
+        *,
+        router_probs: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if router_probs is not None:
+            return _select_active_expert_indices_from_probs(
+                router_probs, self.active_experts
+            )
+        return _select_active_expert_indices(expert_logits, self.active_experts)
+
+    def _expert_candidate_acts(
+        self,
+        flat_x: Tensor,
+        selected_expert_idx: Tensor,
+        selected_probs: Tensor,
+    ) -> Tensor:
+        selected_weight = self.expert_encoders[selected_expert_idx.long()]
+        selected_bias = self.expert_encoder_bias[selected_expert_idx.long()]
+        selected_threshold = self.threshold[selected_expert_idx.long()]
+        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        positive = F.relu(pre_acts)
+        gate = torch.sigmoid(
+            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
+        )
+        return positive * gate * selected_probs.unsqueeze(-1)
+
+    def _revival_probe_candidates(
+        self,
+        flat_x: Tensor,
+        expert_logits: Tensor,
+        selected_expert_idx: Tensor,
+        selected_probs: Tensor,
+        dead_mask: Tensor,
+    ) -> tuple[Tensor, Tensor] | None:
+        dead_expert_mask = dead_mask.view(self.num_experts, self.latents_per_expert).any(
+            dim=-1
+        )
+        if not bool(dead_expert_mask.any()):
+            return None
+
+        probe_logits = expert_logits.masked_fill(
+            ~dead_expert_mask.unsqueeze(0),
+            -torch.inf,
+        )
+
+        positive_slots = (selected_probs > 0).nonzero(as_tuple=False)
+        if positive_slots.numel() > 0:
+            active_mask = torch.zeros_like(probe_logits, dtype=torch.bool)
+            active_expert_idx = selected_expert_idx[
+                positive_slots[:, 0], positive_slots[:, 1]
+            ].long()
+            active_mask[positive_slots[:, 0], active_expert_idx] = True
+            probe_logits = probe_logits.masked_fill(active_mask, -torch.inf)
+
+        valid_rows = torch.isfinite(probe_logits).any(dim=-1)
+        if not bool(valid_rows.any()):
+            return None
+
+        probe_expert_idx = torch.zeros(
+            (flat_x.shape[0], 1),
+            device=flat_x.device,
+            dtype=torch.long,
+        )
+        probe_expert_idx[valid_rows] = torch.topk(
+            probe_logits[valid_rows],
+            1,
+            dim=-1,
+            sorted=False,
+        ).indices
+
+        probe_probs = expert_logits.new_zeros((flat_x.shape[0], 1))
+        probe_probs[valid_rows, 0] = 1.0
+        probe_acts = self._expert_candidate_acts(
+            flat_x,
+            probe_expert_idx,
+            probe_probs,
+        )
+        return _routed_candidate_pairs(
+            probe_acts,
+            probe_expert_idx,
+            self.latents_per_expert,
+        )
+
     def _encoder_linear_layers(self):
         return [("left_router", self.left_router), ("right_router", self.right_router)]
 
@@ -1805,29 +1898,24 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             )
         ]
 
+    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
+        assert self.W_dec is not None, "Decoder weight was not initialized."
+        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         original_shape = x.shape[:-1]
         flat_x = x.reshape(-1, self.d_in)
 
-        left_logits = self.left_router(flat_x)
-        right_logits = self.right_router(flat_x)
-        expert_logits = (
-            left_logits[:, self.pair_left_index]
-            + right_logits[:, self.pair_right_index]
+        expert_logits = self._expert_logits_from_flat(flat_x)
+        selected_expert_idx, selected_probs = self._select_expert_route(
+            expert_logits
         )
-        selected_expert_idx, selected_probs = _select_active_expert_indices(
-            expert_logits, self.active_experts
+        acts = self._expert_candidate_acts(
+            flat_x,
+            selected_expert_idx,
+            selected_probs,
         )
-        selected_weight = self.expert_encoders[selected_expert_idx]
-        selected_bias = self.expert_encoder_bias[selected_expert_idx]
-        selected_threshold = self.threshold[selected_expert_idx]
-        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
-        positive = F.relu(pre_acts)
-        gate = torch.sigmoid(
-            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
-        )
-        acts = positive * gate * selected_probs.unsqueeze(-1)
         top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
             acts,
             selected_expert_idx,
@@ -1842,6 +1930,87 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             top_acts.reshape(target_shape),
             top_indices.reshape(target_shape),
             full_acts.reshape(acts_shape),
+        )
+
+    @device_autocast
+    def forward(
+        self, x: Tensor, y: Tensor | None = None, *, dead_mask: Tensor | None = None
+    ) -> ForwardOutput:
+        x_centered = x - self.b_dec
+        original_shape = x_centered.shape[:-1]
+        flat_x = x_centered.reshape(-1, self.d_in)
+
+        expert_logits = self._expert_logits_from_flat(flat_x)
+        selected_expert_idx, selected_probs = self._select_expert_route(expert_logits)
+        candidate_acts = self._expert_candidate_acts(
+            flat_x,
+            selected_expert_idx,
+            selected_probs,
+        )
+        top_acts, top_indices, _ = _finalize_routed_expert_acts(
+            candidate_acts,
+            selected_expert_idx,
+            self.cfg.k,
+            self.latents_per_expert,
+            self.num_latents,
+            return_full=False,
+        )
+
+        target_shape = (*original_shape, self.cfg.k)
+        top_acts = top_acts.reshape(target_shape)
+        top_indices = top_indices.reshape(target_shape)
+        sparse_out = self._decode_sparse(top_acts, top_indices)
+        sae_out = sparse_out + self.b_dec
+
+        if y is None:
+            y = x
+
+        e = y - sae_out
+        total_variance = (y - y.mean(0)).pow(2).sum()
+
+        num_dead = int(dead_mask.sum()) if dead_mask is not None else 0
+        if num_dead > 0:
+            k_aux, scale = _recommended_auxk_width(
+                y,
+                num_dead,
+                top_indices.shape[-1],
+            )
+            candidate_pairs = [
+                _routed_candidate_pairs(
+                    candidate_acts,
+                    selected_expert_idx,
+                    self.latents_per_expert,
+                )
+            ]
+            revival_candidates = self._revival_probe_candidates(
+                flat_x,
+                expert_logits,
+                selected_expert_idx,
+                selected_probs,
+                dead_mask,
+            )
+            if revival_candidates is not None:
+                candidate_pairs.append(revival_candidates)
+            auxk_acts, auxk_indices = _compact_dead_latent_topk(
+                dead_mask,
+                candidate_pairs,
+                k_aux,
+            )
+            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            auxk_loss = (e_hat - e.detach()).pow(2).sum()
+            auxk_loss = scale * auxk_loss / total_variance
+        else:
+            auxk_loss = sae_out.new_tensor(0.0)
+
+        l2_loss = e.pow(2).sum()
+        fvu = l2_loss / total_variance
+
+        return ForwardOutput(
+            sae_out,
+            top_acts,
+            top_indices,
+            fvu,
+            auxk_loss,
         )
 
 
@@ -1850,43 +2019,18 @@ class AdaptiveActiveProductKeyExpertJumpReLUSparseCoder(
 ):
     """PK-routed JumpReLU experts with adaptive 1-or-2 expert paths."""
 
-    def encode(self, x: Tensor) -> EncoderOutput:
-        x = x - self.b_dec
-        original_shape = x.shape[:-1]
-        flat_x = x.reshape(-1, self.d_in)
-
-        left_logits = self.left_router(flat_x)
-        right_logits = self.right_router(flat_x)
-        expert_logits = (
-            left_logits[:, self.pair_left_index]
-            + right_logits[:, self.pair_right_index]
-        )
-        selected_expert_idx, selected_probs = _select_adaptive_active_expert_indices(
+    def _select_expert_route(
+        self,
+        expert_logits: Tensor,
+        *,
+        router_probs: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if router_probs is not None:
+            return _select_adaptive_active_expert_indices_from_probs(
+                router_probs, self.active_experts
+            )
+        return _select_adaptive_active_expert_indices(
             expert_logits, self.active_experts
-        )
-        selected_weight = self.expert_encoders[selected_expert_idx]
-        selected_bias = self.expert_encoder_bias[selected_expert_idx]
-        selected_threshold = self.threshold[selected_expert_idx]
-        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
-        positive = F.relu(pre_acts)
-        gate = torch.sigmoid(
-            (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
-        )
-        acts = positive * gate * selected_probs.unsqueeze(-1)
-        top_acts, top_indices, full_acts = _finalize_routed_expert_acts(
-            acts,
-            selected_expert_idx,
-            self.cfg.k,
-            self.latents_per_expert,
-            self.num_latents,
-        )
-
-        target_shape = (*original_shape, self.cfg.k)
-        acts_shape = (*original_shape, self.num_latents)
-        return EncoderOutput(
-            top_acts.reshape(target_shape),
-            top_indices.reshape(target_shape),
-            full_acts.reshape(acts_shape),
         )
 
 
