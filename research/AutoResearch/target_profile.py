@@ -14,6 +14,7 @@ Q_PROJ_FUSED_QKV_PROFILE_ID = "qwen3_0p6b_layer3_q_proj_fused_qkv_proxy_v1"
 K_PROJ_ACTUAL_PROFILE_ID = "qwen3_0p6b_k_proj_actual_v1"
 V_PROJ_ACTUAL_PROFILE_ID = "qwen3_0p6b_v_proj_actual_v1"
 O_PROJ_ACTUAL_PROFILE_ID = "qwen3_0p6b_o_proj_actual_v1"
+UP_PROJ_ACTUAL_PROFILE_ID = "qwen3_0p6b_up_proj_actual_v1"
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,18 @@ _O_PROJ_PROFILE = TargetProfile(
     cost_model_label="train on o_proj activations; cost uses actual o_proj matrix 2048x1024",
 )
 
+_UP_PROJ_PROFILE = TargetProfile(
+    profile_id=UP_PROJ_ACTUAL_PROFILE_ID,
+    training_hookpoint="layers.[3].mlp.up_proj",
+    d_in=1024,
+    n_output=6144,
+    elbow_threshold_path="thresholds/Qwen3-0.6B/thresholds_up.json",
+    cost_model_label=(
+        "train on up_proj activations; cost proxy uses fused gate/up deployment "
+        "matrix 1024x6144 and counts deploy libraries as d_in+n_output"
+    ),
+)
+
 
 def default_target_profile() -> TargetProfile:
     return DEFAULT_TARGET_PROFILE
@@ -129,6 +142,15 @@ def resolve_target_profile(config: dict[str, Any] | None = None) -> TargetProfil
             n_output=_O_PROJ_PROFILE.n_output,
             elbow_threshold_path=_O_PROJ_PROFILE.elbow_threshold_path,
             cost_model_label=_O_PROJ_PROFILE.cost_model_label,
+        )
+    if hookpoint.endswith(".mlp.up_proj"):
+        return TargetProfile(
+            profile_id=_UP_PROJ_PROFILE.profile_id,
+            training_hookpoint=hookpoint,
+            d_in=_UP_PROJ_PROFILE.d_in,
+            n_output=_UP_PROJ_PROFILE.n_output,
+            elbow_threshold_path=_UP_PROJ_PROFILE.elbow_threshold_path,
+            cost_model_label=_UP_PROJ_PROFILE.cost_model_label,
         )
     return DEFAULT_TARGET_PROFILE
 
