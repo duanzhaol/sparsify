@@ -36,6 +36,33 @@ def test_compute_fvu_scalar_matches_reference():
     assert fvu.item() == pytest.approx(expected)
 
 
+def test_fake_quantize_activation_rejects_invalid_bits():
+    with pytest.raises(ValueError, match="num_bits must be"):
+        fake_quantize_activation_per_token(torch.zeros(1, 4), num_bits=1)
+
+
+def test_fake_quant_has_ste_gradients():
+    tensor = torch.tensor([[0.2, -0.7], [1.0, -1.5]], dtype=torch.float32, requires_grad=True)
+    qdq, _, _ = fake_quantize_activation_per_token(tensor, num_bits=8)
+    qdq.sum().backward()
+    assert torch.allclose(tensor.grad, torch.ones_like(tensor))
+
+
+def test_compute_fvu_scalar_handles_ndims():
+    target = torch.tensor(
+        [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], dtype=torch.float32
+    )
+    recon = target - 0.5
+    flat_target = target.flatten(0, -2)
+    flat_recon = recon.flatten(0, -2)
+    mean = flat_target.mean(dim=0, keepdim=True)
+    variance = (flat_target - mean).pow(2).sum()
+    mse = (flat_target - flat_recon).pow(2).sum()
+    expected = (mse / variance).item()
+    fvu = compute_fvu_scalar(target, recon)
+    assert float(fvu) == pytest.approx(expected)
+
+
 def test_compute_exceed_ratio_bounds_and_threshold():
     target = torch.tensor([[0.0, 1.0], [2.0, 3.0]], dtype=torch.float32)
     recon = torch.tensor([[0.0, 0.5], [2.1, 3.2]], dtype=torch.float32)

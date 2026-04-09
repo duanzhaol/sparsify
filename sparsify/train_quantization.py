@@ -23,8 +23,8 @@ class IOQuantMetrics:
 
 
 def _symmetric_qmax(num_bits: int) -> float:
-    if num_bits < 1:
-        raise ValueError("num_bits must be >= 1")
+    if num_bits < 2:
+        raise ValueError("num_bits must be >= 2 for symmetric quantization")
     return float((1 << (num_bits - 1)) - 1)
 
 
@@ -41,17 +41,20 @@ def fake_quantize_activation_per_token(
     normalized = x_fp / scales
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
-    qdq = rounded * scales
+    qdq_fp = rounded * scales
     clip_rate = (normalized.abs() > qmax).float().mean()
+    qdq = x_fp + (qdq_fp - x_fp).detach()
     return qdq, scales, clip_rate
 
 
 def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
     target_fp = target.to(torch.float32)
     recon_fp = recon.to(torch.float32)
-    mean = target_fp.mean(dim=0, keepdim=True)
-    variance = (target_fp - mean).pow(2).sum().clamp_min(1e-12)
-    mse = (target_fp - recon_fp).pow(2).sum()
+    target_flat = target_fp.flatten(0, -2)
+    recon_flat = recon_fp.flatten(0, -2)
+    mean = target_flat.mean(dim=0, keepdim=True)
+    variance = (target_flat - mean).pow(2).sum().clamp_min(1e-12)
+    mse = (target_flat - recon_flat).pow(2).sum()
     return mse / variance
 
 
