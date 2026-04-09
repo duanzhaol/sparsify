@@ -22,6 +22,19 @@
 - 当前判断：expert-only W8A8 PTQ 是一个非常值得继续推进的方向，优先级高于“立刻做训练时量化”
 - 下一步建议：补做 `up_proj`、更多 checkpoint，以及后续真实 int8 kernel 路线验证
 
+### 2026-04-09：SAE full-encoder W8A8 量化评估
+
+- 新增中文文档：
+  - `LUTurbo-doc/quantization/2026-04-09-w8a8-full-encoder-design.md`
+  - `LUTurbo-doc/quantization/2026-04-09-w8a8-full-encoder-summary.md`
+- 当前实验策略：将 `left_router`、`right_router`、`expert_encoders` 一起纳入 W8A8 仿真量化，`expert_encoder_bias`、threshold 和 decoder 继续保持浮点
+- 在 `layers.[0-13].self_attn.q_proj`、`1024` 个样本上的结果显示：
+  - 平均 `FVU` 增量约为 `+2.03e-4`
+  - 平均 `exceed_alpha_0.50` 增量约为 `+1.78e-4`
+  - 最差层为 `layers.0.self_attn.q_proj`
+- 当前判断：新增误差主要来自 router 量化，但整体漂移仍然很小，full-encoder W8A8 仍然处于完全可接受的范围
+- 下一步建议：把 decoder 大权重 `W_dec` 纳入量化研究，优先探索更“充分”的大矩阵量化，而不是先碰 threshold/bias 等小参数
+
 ## 1. 项目概述
 
 **目标**：在 CPU 平台上实现 LLM 的低延迟推理。

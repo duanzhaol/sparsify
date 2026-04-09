@@ -71,3 +71,34 @@ def simulate_w8a8_matmul(acts: Tensor, weight: Tensor) -> Tensor:
     """Convenience wrapper that quantizes weights on the fly before simulating."""
     q_weight, weight_scales = quantize_weight_per_row_symmetric(weight)
     return simulate_w8a8_matmul_prequantized(acts, q_weight, weight_scales)
+
+
+def simulate_w8a8_linear_prequantized(
+    acts: Tensor,
+    q_weight: Tensor,
+    weight_scales: Tensor,
+    bias: Tensor | None = None,
+) -> Tensor:
+    """Simulate a standard linear layer with symmetric W8A8 quantization."""
+    q_acts, act_scales = quantize_activation_per_token_symmetric(acts)
+    # PyTorch does not provide int32 addmm kernels on CUDA, so keep the
+    # accumulation as explicit elementwise multiply + reduce. Router matrices
+    # are small enough that this remains practical for our metric study.
+    accum = (
+        q_acts.to(torch.int32).unsqueeze(1)
+        * q_weight.to(torch.int32).unsqueeze(0)
+    ).sum(dim=-1)
+    dequant = accum.to(torch.float32) * act_scales * weight_scales.squeeze(-1).unsqueeze(0)
+    if bias is not None:
+        dequant = dequant + bias.to(torch.float32)
+    return dequant
+
+
+def simulate_w8a8_linear(
+    acts: Tensor,
+    weight: Tensor,
+    bias: Tensor | None = None,
+) -> Tensor:
+    """Quantize a standard linear layer on the fly and simulate W8A8 inference."""
+    q_weight, weight_scales = quantize_weight_per_row_symmetric(weight)
+    return simulate_w8a8_linear_prequantized(acts, q_weight, weight_scales, bias=bias)

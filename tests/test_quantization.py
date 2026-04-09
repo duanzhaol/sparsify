@@ -11,6 +11,7 @@ from quantization.eval_utils import (
 from quantization.quant_utils import (
     quantize_activation_per_token_symmetric,
     quantize_weight_per_row_symmetric,
+    simulate_w8a8_linear,
     simulate_w8a8_matmul,
 )
 
@@ -57,6 +58,23 @@ class TestQuantUtils:
 
         simulated = simulate_w8a8_matmul(acts, weight)
         reference = torch.einsum("bd,bald->bal", acts, weight)
+
+        assert simulated.shape == reference.shape
+        assert torch.allclose(simulated, reference, atol=0.1)
+
+    def test_simulate_w8a8_linear_matches_torch_linear(self):
+        acts = torch.tensor(
+            [[1.0, -2.0, 0.5], [-0.5, 1.5, 2.0]],
+            dtype=torch.float32,
+        )
+        weight = torch.tensor(
+            [[1.5, 0.0, -0.5], [-1.0, 2.0, 0.25]],
+            dtype=torch.float32,
+        )
+        bias = torch.tensor([0.25, -0.75], dtype=torch.float32)
+
+        simulated = simulate_w8a8_linear(acts, weight, bias)
+        reference = torch.nn.functional.linear(acts, weight, bias)
 
         assert simulated.shape == reference.shape
         assert torch.allclose(simulated, reference, atol=0.1)
