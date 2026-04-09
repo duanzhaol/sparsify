@@ -73,6 +73,12 @@ def test_fake_quant_has_ste_gradients():
     assert torch.allclose(tensor.grad, torch.ones_like(tensor))
 
 
+def test_fake_quant_clip_rate_zero_under_absmax():
+    tensor = torch.tensor([[0.5, -1.0], [1.5, -2.0]], dtype=torch.float32)
+    _, _, clip_rate = fake_quantize_activation_per_token(tensor, num_bits=8)
+    assert float(clip_rate) == pytest.approx(0.0)
+
+
 def test_compute_fvu_scalar_handles_ndims():
     target = torch.tensor(
         [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], dtype=torch.float32

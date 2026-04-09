@@ -42,7 +42,11 @@ def fake_quantize_activation_per_token(
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
     qdq_fp = rounded * scales
-    clip_rate = (normalized.abs() > qmax).float().mean()
+    # With per-token absmax scaling, qmax * scale equals the token's max magnitude,
+    # so true clipping should not occur (clip_rate is retained for API consistency).
+    threshold = scales * qmax
+    clip_mask = (x_fp.abs() > threshold + 1e-6).float()
+    clip_rate = clip_mask.mean()
     qdq = x_fp + (qdq_fp - x_fp).detach()
     return qdq, scales, clip_rate
 
