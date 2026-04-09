@@ -49,12 +49,11 @@ def test_compute_exceed_ratio_shape_mismatch():
         compute_exceed_ratio(target, recon, threshold=0.1)
 
 
-def test_compute_fvu_scalar_vector_matches_batch():
+def test_compute_fvu_scalar_rejects_vector():
     vector = torch.tensor([1.0, 2.0, 3.0])
     recon = torch.tensor([0.5, 1.5, 2.5])
-    fvu_vec = compute_fvu_scalar(vector, recon)
-    fvu_batch = compute_fvu_scalar(vector.unsqueeze(0), recon.unsqueeze(0))
-    assert float(fvu_vec) == pytest.approx(float(fvu_batch))
+    with pytest.raises(ValueError, match="requires at least 2 dimensions"):
+        compute_fvu_scalar(vector, recon)
 
 
 def test_fake_quantize_activation_rejects_invalid_bits():
@@ -73,6 +72,12 @@ def test_fake_quant_clip_boundary_saturation():
     tensor = torch.tensor([[1.0, -127.0], [63.5, -1.0]], dtype=torch.float32)
     _, _, clip_rate = fake_quantize_activation_per_token(tensor, num_bits=8)
     assert float(clip_rate) == pytest.approx(0.5)
+
+
+def test_fake_quant_zero_rows_return_zero_scales():
+    tensor = torch.zeros(2, 3, dtype=torch.float32)
+    _, scales, _ = fake_quantize_activation_per_token(tensor, num_bits=8)
+    assert torch.allclose(scales, torch.zeros_like(scales))
 
 
 def test_compute_fvu_scalar_handles_ndims():

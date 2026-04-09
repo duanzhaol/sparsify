@@ -37,17 +37,18 @@ def fake_quantize_activation_per_token(
     qmax = _symmetric_qmax(num_bits)
     x_fp = x.to(torch.float32)
     absmax = x_fp.abs().amax(dim=-1, keepdim=True)
-    scales = torch.where(absmax > 0, absmax / qmax, torch.ones_like(absmax))
-    normalized = x_fp / scales
+    reported_scales = torch.where(absmax > 0, absmax / qmax, torch.zeros_like(absmax))
+    safe_scales = torch.where(reported_scales > 0, reported_scales, torch.ones_like(reported_scales))
+    normalized = x_fp / safe_scales
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
-    qdq_fp = rounded * scales
+    qdq_fp = rounded * safe_scales
     # Clip-rate tracks boundary saturation: fraction of entries hitting ±qmax after clamp/round.
     # Under per-token absmax scaling this reflects true near-quantization saturation rather than noisy clipping.
     saturation_mask = rounded.abs() == qmax
     clip_rate = saturation_mask.float().mean()
     qdq = x_fp + (qdq_fp - x_fp).detach()
-    return qdq, scales, clip_rate
+    return qdq, reported_scales, clip_rate
 
 
 def _ensure_matching_shape(target: Tensor, recon: Tensor) -> None:
@@ -69,6 +70,8 @@ def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
     _ensure_matching_shape(target, recon)
     target_fp = target.to(torch.float32)
     recon_fp = recon.to(torch.float32)
+    if target_fp.ndim < 2:
+        raise ValueError("compute_fvu_scalar requires at least 2 dimensions (tokens + hidden)")
     target_flat = _flatten_except_last(target_fp)
     recon_flat = _flatten_except_last(recon_fp)
     mean = target_flat.mean(dim=0, keepdim=True)
