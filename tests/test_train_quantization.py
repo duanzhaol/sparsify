@@ -20,6 +20,9 @@ def test_fake_quantize_activation_per_token_preserves_shape_and_clip_rate():
     assert scales.shape == (2, 1)
     assert 0.0 <= float(clip_rate) <= 1.0
     assert torch.allclose(qdq, tensor, atol=0.1)
+    expected_scales = torch.tensor([[2.0 / 127.0], [3.5 / 127.0]])
+    torch.testing.assert_close(scales, expected_scales, atol=1e-4, rtol=0.0)
+    assert float(clip_rate) == pytest.approx(0.0)
 
 
 def test_compute_fvu_scalar_matches_reference():
@@ -68,6 +71,10 @@ def test_summarize_io_quant_batch_outputs_metrics():
     assert metrics.exceed_deploy is not None
     assert 0.0 <= float(metrics.input_clip_rate) <= 1.0
     assert 0.0 <= float(metrics.output_clip_rate) <= 1.0
+    expected_input_mean = (2.0 / 127.0 + 4.0 / 127.0) / 2.0
+    expected_output_mean = (1.5 / 127.0 + 4.0 / 127.0) / 2.0
+    assert float(metrics.input_scale_mean) == pytest.approx(expected_input_mean)
+    assert float(metrics.output_scale_mean) == pytest.approx(expected_output_mean)
 
 
 def test_summarize_io_quant_batch_handles_missing_alpha_elbow():
