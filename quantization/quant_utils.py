@@ -102,3 +102,64 @@ def simulate_w8a8_linear(
     """Quantize a standard linear layer on the fly and simulate W8A8 inference."""
     q_weight, weight_scales = quantize_weight_per_row_symmetric(weight)
     return simulate_w8a8_linear_prequantized(acts, q_weight, weight_scales, bias=bias)
+
+
+def simulate_w8_sparse_decode_prequantized(
+    top_indices: Tensor,
+    top_acts: Tensor,
+    q_weight: Tensor,
+    weight_scales: Tensor,
+) -> Tensor:
+    """Simulate sparse decode with quantized decoder weights and float acts."""
+    selected_q_weight = q_weight[top_indices.long()]
+    selected_scales = weight_scales[top_indices.long()]
+    dequant_weight = selected_q_weight.to(torch.float32) * selected_scales
+    return (dequant_weight * top_acts.to(torch.float32).unsqueeze(-1)).sum(dim=1)
+
+
+def simulate_w8_sparse_decode(
+    top_indices: Tensor,
+    top_acts: Tensor,
+    weight: Tensor,
+) -> Tensor:
+    """Quantize decoder weights on the fly and simulate sparse W8 decode."""
+    q_weight, weight_scales = quantize_weight_per_row_symmetric(weight)
+    return simulate_w8_sparse_decode_prequantized(
+        top_indices,
+        top_acts,
+        q_weight,
+        weight_scales,
+    )
+
+
+def simulate_w8a8_sparse_decode_prequantized(
+    top_indices: Tensor,
+    top_acts: Tensor,
+    q_weight: Tensor,
+    weight_scales: Tensor,
+) -> Tensor:
+    """Simulate sparse decode with quantized decoder weights and quantized acts."""
+    q_acts, act_scales = quantize_activation_per_token_symmetric(top_acts)
+    selected_q_weight = q_weight[top_indices.long()]
+    selected_scales = weight_scales[top_indices.long()].squeeze(-1)
+    products = (
+        q_acts.to(torch.int32).unsqueeze(-1)
+        * selected_q_weight.to(torch.int32)
+    ).to(torch.float32)
+    weighted = products * selected_scales.unsqueeze(-1)
+    return weighted.sum(dim=1) * act_scales
+
+
+def simulate_w8a8_sparse_decode(
+    top_indices: Tensor,
+    top_acts: Tensor,
+    weight: Tensor,
+) -> Tensor:
+    """Quantize decoder weights on the fly and simulate sparse W8A8 decode."""
+    q_weight, weight_scales = quantize_weight_per_row_symmetric(weight)
+    return simulate_w8a8_sparse_decode_prequantized(
+        top_indices,
+        top_acts,
+        q_weight,
+        weight_scales,
+    )

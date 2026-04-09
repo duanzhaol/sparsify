@@ -62,6 +62,12 @@ class QuantizedExpertState:
 
 
 @dataclass
+class QuantizedDecoderState:
+    q_weight: Tensor
+    weight_scales: Tensor
+
+
+@dataclass
 class QuantizedFullEncoderState:
     left_router: QuantizedLinearState
     right_router: QuantizedLinearState
@@ -170,12 +176,20 @@ def prepare_quantized_expert_state(
     return QuantizedExpertState(q_weight=q_weight, weight_scales=weight_scales)
 
 
+def prepare_quantized_decoder_state(
+    sae: ProductKeyExpertJumpReLUSparseCoder,
+) -> QuantizedDecoderState:
+    assert sae.W_dec is not None, "Decoder weight was not initialized."
+    q_weight, weight_scales = quantize_weight_per_row_symmetric(sae.W_dec.detach())
+    return QuantizedDecoderState(q_weight=q_weight, weight_scales=weight_scales)
+
+
 @torch.no_grad()
-def forward_w8a8_full_encoder(
+def encode_w8a8_full_encoder(
     sae: ProductKeyExpertJumpReLUSparseCoder,
     quant_state: QuantizedFullEncoderState,
     x: Tensor,
-) -> Tensor:
+) -> tuple[Tensor, Tensor]:
     x_centered = x - sae.b_dec
     original_shape = x_centered.shape[:-1]
     flat_x = x_centered.reshape(-1, sae.d_in)
@@ -226,6 +240,16 @@ def forward_w8a8_full_encoder(
     target_shape = (*original_shape, sae.cfg.k)
     top_acts = top_acts.reshape(target_shape)
     top_indices = top_indices.reshape(target_shape)
+    return top_acts, top_indices
+
+
+@torch.no_grad()
+def forward_w8a8_full_encoder(
+    sae: ProductKeyExpertJumpReLUSparseCoder,
+    quant_state: QuantizedFullEncoderState,
+    x: Tensor,
+) -> Tensor:
+    top_acts, top_indices = encode_w8a8_full_encoder(sae, quant_state, x)
     sparse_out = sae._decode_sparse(top_acts, top_indices)
     return sparse_out + sae.b_dec
 

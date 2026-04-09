@@ -35,6 +35,25 @@
 - 当前判断：新增误差主要来自 router 量化，但整体漂移仍然很小，full-encoder W8A8 仍然处于完全可接受的范围
 - 下一步建议：把 decoder 大权重 `W_dec` 纳入量化研究，优先探索更“充分”的大矩阵量化，而不是先碰 threshold/bias 等小参数
 
+### 2026-04-09：SAE decoder W8 / W8A8 量化评估
+
+- 新增中文文档：
+  - `LUTurbo-doc/quantization/2026-04-09-w8a8-decoder-summary.md`
+- 当前实验策略：
+  - 保持 `left_router`、`right_router`、`expert_encoders` 为 full-encoder W8A8
+  - 先做 `W_dec` 的保守版 `int8 weight-only`
+  - 再做 `W_dec + top_acts` 的 decoder 侧 `W8A8`
+- 在 `layers.[0-13].self_attn.q_proj`、`1024` 个样本上的结果显示：
+  - `full-encoder + decoder W8` 的平均 `FVU` 增量约为 `+3.72e-4`
+  - `full-encoder + decoder W8A8` 的平均 `FVU` 增量约为 `+3.94e-4`
+  - 两者的平均 `exceed_alpha_0.50` 增量分别约为 `+3.68e-4` 和 `+3.89e-4`
+  - `decoder W8A8` 相比 `decoder W8` 只增加了极小的额外误差
+- 当前判断：
+  - `W_dec` 是非常值得继续量化的大矩阵
+  - decoder 稀疏激活 `top_acts` 也表现出较强的 8bit 友好性
+  - 对当前 SAE 主干来说，8bit 已经基本不是主要精度瓶颈
+- 下一步建议：把研究重点转向在线补偿路径，判断它在主干量化后是否成为新的 CPU 推理瓶颈，以及是否值得进一步做成 `W8A8`
+
 ## 1. 项目概述
 
 **目标**：在 CPU 平台上实现 LLM 的低延迟推理。

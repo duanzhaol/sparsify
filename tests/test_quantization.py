@@ -13,6 +13,8 @@ from quantization.quant_utils import (
     quantize_weight_per_row_symmetric,
     simulate_w8a8_linear,
     simulate_w8a8_matmul,
+    simulate_w8a8_sparse_decode,
+    simulate_w8_sparse_decode,
 )
 
 
@@ -78,6 +80,44 @@ class TestQuantUtils:
 
         assert simulated.shape == reference.shape
         assert torch.allclose(simulated, reference, atol=0.1)
+
+    def test_simulate_w8_sparse_decode_matches_reference(self):
+        top_indices = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+        top_acts = torch.tensor([[1.5, -0.5], [0.25, 2.0]], dtype=torch.float32)
+        weight = torch.tensor(
+            [
+                [1.0, -2.0, 0.5],
+                [-1.5, 0.5, 2.0],
+                [0.25, 1.0, -0.75],
+                [2.0, -1.0, 0.25],
+            ],
+            dtype=torch.float32,
+        )
+
+        simulated = simulate_w8_sparse_decode(top_indices, top_acts, weight)
+        reference = (weight[top_indices] * top_acts.unsqueeze(-1)).sum(dim=1)
+
+        assert simulated.shape == reference.shape
+        assert torch.allclose(simulated, reference, atol=0.1)
+
+    def test_simulate_w8a8_sparse_decode_matches_reference(self):
+        top_indices = torch.tensor([[0, 2], [1, 3]], dtype=torch.long)
+        top_acts = torch.tensor([[1.5, -0.5], [0.25, 2.0]], dtype=torch.float32)
+        weight = torch.tensor(
+            [
+                [1.0, -2.0, 0.5],
+                [-1.5, 0.5, 2.0],
+                [0.25, 1.0, -0.75],
+                [2.0, -1.0, 0.25],
+            ],
+            dtype=torch.float32,
+        )
+
+        simulated = simulate_w8a8_sparse_decode(top_indices, top_acts, weight)
+        reference = (weight[top_indices] * top_acts.unsqueeze(-1)).sum(dim=1)
+
+        assert simulated.shape == reference.shape
+        assert torch.allclose(simulated, reference, atol=0.15)
 
 
 class TestEvalUtils:
