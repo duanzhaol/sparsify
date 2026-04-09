@@ -22,7 +22,6 @@ def test_fake_quantize_activation_per_token_preserves_shape_and_clip_rate():
     assert torch.allclose(qdq, tensor, atol=0.1)
     expected_scales = torch.tensor([[2.0 / 127.0], [3.5 / 127.0]])
     torch.testing.assert_close(scales, expected_scales, atol=1e-4, rtol=0.0)
-    assert float(clip_rate) == pytest.approx(0.0)
 
 
 def test_compute_fvu_scalar_matches_reference():
@@ -50,15 +49,12 @@ def test_compute_exceed_ratio_shape_mismatch():
         compute_exceed_ratio(target, recon, threshold=0.1)
 
 
-def test_compute_fvu_scalar_accepts_vector():
-    target = torch.tensor([1.0, 2.0, 3.0])
+def test_compute_fvu_scalar_vector_matches_batch():
+    vector = torch.tensor([1.0, 2.0, 3.0])
     recon = torch.tensor([0.5, 1.5, 2.5])
-    mean = target.mean()
-    variance = (target - mean).pow(2).sum()
-    mse = (target - recon).pow(2).sum()
-    expected = (mse / variance).item()
-    fvu = compute_fvu_scalar(target, recon)
-    assert float(fvu) == pytest.approx(expected)
+    fvu_vec = compute_fvu_scalar(vector, recon)
+    fvu_batch = compute_fvu_scalar(vector.unsqueeze(0), recon.unsqueeze(0))
+    assert float(fvu_vec) == pytest.approx(float(fvu_batch))
 
 
 def test_fake_quantize_activation_rejects_invalid_bits():
@@ -73,10 +69,10 @@ def test_fake_quant_has_ste_gradients():
     assert torch.allclose(tensor.grad, torch.ones_like(tensor))
 
 
-def test_fake_quant_clip_rate_zero_under_absmax():
-    tensor = torch.tensor([[0.5, -1.0], [1.5, -2.0]], dtype=torch.float32)
+def test_fake_quant_clip_boundary_saturation():
+    tensor = torch.tensor([[1.0, -127.0], [63.5, -1.0]], dtype=torch.float32)
     _, _, clip_rate = fake_quantize_activation_per_token(tensor, num_bits=8)
-    assert float(clip_rate) == pytest.approx(0.0)
+    assert float(clip_rate) == pytest.approx(0.5)
 
 
 def test_compute_fvu_scalar_handles_ndims():

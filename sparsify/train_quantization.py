@@ -42,11 +42,10 @@ def fake_quantize_activation_per_token(
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
     qdq_fp = rounded * scales
-    # With per-token absmax scaling, qmax * scale equals the token's max magnitude,
-    # so true clipping should not occur (clip_rate is retained for API consistency).
-    threshold = scales * qmax
-    clip_mask = (x_fp.abs() > threshold + 1e-6).float()
-    clip_rate = clip_mask.mean()
+    # Clip-rate tracks boundary saturation: fraction of entries hitting ±qmax after clamp/round.
+    # Under per-token absmax scaling this reflects true near-quantization saturation rather than noisy clipping.
+    saturation_mask = rounded.abs() == qmax
+    clip_rate = saturation_mask.float().mean()
     qdq = x_fp + (qdq_fp - x_fp).detach()
     return qdq, scales, clip_rate
 
@@ -70,13 +69,6 @@ def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
     _ensure_matching_shape(target, recon)
     target_fp = target.to(torch.float32)
     recon_fp = recon.to(torch.float32)
-
-    if target_fp.ndim == 1:
-        mean = target_fp.mean()
-        variance = (target_fp - mean).pow(2).sum().clamp_min(1e-12)
-        mse = (target_fp - recon_fp).pow(2).sum()
-        return mse / variance
-
     target_flat = _flatten_except_last(target_fp)
     recon_flat = _flatten_except_last(recon_fp)
     mean = target_flat.mean(dim=0, keepdim=True)
