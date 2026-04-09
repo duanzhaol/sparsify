@@ -47,11 +47,34 @@ def fake_quantize_activation_per_token(
     return qdq, scales, clip_rate
 
 
+def _ensure_matching_shape(target: Tensor, recon: Tensor) -> None:
+    if target.shape != recon.shape:
+        raise ValueError(
+            f"target and recon must share shape, got {target.shape} vs {recon.shape}"
+        )
+
+
+def _flatten_except_last(tensor: Tensor) -> Tensor:
+    if tensor.ndim == 0:
+        raise ValueError("tensor must have at least one dimension")
+    if tensor.ndim == 1:
+        return tensor.unsqueeze(0)
+    return tensor.reshape(-1, tensor.shape[-1])
+
+
 def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
+    _ensure_matching_shape(target, recon)
     target_fp = target.to(torch.float32)
     recon_fp = recon.to(torch.float32)
-    target_flat = target_fp.flatten(0, -2)
-    recon_flat = recon_fp.flatten(0, -2)
+
+    if target_fp.ndim == 1:
+        mean = target_fp.mean()
+        variance = (target_fp - mean).pow(2).sum().clamp_min(1e-12)
+        mse = (target_fp - recon_fp).pow(2).sum()
+        return mse / variance
+
+    target_flat = _flatten_except_last(target_fp)
+    recon_flat = _flatten_except_last(recon_fp)
     mean = target_flat.mean(dim=0, keepdim=True)
     variance = (target_flat - mean).pow(2).sum().clamp_min(1e-12)
     mse = (target_flat - recon_flat).pow(2).sum()
@@ -61,6 +84,7 @@ def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
 def compute_exceed_ratio(target: Tensor, recon: Tensor, threshold: float) -> Tensor:
     if threshold < 0:
         raise ValueError("threshold must be non-negative")
+    _ensure_matching_shape(target, recon)
     target_fp = target.to(torch.float32)
     recon_fp = recon.to(torch.float32)
     exceed_mask = (target_fp - recon_fp).abs() > threshold

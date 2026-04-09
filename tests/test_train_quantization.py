@@ -36,6 +36,31 @@ def test_compute_fvu_scalar_matches_reference():
     assert fvu.item() == pytest.approx(expected)
 
 
+def test_compute_fvu_scalar_shape_mismatch():
+    target = torch.randn(2, 4)
+    recon = torch.randn(3, 4)
+    with pytest.raises(ValueError, match="target and recon must share shape"):
+        compute_fvu_scalar(target, recon)
+
+
+def test_compute_exceed_ratio_shape_mismatch():
+    target = torch.randn(2, 4)
+    recon = torch.randn(2, 5)
+    with pytest.raises(ValueError, match="target and recon must share shape"):
+        compute_exceed_ratio(target, recon, threshold=0.1)
+
+
+def test_compute_fvu_scalar_accepts_vector():
+    target = torch.tensor([1.0, 2.0, 3.0])
+    recon = torch.tensor([0.5, 1.5, 2.5])
+    mean = target.mean()
+    variance = (target - mean).pow(2).sum()
+    mse = (target - recon).pow(2).sum()
+    expected = (mse / variance).item()
+    fvu = compute_fvu_scalar(target, recon)
+    assert float(fvu) == pytest.approx(expected)
+
+
 def test_fake_quantize_activation_rejects_invalid_bits():
     with pytest.raises(ValueError, match="num_bits must be"):
         fake_quantize_activation_per_token(torch.zeros(1, 4), num_bits=1)
