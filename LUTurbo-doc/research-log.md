@@ -8,6 +8,20 @@
 > Idea 文档：[ideas/sae-improvement.md](ideas/sae-improvement.md) — SAE 改进（降低 K 需求 + 引入分组结构，联合解决 B 和 C1）
 > 实验计划：[experiments/](experiments/) — 每次实验的详细计划与结果（[模板](experiments/_template.md)）
 
+## 0. 最新进展
+
+### 2026-04-09：SAE encoder expert-only W8A8 量化初测
+
+- 新增量化研究代码：`quantization/`
+- 新增量化总结文档：`quantization/README.md`、`LUTurbo-doc/quantization/2026-04-09-w8a8-expert-only-summary.md`
+- 当前实验策略：只对 `product_key_expert_jumprelu` 的 `expert_encoders` 主 matmul 路径做 W8A8 仿真量化，router、bias、JumpReLU threshold 和 decoder 仍保持浮点
+- 在 `layers.[0-13].self_attn.q_proj`、`1024` 个样本上的结果显示：
+  - 平均 `FVU` 增量约为 `+4.3e-5`
+  - 平均 `exceed_alpha_0.50` 增量约为 `+4.2e-5`
+  - 目前看几乎没有明显精度退化
+- 当前判断：expert-only W8A8 PTQ 是一个非常值得继续推进的方向，优先级高于“立刻做训练时量化”
+- 下一步建议：补做 `up_proj`、更多 checkpoint，以及后续真实 int8 kernel 路线验证
+
 ## 1. 项目概述
 
 **目标**：在 CPU 平台上实现 LLM 的低延迟推理。
