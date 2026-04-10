@@ -136,13 +136,14 @@ def test_summarize_io_quant_batch_outputs_metrics():
     target = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
     recon = torch.tensor([[1.0, 1.5], [2.5, 4.0]], dtype=torch.float32)
 
+    deploy_weight = 0.25
     metrics = summarize_io_quant_batch(
         target_fp=target,
         recon_fp=recon,
         num_bits=8,
         alpha=0.5,
         elbow_value=0.5,
-        deploy_weight=0.25,
+        deploy_weight=deploy_weight,
     )
 
     assert isinstance(metrics, IOQuantMetrics)
@@ -160,6 +161,14 @@ def test_summarize_io_quant_batch_outputs_metrics():
     expected_output_mean = (1.5 / 127.0 + 4.0 / 127.0) / 2.0
     assert float(metrics.input_scale_mean) == pytest.approx(expected_input_mean)
     assert float(metrics.output_scale_mean) == pytest.approx(expected_output_mean)
+    expected_quant_floor = compute_fvu_scalar(target, metrics.target_deploy)
+    assert float(metrics.quant_floor) == pytest.approx(float(expected_quant_floor))
+    expected_main_loss = float(metrics.fvu_fp_teacher + deploy_weight * metrics.fvu_deploy)
+    assert float(metrics.main_loss) == pytest.approx(expected_main_loss)
+    expected_exceed_fp_teacher = compute_exceed_ratio(
+        target, metrics.recon_deploy, threshold=0.5 * 0.5
+    )
+    assert float(metrics.exceed_fp_teacher) == pytest.approx(float(expected_exceed_fp_teacher))
 
 
 def test_summarize_io_quant_batch_handles_missing_alpha_elbow():

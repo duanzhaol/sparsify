@@ -49,8 +49,9 @@ def fake_quantize_activation_per_token(
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
     qdq_fp = rounded * safe_scales
+    tolerance = 1e-6
     pre_clamp = normalized
-    clip_rate = (pre_clamp.abs() > qmax).float().mean()
+    clip_rate = (pre_clamp.abs() > qmax + tolerance).float().mean()
     qdq = x_fp + (qdq_fp - x_fp).detach()
     qdq = qdq.to(original_dtype)
     return qdq, reported_scales, clip_rate
@@ -69,6 +70,13 @@ def _flatten_except_last(tensor: Tensor) -> Tensor:
     if tensor.ndim == 1:
         return tensor.unsqueeze(0)
     return tensor.reshape(-1, tensor.shape[-1])
+
+
+def _positive_scale_mean(scales: Tensor) -> Tensor:
+    positive = scales[scales > 0]
+    if positive.numel() == 0:
+        return torch.tensor(0.0, dtype=scales.dtype, device=scales.device)
+    return positive.mean()
 
 
 def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
@@ -131,6 +139,9 @@ def summarize_io_quant_batch(
 
     main_loss = fvu_fp_teacher + deploy_weight * fvu_deploy
 
+    input_scale_mean = _positive_scale_mean(input_scales)
+    output_scale_mean = _positive_scale_mean(output_scales)
+
     return IOQuantMetrics(
         recon_deploy=recon_deploy,
         target_deploy=target_deploy,
@@ -141,7 +152,7 @@ def summarize_io_quant_batch(
         exceed_deploy=exceed_deploy,
         input_clip_rate=input_clip,
         output_clip_rate=output_clip,
-        input_scale_mean=input_scales.mean(),
-        output_scale_mean=output_scales.mean(),
+        input_scale_mean=input_scale_mean,
+        output_scale_mean=output_scale_mean,
         main_loss=main_loss,
     )
