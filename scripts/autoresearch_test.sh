@@ -8,6 +8,8 @@ MASTER_PORT="${MASTER_PORT:-29501}"
 
 # 输入输出路径配置。
 MODEL_PATH="${MODEL_PATH:-$HOME/models/Qwen3-0.6B}"
+ACTIVATION_SOURCE="${ACTIVATION_SOURCE:-hf_bf16}"
+ACTIVATION_BACKBONE_PATH="${ACTIVATION_BACKBONE_PATH:-}"
 DATASET_PATH="${DATASET_PATH:-$HOME/fineweb-edu/sample/10BT-tokenized-qwen3-2048}"
 ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH:-$HOME/sparsify/thresholds/Qwen3-0.6B/thresholds_q.json}"
 WANDB_PROJECT="${WANDB_PROJECT:-qwen3-0.6B-auto-qproj}"
@@ -192,6 +194,7 @@ cmd=(
   "${DATASET_PATH}"
   --split train
   --wandb_project "${WANDB_PROJECT}"
+  --activation_source "${ACTIVATION_SOURCE}"
   --ctx_len 2048
   --max_examples "${MAX_EXAMPLES}"
   --text_column text
@@ -227,6 +230,10 @@ cmd=(
   --io_loss_mode "${IO_LOSS_MODE}"
   --io_loss_deploy_weight "${IO_LOSS_DEPLOY_WEIGHT}"
 )
+
+if [[ -n "${ACTIVATION_BACKBONE_PATH}" ]]; then
+  cmd+=(--activation_backbone_path "${ACTIVATION_BACKBONE_PATH}")
+fi
 
 if [[ "${USE_HADAMARD}" == "1" ]]; then
   cmd+=(--use_hadamard)
