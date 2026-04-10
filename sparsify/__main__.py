@@ -25,6 +25,7 @@ from .device import (
     set_device,
 )
 from .quantized_backbone import (
+    activation_source_uses_torchao_loader,
     load_torchao_w8a8_model,
     select_activation_model_path,
 )
@@ -219,7 +220,7 @@ def load_artifacts(
         activation_backbone_path=args.activation_backbone_path,
     )
 
-    if args.activation_source == "w8a8_backbone":
+    if activation_source_uses_torchao_loader(args.activation_source):
         model = load_torchao_w8a8_model(
             model_name_or_path,
             device_map={"": get_device_string(rank)},

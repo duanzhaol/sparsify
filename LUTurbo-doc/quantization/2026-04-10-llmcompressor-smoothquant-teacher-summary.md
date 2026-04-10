@@ -23,7 +23,7 @@
 
 本轮暂不包含：
 
-- 把 SmoothQuant teacher 完整接入 `activation_source` 并正式训练；
+- SmoothQuant teacher 的正式训练结果；
 - SmoothQuant teacher 与 `SAE I/O Int8 QAT` 的组合实验；
 - SmoothQuant teacher 的系统性 A/B 精度矩阵。
 
@@ -201,7 +201,30 @@ python quantization/export_llmcompressor_smoothquant_w8a8_teacher.py \
 
 - 导出的 checkpoint 至少在 Hugging Face 加载链路上是可用的；
 - 现有 SAE 训练所依赖的模块命名仍然保留；
-- 下一步可以直接尝试把它接进 `activation_source`。
+- 可以继续把它接进 `activation_source` 做在线训练。
+
+### 5. 训练侧最小接入
+
+当前已经新增一个最小训练接入：
+
+- `activation_source=smoothquant_w8a8_backbone`
+
+它的行为是：
+
+- 使用 `activation_backbone_path` 指向离线导出的 SmoothQuant checkpoint；
+- 继续复用现有 `AutoModel.from_pretrained(...) + register_forward_hook(...)` 路径；
+- 不走 `torchao` 的运行时量化加载逻辑；
+- 下游 SAE 训练流程不变。
+
+配套还补了一个 smoke 脚本：
+
+- `scripts/full/qwen3-0.6B/product_key_expert_jumprelu/train_smoothquant_teacher_smoke_q_0_13.sh`
+
+这意味着目前已经具备：
+
+- 导出离线 SmoothQuant teacher；
+- 在训练配置里声明该 teacher 为 activation source；
+- 直接发起一个最小 smoke 训练。
 
 ## 当前结论
 
@@ -209,8 +232,8 @@ python quantization/export_llmcompressor_smoothquant_w8a8_teacher.py \
 
 1. `LLM Compressor` 已经可以在本仓库中对本地 `Qwen3-0.6B` 执行离线 SmoothQuant W8A8 导出；
 2. 导出后的 checkpoint 可以重新加载，并保留我们关注的 `q_proj` hookpoint；
-3. 第一阶段“离线生成真实 SmoothQuant teacher”已经跑通；
-4. 下一阶段的重点不再是导出本身，而是把这个 teacher 接入现有 SAE 在线训练框架，并做 BF16 / torchao / SmoothQuant 三路 A/B。
+3. `SmoothQuant teacher` 已经完成最小训练侧接入，可以作为新的 `activation_source` 使用；
+4. 下一阶段的重点不再是导出本身，而是实际跑出 `BF16 / torchao / SmoothQuant` 三路 A/B。
 
 ## 建议的下一步
 

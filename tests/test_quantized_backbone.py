@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from sparsify.quantized_backbone import (
+    activation_source_requires_backbone_path,
+    activation_source_uses_torchao_loader,
     build_torchao_int8_quantization_config,
     load_torchao_w8a8_model,
     resolve_available_hookpoints,
@@ -46,6 +48,27 @@ def test_select_activation_model_path_uses_default_for_bf16():
         activation_backbone_path="/tmp/qwen3-w8a8",
     )
     assert path == "Qwen/Qwen3-0.6B"
+
+
+def test_select_activation_model_path_prefers_smoothquant_backbone():
+    path = select_activation_model_path(
+        activation_source="smoothquant_w8a8_backbone",
+        default_model="Qwen/Qwen3-0.6B",
+        activation_backbone_path="/tmp/qwen3-smoothquant-w8a8",
+    )
+    assert path == "/tmp/qwen3-smoothquant-w8a8"
+
+
+def test_activation_source_requires_backbone_path_for_quantized_teachers():
+    assert activation_source_requires_backbone_path("w8a8_backbone") is True
+    assert activation_source_requires_backbone_path("smoothquant_w8a8_backbone") is True
+    assert activation_source_requires_backbone_path("hf_bf16") is False
+
+
+def test_activation_source_uses_torchao_loader_only_for_torchao_path():
+    assert activation_source_uses_torchao_loader("w8a8_backbone") is True
+    assert activation_source_uses_torchao_loader("smoothquant_w8a8_backbone") is False
+    assert activation_source_uses_torchao_loader("hf_bf16") is False
 
 
 def test_load_torchao_w8a8_model_passes_quantization_config():

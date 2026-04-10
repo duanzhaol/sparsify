@@ -1,0 +1,23 @@
+ACTIVATION_SOURCE=smoothquant_w8a8_backbone \
+		ACTIVATION_BACKBONE_PATH=checkpoints/qwen3_smoothquant_w8a8_teacher_smoke \
+		WANDB_PROJECT=qwen3-0.6B-product_key_expert_jumprelu-qproj-smoothquant-teacher-smoke \
+		SAVE_DIR=checkpoints/product_key_expert_jumprelu_qproj_smoothquant_teacher_smoke \
+		RUN_NAME=product_key_expert_jumprelu_q_smoothquant_teacher_smoke \
+		MAX_TOKENS=2000000 \
+		ARCHITECTURE=product_key_expert_jumprelu \
+		K=32 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=56 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[0-13].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=0 \
+		bash scripts/autoresearch_test.sh

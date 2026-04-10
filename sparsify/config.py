@@ -112,7 +112,7 @@ class TrainConfig(Serializable):
     """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
 
     activation_source: str = "hf_bf16"
-    """Activation source: 'hf_bf16' | 'w8a8_backbone'."""
+    """Activation source: 'hf_bf16' | 'w8a8_backbone' | 'smoothquant_w8a8_backbone'."""
 
     activation_backbone_path: str | None = None
     """Optional path to a backbone used as the activation teacher."""
@@ -249,15 +249,22 @@ class TrainConfig(Serializable):
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
 
-        valid_activation_sources = {"hf_bf16", "w8a8_backbone"}
+        valid_activation_sources = {
+            "hf_bf16",
+            "w8a8_backbone",
+            "smoothquant_w8a8_backbone",
+        }
         if self.activation_source not in valid_activation_sources:
             raise ValueError(
                 f"activation_source must be one of {sorted(valid_activation_sources)}"
             )
 
-        if self.activation_source == "w8a8_backbone" and not self.activation_backbone_path:
+        if (
+            self.activation_source in {"w8a8_backbone", "smoothquant_w8a8_backbone"}
+            and not self.activation_backbone_path
+        ):
             raise ValueError(
-                "activation_backbone_path must be set when activation_source='w8a8_backbone'"
+                "activation_backbone_path must be set when activation_source uses an external backbone"
             )
 
         if (

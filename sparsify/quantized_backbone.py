@@ -4,6 +4,14 @@ from torchao.quantization import Int8DynamicActivationInt8WeightConfig
 from transformers import AutoModel, TorchAoConfig
 
 
+def activation_source_requires_backbone_path(activation_source: str) -> bool:
+    return activation_source in {"w8a8_backbone", "smoothquant_w8a8_backbone"}
+
+
+def activation_source_uses_torchao_loader(activation_source: str) -> bool:
+    return activation_source == "w8a8_backbone"
+
+
 def build_torchao_int8_quantization_config() -> TorchAoConfig:
     return TorchAoConfig(Int8DynamicActivationInt8WeightConfig())
 
@@ -14,10 +22,10 @@ def select_activation_model_path(
     default_model: str,
     activation_backbone_path: str | None,
 ) -> str:
-    if activation_source == "w8a8_backbone":
+    if activation_source_requires_backbone_path(activation_source):
         if activation_backbone_path is None:
             raise ValueError(
-                "activation_backbone_path must be provided for activation_source='w8a8_backbone'"
+                "activation_backbone_path must be provided for external activation sources"
             )
         return activation_backbone_path
     return default_model
