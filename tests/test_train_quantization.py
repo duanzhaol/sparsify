@@ -212,6 +212,26 @@ def test_train_config_rejects_invalid_io_quant_bits():
         TrainConfig(sae=SparseCoderConfig(), io_quant_bits=7)
 
 
+def test_train_config_rejects_invalid_io_quant_mode():
+    with pytest.raises(ValueError, match="io_quant_mode"):
+        TrainConfig(sae=SparseCoderConfig(), io_quant_mode="bad_mode")
+
+
+def test_train_config_rejects_invalid_io_quant_granularity():
+    with pytest.raises(ValueError, match="io_quant_granularity"):
+        TrainConfig(sae=SparseCoderConfig(), io_quant_granularity="per_channel")
+
+
+def test_train_config_rejects_invalid_io_quant_clip_mode():
+    with pytest.raises(ValueError, match="io_quant_clip_mode"):
+        TrainConfig(sae=SparseCoderConfig(), io_quant_clip_mode="mse")
+
+
 def test_train_config_rejects_invalid_io_loss_mode():
     with pytest.raises(ValueError, match="io_loss_mode"):
         TrainConfig(sae=SparseCoderConfig(), io_loss_mode="bad_mode")
+
+
+def test_train_config_rejects_negative_io_loss_deploy_weight():
+    with pytest.raises(ValueError, match="io_loss_deploy_weight"):
+        TrainConfig(sae=SparseCoderConfig(), io_loss_deploy_weight=-0.1)
