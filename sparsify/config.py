@@ -111,6 +111,25 @@ class TrainConfig(Serializable):
     elbow_threshold_path: str | None = None
     """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
 
+    # Phase 1 I/O quantization-aware training
+    io_quant_mode: str = "off"
+    """Training-time I/O quantization mode: 'off' | 'qat_io_int8'."""
+
+    io_quant_bits: int = 8
+    """Bit width for Phase 1 I/O fake quantization."""
+
+    io_quant_granularity: str = "per_token"
+    """Activation quantization granularity. Phase 1 only supports 'per_token'."""
+
+    io_quant_clip_mode: str = "absmax"
+    """Activation clipping mode. Phase 1 only supports 'absmax'."""
+
+    io_loss_mode: str = "dual_target"
+    """Loss mode for I/O quantization: 'fp_teacher' | 'dual_target' | 'deploy_target'."""
+
+    io_loss_deploy_weight: float = 0.25
+    """Weight applied to deploy-target FVU inside Phase 1 main loss."""
+
     # Hookpoint selection
     hookpoints: list[str] = list_field()
     """List of hookpoints to train sparse coders on."""
@@ -220,6 +239,26 @@ class TrainConfig(Serializable):
 
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        valid_io_quant_modes = {"off", "qat_io_int8"}
+        if self.io_quant_mode not in valid_io_quant_modes:
+            raise ValueError(f"io_quant_mode must be one of {sorted(valid_io_quant_modes)}")
+
+        if self.io_quant_bits != 8:
+            raise ValueError(f"io_quant_bits must be 8 in Phase 1, got {self.io_quant_bits}")
+
+        if self.io_quant_granularity != "per_token":
+            raise ValueError("Phase 1 only supports io_quant_granularity='per_token'")
+
+        if self.io_quant_clip_mode != "absmax":
+            raise ValueError("Phase 1 only supports io_quant_clip_mode='absmax'")
+
+        valid_loss_modes = {"fp_teacher", "dual_target", "deploy_target"}
+        if self.io_loss_mode not in valid_loss_modes:
+            raise ValueError(f"io_loss_mode must be one of {sorted(valid_loss_modes)}")
+
+        if self.io_loss_deploy_weight < 0:
+            raise ValueError("io_loss_deploy_weight must be non-negative")
 
         if self.compile_model:
             from .device import get_device_type

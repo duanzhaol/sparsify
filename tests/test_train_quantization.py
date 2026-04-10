@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import pytest
 
+from sparsify.config import SparseCoderConfig, TrainConfig
 from sparsify.train_quantization import (
     IOQuantMetrics,
     compute_exceed_ratio,
@@ -189,3 +190,28 @@ def test_summarize_io_quant_batch_handles_missing_alpha_elbow():
 
     assert metrics.exceed_fp_teacher is None
     assert metrics.exceed_deploy is None
+
+
+def test_train_config_accepts_io_quant_defaults():
+    cfg = TrainConfig(
+        sae=SparseCoderConfig(),
+        io_quant_mode="qat_io_int8",
+        io_quant_bits=8,
+        io_quant_granularity="per_token",
+        io_quant_clip_mode="absmax",
+        io_loss_mode="dual_target",
+        io_loss_deploy_weight=0.25,
+    )
+
+    assert cfg.io_quant_mode == "qat_io_int8"
+    assert cfg.io_quant_bits == 8
+
+
+def test_train_config_rejects_invalid_io_quant_bits():
+    with pytest.raises(ValueError, match="io_quant_bits"):
+        TrainConfig(sae=SparseCoderConfig(), io_quant_bits=7)
+
+
+def test_train_config_rejects_invalid_io_loss_mode():
+    with pytest.raises(ValueError, match="io_loss_mode"):
+        TrainConfig(sae=SparseCoderConfig(), io_loss_mode="bad_mode")
