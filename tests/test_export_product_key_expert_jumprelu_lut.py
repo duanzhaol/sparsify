@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 
 import torch
@@ -8,7 +9,19 @@ import torch.nn.functional as F
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-import export_product_key_expert_jumprelu_lut as exporter
+EXPORTER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "export"
+    / "export_product_key_expert_jumprelu_lut.py"
+)
+SPEC = importlib.util.spec_from_file_location(
+    "export_product_key_expert_jumprelu_lut",
+    EXPORTER_PATH,
+)
+assert SPEC is not None and SPEC.loader is not None
+exporter = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(exporter)
 
 
 class FakeModel:
@@ -84,6 +97,25 @@ def _make_linear(
         if bias is not None:
             layer.bias.copy_(bias)
     return layer
+
+
+def _write_layer_stub(layer_dir: Path) -> None:
+    layer_dir.mkdir(parents=True, exist_ok=True)
+    with open(layer_dir / "cfg.json", "w") as f:
+        json.dump(
+            {
+                "architecture": "product_key_expert_jumprelu",
+                "d_in": 1024,
+                "k": 32,
+                "num_experts": 512,
+                "active_experts": 2,
+                "latents_per_expert": 56,
+                "jumprelu_init_threshold": 0.0,
+                "jumprelu_bandwidth": 0.1,
+            },
+            f,
+        )
+    (layer_dir / "sae.safetensors").touch()
 
 
 def test_load_product_key_checkpoint_maps_runtime_keys(tmp_path: Path):
@@ -237,12 +269,82 @@ def test_build_metadata_uses_required_product_key_schema():
     )
 
 
-def test_resolve_layer_indices_uses_shared_layers_by_default(tmp_path: Path):
-    q_best_dir = tmp_path / "q" / "best"
-    up_best_dir = tmp_path / "up" / "best"
-    (q_best_dir / "layers.14.self_attn.q_proj").mkdir(parents=True)
-    (q_best_dir / "layers.15.self_attn.q_proj").mkdir(parents=True)
-    (up_best_dir / "layers.15.mlp.up_proj").mkdir(parents=True)
-    (up_best_dir / "layers.16.mlp.up_proj").mkdir(parents=True)
+def test_discover_projection_layer_sources_merges_split_runs(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    q_old = checkpoint_root / "product_key_expert_jumprelu_qproj" / (
+        "product_key_expert_jumprelu_q_dp2_bs1_ga8_ef1_k32_20260406_221636"
+    ) / "best"
+    q_new = checkpoint_root / "product_key_expert_jumprelu_qproj" / (
+        "product_key_expert_jumprelu_q_dp2_bs1_ga8_ef1_k32_20260407_001803"
+    ) / "best"
+    up_old = checkpoint_root / "product_key_expert_jumprelu_upproj" / (
+        "product_key_expert_jumprelu_up_dp2_bs1_ga8_ef1_k32_20260407_022440"
+    ) / "best"
+    up_new = checkpoint_root / "product_key_expert_jumprelu_upproj" / (
+        "product_key_expert_jumprelu_up_dp2_bs1_ga8_ef1_k32_20260407_042657"
+    ) / "best"
 
-    assert exporter.resolve_layer_indices(q_best_dir, up_best_dir, layers=None) == [15]
+    _write_layer_stub(q_old / "layers.0.self_attn.q_proj")
+    _write_layer_stub(q_old / "layers.14.self_attn.q_proj")
+    _write_layer_stub(q_new / "layers.14.self_attn.q_proj")
+    _write_layer_stub(q_new / "layers.15.self_attn.q_proj")
+    _write_layer_stub(up_old / "layers.0.mlp.up_proj")
+    _write_layer_stub(up_old / "layers.15.mlp.up_proj")
+    _write_layer_stub(up_new / "layers.15.mlp.up_proj")
+    _write_layer_stub(up_new / "layers.16.mlp.up_proj")
+
+    q_sources = exporter.discover_projection_layer_sources(checkpoint_root, "qkv")
+    up_sources = exporter.discover_projection_layer_sources(checkpoint_root, "gate_up")
+
+    assert sorted(q_sources) == [0, 14, 15]
+    assert "20260407_001803" in str(q_sources[14])
+    assert "20260406_221636" in str(q_sources[0])
+    assert sorted(up_sources) == [0, 15, 16]
+    assert "20260407_042657" in str(up_sources[15])
+
+
+def test_resolve_layer_indices_uses_source_intersection_by_default(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    q_run = checkpoint_root / "product_key_expert_jumprelu_qproj" / "run_a" / "best"
+    up_run = checkpoint_root / "product_key_expert_jumprelu_upproj" / "run_b" / "best"
+    _write_layer_stub(q_run / "layers.14.self_attn.q_proj")
+    _write_layer_stub(q_run / "layers.15.self_attn.q_proj")
+    _write_layer_stub(up_run / "layers.15.mlp.up_proj")
+    _write_layer_stub(up_run / "layers.16.mlp.up_proj")
+
+    q_sources = exporter.discover_projection_layer_sources(checkpoint_root, "qkv")
+    up_sources = exporter.discover_projection_layer_sources(checkpoint_root, "gate_up")
+
+    assert exporter.resolve_layer_indices(q_sources, up_sources, layers=None) == [15]
+
+
+def test_materialize_merge_view_creates_symlinked_best_dirs_and_manifest(tmp_path: Path):
+    checkpoint_root = tmp_path / "checkpoints"
+    q_run = checkpoint_root / "product_key_expert_jumprelu_qproj" / "run_q" / "best"
+    up_run = checkpoint_root / "product_key_expert_jumprelu_upproj" / "run_up" / "best"
+    q_layer = q_run / "layers.14.self_attn.q_proj"
+    up_layer = up_run / "layers.14.mlp.up_proj"
+    _write_layer_stub(q_layer)
+    _write_layer_stub(up_layer)
+
+    q_sources = exporter.discover_projection_layer_sources(checkpoint_root, "qkv")
+    up_sources = exporter.discover_projection_layer_sources(checkpoint_root, "gate_up")
+    merge_dir = tmp_path / "merged"
+    result = exporter.materialize_merge_view(
+        q_sources=q_sources,
+        up_sources=up_sources,
+        output_dir=merge_dir,
+        layers=[14],
+    )
+
+    q_link = result["qproj_best_dir"] / "layers.14.self_attn.q_proj"
+    up_link = result["upproj_best_dir"] / "layers.14.mlp.up_proj"
+    assert q_link.is_symlink()
+    assert up_link.is_symlink()
+    assert q_link.resolve() == q_layer.resolve()
+    assert up_link.resolve() == up_layer.resolve()
+
+    manifest = json.load(open(merge_dir / "merge_manifest.json"))
+    assert manifest["layers"] == [14]
+    assert manifest["qkv"]["14"].endswith("layers.14.self_attn.q_proj")
+    assert manifest["gate_up"]["14"].endswith("layers.14.mlp.up_proj")

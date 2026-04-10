@@ -25,6 +25,7 @@ Sparsify 是 LUTurbo 的 SAE 训练与导出模块。当前文档同步 Phase 2 
 6. [核心组件](architecture/core-components.md)
 7. [性能说明](architecture/performance.md)
 8. [SAE 到 LUT 导出](export/sae-to-lut.md)
+9. [Product-Key JumpReLU LUT 导出](export/product-key-expert-jumprelu-lut.md)
 
 ## 当前文档策略
 

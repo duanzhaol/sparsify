@@ -7,9 +7,9 @@ Each output `.lut.safetensors` file is a runtime-complete artifact containing:
 - Stage B precomputed lookup tables
 - Stage C compensation weights
 
-The exporter is intentionally separate from `convert_sae_to_lut.py` because the
-product-key JumpReLU checkpoints use a different tensor layout and a richer
-runtime bundle schema.
+The exporter lives under `scripts/export/` because the product-key JumpReLU
+checkpoints use a different tensor layout and a richer runtime bundle schema
+than the older generic LUT exporters.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
@@ -45,6 +46,17 @@ PROJECTION_SPECS = {
 
 ATTENTION_MODULES = {"q_proj", "k_proj", "v_proj", "o_proj"}
 LAYER_PATTERN = re.compile(r"layers\.(\d+)\.")
+RUN_TIMESTAMP_PATTERN = re.compile(r"_(\d{8}_\d{6})$")
+CONFIG_MATCH_KEYS = (
+    "architecture",
+    "d_in",
+    "k",
+    "num_experts",
+    "active_experts",
+    "latents_per_expert",
+    "jumprelu_init_threshold",
+    "jumprelu_bandwidth",
+)
 
 
 def parse_layer_range(range_str: str) -> list[int]:
@@ -61,39 +73,165 @@ def parse_layer_range(range_str: str) -> list[int]:
     return sorted(set(numbers))
 
 
-def detect_layer_indices(best_dir: Path) -> list[int]:
-    layers = set()
-    for child in best_dir.iterdir():
-        if not child.is_dir():
+def _run_name_for_layer_dir(layer_dir: Path) -> str:
+    if layer_dir.parent.name == "best" and layer_dir.parent.parent.name:
+        return layer_dir.parent.parent.name
+    return str(layer_dir.parent)
+
+
+def _priority_for_layer_dir(layer_dir: Path) -> tuple[str, str]:
+    run_name = _run_name_for_layer_dir(layer_dir)
+    match = RUN_TIMESTAMP_PATTERN.search(run_name)
+    timestamp = match.group(1) if match else ""
+    return (timestamp, run_name, str(layer_dir))
+
+
+def _load_checkpoint_cfg(layer_dir: Path) -> dict[str, Any]:
+    with open(layer_dir / "cfg.json", "r") as f:
+        return json.load(f)
+
+
+def _config_signature(layer_dir: Path) -> tuple[Any, ...]:
+    config = _load_checkpoint_cfg(layer_dir)
+    return tuple(config.get(key) for key in CONFIG_MATCH_KEYS)
+
+
+def _validate_projection_sources(
+    operator_key: str,
+    sources: dict[int, Path],
+    *,
+    layers: Sequence[int] | None = None,
+) -> None:
+    if layers is None:
+        selected_sources = dict(sources)
+    else:
+        selected_sources = {layer_idx: sources[layer_idx] for layer_idx in layers}
+
+    if not selected_sources:
+        return
+
+    baseline_layer = min(selected_sources)
+    baseline_signature = _config_signature(selected_sources[baseline_layer])
+    for layer_idx, layer_dir in selected_sources.items():
+        signature = _config_signature(layer_dir)
+        if signature != baseline_signature:
+            raise ValueError(
+                f"Incompatible configs detected while merging {operator_key} layer "
+                f"{layer_idx} from {layer_dir}."
+            )
+
+
+def discover_projection_layer_sources(
+    checkpoint_root: Path,
+    operator_key: str,
+) -> dict[int, Path]:
+    spec = PROJECTION_SPECS[operator_key]
+    layer_pattern = f"layers.*.{spec['checkpoint_suffix']}"
+    chosen: dict[int, Path] = {}
+
+    for layer_dir in checkpoint_root.rglob(layer_pattern):
+        if not layer_dir.is_dir():
             continue
-        match = LAYER_PATTERN.search(child.name)
-        if match:
-            layers.add(int(match.group(1)))
-    return sorted(layers)
+        if not (layer_dir / "cfg.json").exists():
+            continue
+        if not (layer_dir / "sae.safetensors").exists():
+            continue
+
+        match = LAYER_PATTERN.search(layer_dir.name)
+        if match is None:
+            continue
+        layer_idx = int(match.group(1))
+
+        current = chosen.get(layer_idx)
+        if current is None or _priority_for_layer_dir(layer_dir) >= _priority_for_layer_dir(current):
+            chosen[layer_idx] = layer_dir
+
+    return dict(sorted(chosen.items()))
 
 
 def resolve_layer_indices(
-    qproj_best_dir: Path,
-    upproj_best_dir: Path,
+    qproj_sources: dict[int, Path],
+    upproj_sources: dict[int, Path],
     *,
     layers: list[int] | None,
+    operators: Sequence[str] | None = None,
 ) -> list[int]:
+    selected_operators = set(operators or ("qkv", "gate_up"))
+    available_sets = []
+    if "qkv" in selected_operators:
+        available_sets.append(set(qproj_sources))
+    if "gate_up" in selected_operators:
+        available_sets.append(set(upproj_sources))
+
+    if not available_sets:
+        raise ValueError("At least one operator must be selected.")
+
+    available_layers = set.intersection(*available_sets)
     if layers is not None:
-        return sorted(set(layers))
+        requested_layers = sorted(set(layers))
+        missing = [layer for layer in requested_layers if layer not in available_layers]
+        if missing:
+            raise ValueError(f"Requested layers missing from discovered sources: {missing}")
+        return requested_layers
 
-    qproj_layers = set(detect_layer_indices(qproj_best_dir))
-    upproj_layers = set(detect_layer_indices(upproj_best_dir))
-    shared_layers = sorted(qproj_layers & upproj_layers)
-    if not shared_layers:
-        raise ValueError(
-            "No shared layers found between "
-            f"{qproj_best_dir} and {upproj_best_dir}."
-        )
-    return shared_layers
+    resolved = sorted(available_layers)
+    if not resolved:
+        raise ValueError("No shared layers found for the selected operators.")
+    return resolved
 
 
-def _checkpoint_dir(best_dir: Path, layer_idx: int, checkpoint_suffix: str) -> Path:
-    return best_dir / f"layers.{layer_idx}.{checkpoint_suffix}"
+def _ensure_clean_symlink_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def materialize_merge_view(
+    *,
+    q_sources: dict[int, Path],
+    up_sources: dict[int, Path],
+    output_dir: Path,
+    layers: Sequence[int],
+    operators: Sequence[str] | None = None,
+) -> dict[str, Path]:
+    selected_operators = set(operators or ("qkv", "gate_up"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    qproj_best_dir = output_dir / "qproj_best"
+    upproj_best_dir = output_dir / "upproj_best"
+    qproj_best_dir.mkdir(parents=True, exist_ok=True)
+    upproj_best_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: dict[str, Any] = {
+        "layers": list(layers),
+        "qkv": {},
+        "gate_up": {},
+    }
+
+    if "qkv" in selected_operators:
+        for layer_idx in layers:
+            source = q_sources[layer_idx]
+            dest = qproj_best_dir / source.name
+            _ensure_clean_symlink_path(dest)
+            dest.symlink_to(source.resolve(), target_is_directory=True)
+            manifest["qkv"][str(layer_idx)] = str(source)
+
+    if "gate_up" in selected_operators:
+        for layer_idx in layers:
+            source = up_sources[layer_idx]
+            dest = upproj_best_dir / source.name
+            _ensure_clean_symlink_path(dest)
+            dest.symlink_to(source.resolve(), target_is_directory=True)
+            manifest["gate_up"][str(layer_idx)] = str(source)
+
+    with open(output_dir / "merge_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    return {
+        "qproj_best_dir": qproj_best_dir,
+        "upproj_best_dir": upproj_best_dir,
+    }
 
 
 def _load_tensor_map(path: Path) -> dict[str, torch.Tensor]:
@@ -341,7 +479,7 @@ def build_metadata(
         "layers": layer_info,
         "creation_info": {
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "script": "export_product_key_expert_jumprelu_lut.py",
+            "script": "scripts/export/export_product_key_expert_jumprelu_lut.py",
         },
     }
 
@@ -365,26 +503,33 @@ def _load_model(model_path: str) -> Any:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Export product_key_expert_jumprelu checkpoints to standalone LUT bundles.",
+        description=(
+            "Export product_key_expert_jumprelu checkpoints to standalone LUT "
+            "bundles from a single checkpoint root, with optional merge view output."
+        ),
     )
     parser.add_argument("model_path", type=str, help="Path to the base model.")
     parser.add_argument(
-        "--qproj-best-dir",
+        "checkpoint_dir",
         type=str,
-        required=True,
-        help="Path to the q_proj checkpoint `best/` directory.",
-    )
-    parser.add_argument(
-        "--upproj-best-dir",
-        type=str,
-        required=True,
-        help="Path to the up_proj checkpoint `best/` directory.",
+        help=(
+            "Checkpoint root containing product_key_expert_jumprelu qproj/upproj "
+            "runs. The exporter auto-discovers and merges per-layer best dirs."
+        ),
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         required=True,
         help="Directory to write metadata.json and *.lut.safetensors bundles.",
+    )
+    parser.add_argument(
+        "--merge-output-dir",
+        type=str,
+        help=(
+            "Optional directory to materialize a merged qproj/upproj best-view "
+            "using symlinks plus a merge_manifest.json."
+        ),
     )
     parser.add_argument(
         "--layers",
@@ -425,36 +570,45 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    qproj_best_dir = Path(args.qproj_best_dir)
-    upproj_best_dir = Path(args.upproj_best_dir)
+    checkpoint_root = Path(args.checkpoint_dir)
     output_dir = Path(args.output_dir)
+    qproj_sources = discover_projection_layer_sources(checkpoint_root, "qkv")
+    upproj_sources = discover_projection_layer_sources(checkpoint_root, "gate_up")
     layer_indices = resolve_layer_indices(
-        qproj_best_dir,
-        upproj_best_dir,
+        qproj_sources,
+        upproj_sources,
         layers=parse_layer_range(args.layers) if args.layers else None,
+        operators=args.operators,
     )
+    if "qkv" in args.operators:
+        _validate_projection_sources("qkv", qproj_sources, layers=layer_indices)
+    if "gate_up" in args.operators:
+        _validate_projection_sources("gate_up", upproj_sources, layers=layer_indices)
     target_dtype = _dtype_from_name(args.dtype)
     batch_size = None if args.batch_size == 0 else args.batch_size
 
     print(f"Loading model from {args.model_path}...")
     model = _load_model(args.model_path)
 
-    projection_best_dirs = {
-        "qkv": qproj_best_dir,
-        "gate_up": upproj_best_dir,
+    if args.merge_output_dir:
+        materialize_merge_view(
+            q_sources=qproj_sources,
+            up_sources=upproj_sources,
+            output_dir=Path(args.merge_output_dir),
+            layers=layer_indices,
+            operators=args.operators,
+        )
+
+    projection_sources = {
+        "qkv": qproj_sources,
+        "gate_up": upproj_sources,
     }
     layer_info: dict[str, Any] = {}
 
     for layer_idx in layer_indices:
         for operator_key in args.operators:
             spec = PROJECTION_SPECS[operator_key]
-            checkpoint_dir = _checkpoint_dir(
-                projection_best_dirs[operator_key],
-                layer_idx,
-                spec["checkpoint_suffix"],
-            )
-            if not checkpoint_dir.exists():
-                raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
+            checkpoint_dir = projection_sources[operator_key][layer_idx]
 
             output_name = spec["output_name"].format(layer_idx=layer_idx)
             print(f"Exporting {output_name} from {checkpoint_dir}...")

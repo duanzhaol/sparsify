@@ -8,10 +8,12 @@ python scripts/preprocess_dataset.py \
       --num_proc 16
 
 
-# 根据sae生成lut
-python convert_sae_to_lut.py /root/models/Qwen3-0.6B /root/sparsify/checkpoints/ \
-      --output_dir ./lut_output \
-      --proj_types qkv gate_up oproj \
+# 根据 product_key_expert_jumprelu checkpoint 生成 LUT
+python scripts/export/export_product_key_expert_jumprelu_lut.py /root/models/Qwen3-0.6B /root/sparsify/checkpoints/ \
+      --output-dir ./lut_output \
+      --merge-output-dir ./lut_merge \
+      --operators qkv gate_up \
       --layers 0-27 \
-      --threshold_dir /root/sparsify/thresholds/Qwen3-0.6B \
-      --dtype bfloat16
+      --compensation-ratio 0.25 \
+      --dtype bfloat16 \
+      --device cpu

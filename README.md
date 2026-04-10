@@ -57,6 +57,7 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 
 - `docs/training/quickstart.md`
 - `docs/export/sae-to-lut.md`
+- `docs/export/product-key-expert-jumprelu-lut.md`
 
 ## 端到端流程
 
@@ -64,7 +65,7 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 
 1. 使用 `python -m sparsify` 训练 SAE 检查点
 2. 使用 `compute_elbow_thresholds.py` 计算肘部阈值
-3. 使用 `convert_sae_to_lut.py` 导出 LUT 产物
+3. 使用 `scripts/export/export_product_key_expert_jumprelu_lut.py` 导出 `product_key_expert_jumprelu` LUT 产物
 
 这是从 Transformer 激活值到 LUTurbo 可用产物的最短路径。
 
@@ -76,7 +77,7 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 - `sparsify/sparse_coder.py`：标准 SAE 实现
 - `sparsify/tiled_sparse_coder.py`：分块 SAE 变体
 - `compute_elbow_thresholds.py`：阈值统计信息生成
-- `convert_sae_to_lut.py`：LUT 导出流程
+- `scripts/export/export_product_key_expert_jumprelu_lut.py`：`product_key_expert_jumprelu` LUT 导出流程
 
 ## 文档
 
@@ -89,6 +90,7 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 - `docs/training/qwen3-guide.md`
 - `docs/architecture/training-pipeline.md`
 - `docs/export/sae-to-lut.md`
+- `docs/export/product-key-expert-jumprelu-lut.md`
 
 历史材料（包括旧的代码走查和 Ascend 性能分析报告）现存放于 `docs/archive/` 下。
 
@@ -100,6 +102,7 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 4. `docs/training/qwen3-guide.md`
 5. `docs/architecture/training-pipeline.md`
 6. `docs/export/sae-to-lut.md`
+7. `docs/export/product-key-expert-jumprelu-lut.md`
 
 ## 当前训练主线
 
@@ -141,9 +144,9 @@ sae = Sae.load_from_disk("checkpoints/your_run/layers.7.self_attn.o_proj")
 - `checkpoints/` 下的 SAE 检查点
 - 可选的 `best/` 检查点快照
 - `compute_elbow_thresholds.py` 生成的阈值 JSON 文件
-- `convert_sae_to_lut.py` 生成的 LUT 导出结果
+- `scripts/export/export_product_key_expert_jumprelu_lut.py` 生成的 LUT 导出结果
 
-导出脚本依赖相对稳定的命名和目录约定。建议让运行名称与投影类型（projection type）保持一致，例如 `qproj`、`oproj`、`upproj`。
+`product_key_expert_jumprelu` 导出脚本依赖相对稳定的命名和目录约定。建议让运行名称与投影类型（projection type）保持一致，例如 `qproj`、`upproj`，便于脚本自动发现并合并分层训练结果。
 
 ## 开发
 

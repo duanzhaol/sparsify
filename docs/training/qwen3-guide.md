@@ -12,7 +12,7 @@
 - `layers.X.self_attn.q_proj`
 - `layers.X.mlp.up_proj`
 
-这些与 `convert_sae_to_lut.py` 的导出逻辑自然对应。脚本已包含 `qproj`、`oproj`、`upproj` 映射，以及 `qkv`、`gate_up` 这类融合目标。
+其中 `q_proj` 与 `up_proj` 可直接对应 `scripts/export/export_product_key_expert_jumprelu_lut.py` 的自动发现逻辑；导出脚本会进一步融合为 `qkv` 与 `gate_up` 两类运行时目标。
 
 ## 建议的起始配置
 
@@ -68,9 +68,9 @@ python -m sparsify Qwen/Qwen3-0.6B HuggingFaceFW/fineweb \
 
 如果最终目标是 LUT 转换：
 
-- 保持 hookpoint 与 `convert_sae_to_lut.py` 支持的投影名称一致
-- 尽量按投影类型分别保存肘部阈值
-- 运行名称尽量包含投影类型，方便后续导出脚本检索
+- 保持 hookpoint 与导出脚本识别的 `q_proj` / `up_proj` 训练目标一致
+- 对拆分训练的层段保持相同架构配置，便于后续 merge
+- 运行名称尽量包含投影类型，方便导出脚本自动检索
 
 ## 本指南不再涵盖的内容
 

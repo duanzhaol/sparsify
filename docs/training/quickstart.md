@@ -146,18 +146,22 @@ python compute_elbow_thresholds.py Qwen/Qwen3-0.6B \
 示例：
 
 ```bash
-python convert_sae_to_lut.py Qwen/Qwen3-0.6B checkpoints \
-  --output_dir lut_output \
-  --proj_types oproj \
-  --layers 7,14 \
-  --threshold_dir thresholds
+python scripts/export/export_product_key_expert_jumprelu_lut.py /root/models/Qwen3-0.6B checkpoints \
+  --output-dir /tmp/product_key_expert_jumprelu_lut \
+  --merge-output-dir /tmp/product_key_expert_jumprelu_merge \
+  --layers 0-27 \
+  --operators qkv gate_up \
+  --compensation-ratio 0.25 \
+  --dtype float16 \
+  --device cpu \
+  --batch-size 512
 ```
 
 通常需要满足：
 
-- 检查点目录中有导出脚本可识别的投影类型命名
-- 你选择的投影类型与训练时的 hookpoint 对得上
-- 阈值文件放在 `--threshold_dir` 指定的目录里
+- 检查点根目录下包含 `product_key_expert_jumprelu` 的 `qproj` / `upproj` 运行
+- 你选择的层和算子与训练时的 hookpoint 对得上
+- 同一导出批次内的层配置保持一致
 
 ## 7. 完整最小路径
 
@@ -165,14 +169,14 @@ python convert_sae_to_lut.py Qwen/Qwen3-0.6B checkpoints \
 
 1. 使用 `python -m sparsify` 训练 SAE 检查点
 2. 使用 `compute_elbow_thresholds.py` 计算肘部统计信息
-3. 使用 `convert_sae_to_lut.py` 导出 LUT 产物
+3. 使用 `scripts/export/export_product_key_expert_jumprelu_lut.py` 导出 LUT 产物
 
 这就是从模型激活到 LUTurbo 可用结果的最短闭环。
 
 ## 8. 常见后续动作
 
 - 使用 `compute_elbow_thresholds.py` 生成肘部阈值
-- 使用 `convert_sae_to_lut.py` 转换选定的 SAE 检查点
+- 使用 `scripts/export/export_product_key_expert_jumprelu_lut.py` 转换选定的 `product_key_expert_jumprelu` 检查点
 - 用脚本扫描 `metrics.jsonl` / `summary.json` 做多 run 横向比较
 - 在 `docs/architecture/training-pipeline.md` 中查看训练流程
 
@@ -181,6 +185,7 @@ python convert_sae_to_lut.py Qwen/Qwen3-0.6B checkpoints \
 - 使用 `docs/training/config-reference.md` 了解参数详情
 - 使用 `docs/training/qwen3-guide.md` 获取 Qwen3 特定建议
 - 使用 `docs/export/sae-to-lut.md` 了解导出脚本行为和注意事项
+- 使用 `docs/export/product-key-expert-jumprelu-lut.md` 查看目录格式和 merge 用法
 
 ## 9. 平台说明
 
