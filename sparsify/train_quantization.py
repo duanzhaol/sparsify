@@ -152,3 +152,19 @@ def summarize_io_quant_batch(
         output_scale_mean=output_scale_mean,
         main_loss=main_loss,
     )
+
+
+def select_main_loss(
+    io_metrics: IOQuantMetrics | None,
+    baseline_fvu: Tensor,
+    io_loss_mode: str,
+) -> Tensor:
+    if io_metrics is None:
+        return baseline_fvu
+    if io_loss_mode == "fp_teacher":
+        return io_metrics.fvu_fp_teacher
+    if io_loss_mode == "deploy_target":
+        return io_metrics.fvu_deploy
+    if io_loss_mode == "dual_target":
+        return io_metrics.main_loss
+    raise ValueError(f"Unsupported io_loss_mode: {io_loss_mode}")

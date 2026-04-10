@@ -26,6 +26,12 @@ from .hadamard import HadamardRotation
 from .metrics_logger import MetricsLogger
 from .sign_sgd import SignSGD
 from .sparse_coder import SparseCoder, _get_sae_class
+from .train_quantization import (
+    compute_exceed_ratio,
+    fake_quantize_activation_per_token,
+    select_main_loss,
+    summarize_io_quant_batch,
+)
 from .tiled_sparse_coder import TiledSparseCoder
 from .utils import (
     get_layer_list,
@@ -412,6 +418,7 @@ class Trainer(CheckpointMixin):
         avg_monitoring: dict[str, dict[str, float]] = defaultdict(
             lambda: defaultdict(float)
         )
+        running_main_losses: dict[str, float] = defaultdict(float)
         avg_losses: dict[str, float] = {
             name: float("inf") for name in self.saes.keys()
         }
@@ -520,10 +527,19 @@ class Trainer(CheckpointMixin):
                 self.cfg.use_hadamard
                 and name in self.hadamard_rotations
                 and name in self.elbow_thresholds
+                and self.cfg.io_quant_mode != "qat_io_int8"
             ):
                 original_target_for_exceed = self.hadamard_rotations[
                     name
                 ].unrotate(acts)
+
+            acts_fp = acts
+            if self.cfg.io_quant_mode == "qat_io_int8":
+                acts_in, _, _ = fake_quantize_activation_per_token(
+                    acts_fp, num_bits=self.cfg.io_quant_bits
+                )
+            else:
+                acts_in = acts_fp
 
             # Process each SAE for this hook (supports multi-seed)
             for sae_key in hook_to_sae_keys[name]:
@@ -531,7 +547,7 @@ class Trainer(CheckpointMixin):
 
                 # On the first iteration, initialize decoder bias from data mean
                 if self.global_step == 0 and not self.cfg.finetune:
-                    mean = self.maybe_all_reduce(acts.mean(0))
+                    mean = self.maybe_all_reduce(acts_in.mean(0))
 
                     if hasattr(raw, 'set_b_dec_data'):
                         raw.set_b_dec_data(mean.to(raw.dtype))
@@ -551,7 +567,7 @@ class Trainer(CheckpointMixin):
                 with sync_context:
                     raw.set_training_tokens(self.total_tokens)
                     out = wrapped(
-                        x=acts,
+                        x=acts_in,
                         dead_mask=(
                             self.num_tokens_since_fired[sae_key]
                             > self.cfg.dead_feature_threshold
@@ -578,6 +594,46 @@ class Trainer(CheckpointMixin):
                             metric_value / denom
                         )
                     router_regularization_loss = raw.pop_regularization_loss()
+                    io_metrics = None
+                    if self.cfg.io_quant_mode == "qat_io_int8":
+                        io_metrics = summarize_io_quant_batch(
+                            target_fp=acts_fp,
+                            recon_fp=out.sae_out,
+                            num_bits=self.cfg.io_quant_bits,
+                            alpha=None,
+                            elbow_value=None,
+                            deploy_weight=self.cfg.io_loss_deploy_weight,
+                        )
+                    main_loss = select_main_loss(
+                        io_metrics, out.fvu, self.cfg.io_loss_mode
+                    )
+                    running_main_losses[sae_key] += float(
+                        main_loss.detach() / denom
+                    )
+                    avg_losses[sae_key] = running_main_losses[sae_key]
+
+                    if io_metrics is not None:
+                        avg_monitoring[sae_key]["fvu_fp_teacher"] += float(
+                            io_metrics.fvu_fp_teacher.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["fvu_deploy"] += float(
+                            io_metrics.fvu_deploy.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["quant_floor"] += float(
+                            io_metrics.quant_floor.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["input_clip_rate"] += float(
+                            io_metrics.input_clip_rate.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["output_clip_rate"] += float(
+                            io_metrics.output_clip_rate.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["input_scale_mean"] += float(
+                            io_metrics.input_scale_mean.detach() / denom
+                        )
+                        avg_monitoring[sae_key]["output_scale_mean"] += float(
+                            io_metrics.output_scale_mean.detach() / denom
+                        )
 
                     # Compute exceed metrics if elbow thresholds available
                     if name in self.elbow_thresholds and self.cfg.exceed_alphas:
@@ -587,35 +643,57 @@ class Trainer(CheckpointMixin):
                         elif device.type not in ("cuda", "npu"):
                             metrics_time_start = time.perf_counter()
 
-                        if (
-                            self.cfg.use_hadamard
-                            and name in self.hadamard_rotations
-                        ):
-                            original_target = (
-                                original_target_for_exceed
-                                if original_target_for_exceed is not None
-                                else acts
-                            )
-                            original_recon = self.hadamard_rotations[
-                                name
-                            ].unrotate(out.sae_out)
-                        else:
-                            original_target = acts
-                            original_recon = out.sae_out
-
-                        error_magnitude = torch.abs(original_target - original_recon)
                         elbow_value = self.elbow_thresholds[name]
-                        num_elements = error_magnitude.numel()
+                        if io_metrics is None:
+                            if (
+                                self.cfg.use_hadamard
+                                and name in self.hadamard_rotations
+                            ):
+                                original_target = (
+                                    original_target_for_exceed
+                                    if original_target_for_exceed is not None
+                                    else acts_fp
+                                )
+                                original_recon = self.hadamard_rotations[
+                                    name
+                                ].unrotate(out.sae_out)
+                            else:
+                                original_target = acts_fp
+                                original_recon = out.sae_out
 
-                        for alpha in self.cfg.exceed_alphas:
-                            threshold = alpha * elbow_value
-                            exceed_count = (
-                                (error_magnitude > threshold).sum().float()
+                            error_magnitude = torch.abs(
+                                original_target - original_recon
                             )
-                            exceed_ratio = exceed_count / num_elements
-                            avg_exceed[sae_key][alpha] += float(
-                                exceed_ratio.detach() / denom
-                            )
+                            num_elements = error_magnitude.numel()
+
+                            for alpha in self.cfg.exceed_alphas:
+                                threshold = alpha * elbow_value
+                                exceed_count = (
+                                    (error_magnitude > threshold).sum().float()
+                                )
+                                exceed_ratio = exceed_count / num_elements
+                                avg_exceed[sae_key][alpha] += float(
+                                    exceed_ratio.detach() / denom
+                                )
+                        else:
+                            for alpha in self.cfg.exceed_alphas:
+                                threshold = alpha * elbow_value
+                                exceed_fp_teacher = compute_exceed_ratio(
+                                    acts_fp,
+                                    io_metrics.recon_deploy,
+                                    threshold,
+                                )
+                                exceed_deploy = compute_exceed_ratio(
+                                    io_metrics.target_deploy,
+                                    io_metrics.recon_deploy,
+                                    threshold,
+                                )
+                                avg_monitoring[sae_key][
+                                    f"exceed_alpha_{alpha:.2f}_fp_teacher"
+                                ] += float(exceed_fp_teacher.detach() / denom)
+                                avg_monitoring[sae_key][
+                                    f"exceed_alpha_{alpha:.2f}_deploy"
+                                ] += float(exceed_deploy.detach() / denom)
 
                         if should_time and device.type in ("cuda", "npu"):
                             m_end = create_event(enable_timing=True)
@@ -629,7 +707,7 @@ class Trainer(CheckpointMixin):
                             )
 
                     # Local backward pass (inside sync_context for DDP no_sync)
-                    loss = out.fvu + self.cfg.auxk_alpha * out.auxk_loss
+                    loss = main_loss + self.cfg.auxk_alpha * out.auxk_loss
                     if (
                         router_regularization_loss is not None
                         and self.cfg.sae.router_load_balance_alpha > 0
@@ -641,7 +719,7 @@ class Trainer(CheckpointMixin):
 
                     # Matryoshka multi-K loss
                     if self.cfg.matryoshka_ks:
-                        total_var = (acts - acts.mean(0)).pow(2).sum()
+                        total_var = (acts_in - acts_in.mean(0)).pow(2).sum()
                         weights = (
                             self.cfg.matryoshka_weights
                             or [1.0] * len(self.cfg.matryoshka_ks)
@@ -655,7 +733,7 @@ class Trainer(CheckpointMixin):
                             sub_recon = raw.decode(
                                 sorted_acts[:, :mk], sorted_indices[:, :mk]
                             )
-                            sub_e = (acts - sub_recon).pow(2).sum()
+                            sub_e = (acts_in - sub_recon).pow(2).sum()
                             loss = loss + mw * sub_e / total_var
 
                     # Orthogonality regularization on active decoder columns
@@ -761,8 +839,6 @@ class Trainer(CheckpointMixin):
                     )
                 if should_time:
                     timing_step_count += 1
-
-                avg_losses = dict(avg_fvu)
 
             finally:
                 for handle in handles:
@@ -984,6 +1060,7 @@ class Trainer(CheckpointMixin):
                     avg_fvu.clear()
                     avg_exceed.clear()
                     avg_monitoring.clear()
+                    running_main_losses.clear()
                     total_forward_time = 0.0
                     total_metrics_time = 0.0
                     timing_step_count = 0

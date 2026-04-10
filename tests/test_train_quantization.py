@@ -9,6 +9,7 @@ from sparsify.train_quantization import (
     compute_exceed_ratio,
     compute_fvu_scalar,
     fake_quantize_activation_per_token,
+    select_main_loss,
     summarize_io_quant_batch,
 )
 
@@ -190,6 +191,34 @@ def test_summarize_io_quant_batch_handles_missing_alpha_elbow():
 
     assert metrics.exceed_fp_teacher is None
     assert metrics.exceed_deploy is None
+
+
+def test_select_main_loss_respects_io_loss_modes():
+    target = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
+    recon = torch.tensor([[1.0, 1.5], [2.5, 4.0]], dtype=torch.float32)
+    baseline_fvu = torch.tensor(0.75, dtype=torch.float32)
+
+    metrics = summarize_io_quant_batch(
+        target_fp=target,
+        recon_fp=recon,
+        num_bits=8,
+        alpha=None,
+        elbow_value=None,
+        deploy_weight=0.25,
+    )
+
+    assert float(select_main_loss(None, baseline_fvu, "dual_target")) == pytest.approx(
+        float(baseline_fvu)
+    )
+    assert float(select_main_loss(metrics, baseline_fvu, "fp_teacher")) == pytest.approx(
+        float(metrics.fvu_fp_teacher)
+    )
+    assert float(select_main_loss(metrics, baseline_fvu, "deploy_target")) == pytest.approx(
+        float(metrics.fvu_deploy)
+    )
+    assert float(select_main_loss(metrics, baseline_fvu, "dual_target")) == pytest.approx(
+        float(metrics.main_loss)
+    )
 
 
 def test_train_config_accepts_io_quant_defaults():
