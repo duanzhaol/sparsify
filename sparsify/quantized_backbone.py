@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import logging
+
+import torch
 from torchao.quantization import Int8DynamicActivationInt8WeightConfig
+from torch.nn import Parameter
 from transformers import AutoModel, TorchAoConfig
+
+logger = logging.getLogger(__name__)
 
 
 def activation_source_requires_backbone_path(activation_source: str) -> bool:
@@ -49,6 +55,62 @@ def load_torchao_w8a8_model(
         token=token,
         quantization_config=quantization_config,
     )
+
+
+def materialize_compressed_linears(
+    model,
+    *,
+    compressed_linear_cls=None,
+    quantization_status_enum=None,
+) -> int:
+    if compressed_linear_cls is None or quantization_status_enum is None:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        from compressed_tensors.quantization import QuantizationStatus
+
+        compressed_linear_cls = CompressedLinear
+        quantization_status_enum = QuantizationStatus
+
+    materialized = 0
+    for _, module in model.named_modules():
+        if not isinstance(module, compressed_linear_cls):
+            continue
+        if module.quantization_status != quantization_status_enum.COMPRESSED:
+            continue
+
+        weight_data = module.compressor.decompress_module(module)
+        module.register_parameter(
+            "weight",
+            Parameter(weight_data.detach().clone(), requires_grad=False),
+        )
+        module.quantization_status = quantization_status_enum.FROZEN
+        materialized += 1
+
+    return materialized
+
+
+def load_smoothquant_w8a8_model(
+    model_name_or_path: str,
+    *,
+    device_map,
+    revision: str | None,
+    torch_dtype,
+    token: str | None,
+    model_loader=AutoModel,
+    materialize_fn=materialize_compressed_linears,
+):
+    model = model_loader.from_pretrained(
+        model_name_or_path,
+        device_map=device_map,
+        revision=revision,
+        torch_dtype=torch_dtype,
+        token=token,
+    )
+    materialized = materialize_fn(model)
+    logger.info(
+        "Eagerly materialized %d CompressedLinear modules for SmoothQuant teacher",
+        materialized,
+    )
+    return model
 
 
 def resolve_available_hookpoints(model) -> list[str]:

@@ -23,7 +23,7 @@
 
 本轮暂不包含：
 
-- SmoothQuant teacher 的正式训练结果；
+- SmoothQuant teacher 的完整多层正式训练结果；
 - SmoothQuant teacher 与 `SAE I/O Int8 QAT` 的组合实验；
 - SmoothQuant teacher 的系统性 A/B 精度矩阵。
 
@@ -226,6 +226,78 @@ python quantization/export_llmcompressor_smoothquant_w8a8_teacher.py \
 - 在训练配置里声明该 teacher 为 activation source；
 - 直接发起一个最小 smoke 训练。
 
+### 6. 正式训练脚本与运行时修复
+
+在最小接入的基础上，当前又补了一个更接近正式训练的单层脚本：
+
+- `scripts/full/qwen3-0.6B/product_key_expert_jumprelu/train_smoothquant_teacher_q_0_13.sh`
+
+这次接入过程中还遇到了一个关键运行时问题：
+
+- `LLM Compressor / compressed_tensors` 导出的 `CompressedLinear`
+  在第一次 CUDA 前向时会触发懒解压；
+- 在当前训练链路下，这一步会报：
+  `RuntimeError: Inference tensors do not track version counter.`
+
+当前采用的修复方式是：
+
+- 在 `smoothquant_w8a8_backbone` 加载完成后；
+- 立即遍历所有 `CompressedLinear`；
+- 提前把压缩权重 materialize 成普通 `Parameter`；
+- 避免第一次训练前向时再进入懒解压分支。
+
+相关代码位置：
+
+- `sparsify/quantized_backbone.py`
+- `sparsify/__main__.py`
+- `tests/test_quantized_backbone.py`
+
+此外，为了避免多卡非 0 rank 把 `sys.stdout` 重定向成 `None` 后引发潜在兼容性问题，
+当前把非 0 rank 的 stdout 抑制改成了指向 `/dev/null` 的 file-like 对象。
+
+相关代码位置：
+
+- `sparsify/__main__.py`
+- `tests/test_main.py`
+
+## 当前实验观察
+
+### 1. 单层正式训练已经可以正常启动
+
+在修复 `CompressedLinear` 懒解压问题后，下面这类单层训练命令已经能够顺利启动：
+
+```bash
+ACTIVATION_SOURCE=smoothquant_w8a8_backbone \
+ACTIVATION_BACKBONE_PATH=/root/sparsify-ascend/checkpoints/qwen3_smoothquant_w8a8_teacher_calib512 \
+HOOKPOINTS='layers.[13].self_attn.q_proj' \
+COMPILE_MODEL=0 \
+bash scripts/autoresearch_test.sh
+```
+
+运行日志中可以看到：
+
+- `Eagerly materialized 196 CompressedLinear modules for SmoothQuant teacher`
+
+这说明当前修复已经实际生效。
+
+### 2. 当前看到的 FVU 与 BF16 teacher 非常接近
+
+从当前单层训练观察看：
+
+- `SmoothQuant teacher` 的训练曲线与 `BF16 teacher` 非常接近；
+- 尤其是 `FVU` 没有明显出现更低或更高的量级差异。
+
+目前更合理的解读不是“配置错了”，而是：
+
+- `SmoothQuant` 的目标本来就是尽量保持 BF16 teacher 的行为；
+- 因此它产出的中间激活分布本身就可能与 BF16 很接近；
+- 在这种前提下，SAE 的重建任务难度也会保持接近，最终 `FVU` 接近是正常现象。
+
+换句话说，当前结果更像是在说明：
+
+- `SmoothQuant teacher` 是一个更接近部署态的 teacher 来源；
+- 但它未必会显著降低 SAE 的重建难度。
+
 ## 当前结论
 
 截至当前，可以比较稳地给出以下判断：
@@ -233,13 +305,16 @@ python quantization/export_llmcompressor_smoothquant_w8a8_teacher.py \
 1. `LLM Compressor` 已经可以在本仓库中对本地 `Qwen3-0.6B` 执行离线 SmoothQuant W8A8 导出；
 2. 导出后的 checkpoint 可以重新加载，并保留我们关注的 `q_proj` hookpoint；
 3. `SmoothQuant teacher` 已经完成最小训练侧接入，可以作为新的 `activation_source` 使用；
-4. 下一阶段的重点不再是导出本身，而是实际跑出 `BF16 / torchao / SmoothQuant` 三路 A/B。
+4. `SmoothQuant teacher` 当前已经能启动单层正式训练，并解决了 `CompressedLinear` 懒解压导致的运行时错误；
+5. 从当前单层观察看，`SmoothQuant teacher` 的 `FVU` 与 `BF16 teacher` 非常接近，这更像是真实结果而不是配置错误；
+6. 下一阶段的重点不再是导出本身，而是实际跑出 `BF16 / torchao / SmoothQuant` 三路 A/B。
 
 ## 建议的下一步
 
 按优先级，后续建议顺序是：
 
 1. 给训练侧新增 `SmoothQuant W8A8 teacher` 的 `activation_source`；
-2. 先跑一个 `layers.[0-13].self_attn.q_proj` 的 smoke 训练脚本；
+2. 先把 `layers.13.self_attn.q_proj` 的单层正式训练完整跑完，记录最终 `FVU / exceed_alpha_0.50`；
 3. 与当前 `BF16 teacher`、`torchao W8A8 teacher` 做最小三路对照；
-4. 如果结果有正收益，再决定是否把它与 `SAE I/O Int8 QAT` 组合。
+4. 如果三路结果仍然非常接近，则把 `SmoothQuant teacher` 定位为“部署一致性增强方案”；
+5. 如果后续还有收益空间，再决定是否把它与 `SAE I/O Int8 QAT` 组合。

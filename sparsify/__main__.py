@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-from contextlib import nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import dataclass
 from datetime import timedelta
 from glob import glob
@@ -26,6 +26,7 @@ from .device import (
 )
 from .quantized_backbone import (
     activation_source_uses_torchao_loader,
+    load_smoothquant_w8a8_model,
     load_torchao_w8a8_model,
     select_activation_model_path,
 )
@@ -33,6 +34,17 @@ from .trainer import Trainer, TrainConfig
 from .utils import simple_parse_args_string
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def suppress_stdout_for_nonzero_rank(rank: int):
+    if rank == 0:
+        with nullcontext():
+            yield
+        return
+
+    with open(os.devnull, "w") as devnull, redirect_stdout(devnull):
+        yield
 
 
 def _normalize_resume_signature_from_args(args: "RunConfig") -> dict:
@@ -228,6 +240,14 @@ def load_artifacts(
             torch_dtype=dtype,
             token=args.hf_token,
         )
+    elif args.activation_source == "smoothquant_w8a8_backbone":
+        model = load_smoothquant_w8a8_model(
+            model_name_or_path,
+            device_map={"": get_device_string(rank)},
+            revision=args.revision,
+            torch_dtype=dtype,
+            token=args.hf_token,
+        )
     else:
         model = AutoModel.from_pretrained(
             model_name_or_path,
@@ -306,7 +326,7 @@ def run():
     ) and _is_local_artifact(args.dataset)
 
     # Prevent ranks other than 0 from printing
-    with nullcontext() if rank == 0 else redirect_stdout(None):
+    with suppress_stdout_for_nonzero_rank(rank):
         if not ddp or parallel_local_load or rank == 0:
             model, dataset = load_artifacts(args, rank)
         if ddp:
