@@ -24,6 +24,10 @@ from .device import (
     is_bf16_supported,
     set_device,
 )
+from .quantized_backbone import (
+    load_torchao_w8a8_model,
+    select_activation_model_path,
+)
 from .trainer import Trainer, TrainConfig
 from .utils import simple_parse_args_string
 
@@ -209,14 +213,28 @@ def load_artifacts(
     args: RunConfig, rank: int
 ) -> tuple[PreTrainedModel, Dataset | MemmapDataset]:
     dtype = torch.bfloat16 if is_bf16_supported() else "auto"
-
-    model = AutoModel.from_pretrained(
-        args.model,
-        device_map={"": get_device_string(rank)},
-        revision=args.revision,
-        torch_dtype=dtype,
-        token=args.hf_token,
+    model_name_or_path = select_activation_model_path(
+        activation_source=args.activation_source,
+        default_model=args.model,
+        activation_backbone_path=args.activation_backbone_path,
     )
+
+    if args.activation_source == "w8a8_backbone":
+        model = load_torchao_w8a8_model(
+            model_name_or_path,
+            device_map={"": get_device_string(rank)},
+            revision=args.revision,
+            torch_dtype=dtype,
+            token=args.hf_token,
+        )
+    else:
+        model = AutoModel.from_pretrained(
+            model_name_or_path,
+            device_map={"": get_device_string(rank)},
+            revision=args.revision,
+            torch_dtype=dtype,
+            token=args.hf_token,
+        )
 
     # For memmap-style datasets
     if args.dataset.endswith(".bin"):
@@ -234,7 +252,9 @@ def load_artifacts(
 
         assert isinstance(dataset, Dataset)
         if "input_ids" not in dataset.column_names:
-            tokenizer = AutoTokenizer.from_pretrained(args.model, token=args.hf_token)
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model, token=args.hf_token
+            )
             dataset = chunk_and_tokenize(
                 dataset,
                 tokenizer,
@@ -275,9 +295,14 @@ def run():
             logger.info(f"Using DDP across {dist.get_world_size()} GPUs.")
 
     args = parse(RunConfig)
-    parallel_local_load = _is_local_artifact(args.model) and _is_local_artifact(
-        args.dataset
+    activation_model_path = select_activation_model_path(
+        activation_source=args.activation_source,
+        default_model=args.model,
+        activation_backbone_path=args.activation_backbone_path,
     )
+    parallel_local_load = _is_local_artifact(
+        activation_model_path
+    ) and _is_local_artifact(args.dataset)
 
     # Prevent ranks other than 0 from printing
     with nullcontext() if rank == 0 else redirect_stdout(None):

@@ -98,6 +98,11 @@ class Trainer(CheckpointMixin):
                     raw_hookpoints.append(name)
 
             cfg.hookpoints = natsorted(raw_hookpoints)
+            if not cfg.hookpoints:
+                raise ValueError(
+                    "No hookpoints matched the requested patterns in the loaded backbone: "
+                    f"{expanded_patterns}"
+                )
         else:
             # If no layers are specified, train on all of them
             if not cfg.layers:
