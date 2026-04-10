@@ -1,0 +1,75 @@
+ACTIVATION_SOURCE=w8a8_backbone \
+		ACTIVATION_BACKBONE_PATH=$HOME/models/Qwen3-0.6B \
+		WANDB_PROJECT=qwen3-0.6B-product_key_expert_jumprelu-qproj-w8a8-teacher-smoke \
+		SAVE_DIR=checkpoints/product_key_expert_jumprelu_qproj_w8a8_teacher_smoke \
+		RUN_NAME=product_key_expert_jumprelu_q_w8a8_teacher_smoke \
+		MAX_TOKENS=2000000 \
+		ARCHITECTURE=product_key_expert_jumprelu \
+		K=32 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=56 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[0-13].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=0 \
+		bash scripts/autoresearch_test.sh
+
+
+WANDB_PROJECT=qwen3-0.6B-product_key_expert_jumprelu-qproj-w8a8-teacher-smoke \
+		SAVE_DIR=checkpoints/product_key_expert_jumprelu_qproj_bf16_teacher_smoke \
+		RUN_NAME=product_key_expert_jumprelu_q_bf16_teacher_smoke \
+		MAX_TOKENS=200000000 \
+		ARCHITECTURE=product_key_expert_jumprelu \
+		K=32 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=56 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[13].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=0 \
+		bash scripts/autoresearch_test.sh
+
+WANDB_PROJECT=qwen3-0.6B-product_key_expert_jumprelu-qproj-w8a8-teacher-smoke \
+		SAVE_DIR=checkpoints/product_key_expert_jumprelu_qproj_io_int8 \
+		RUN_NAME=product_key_expert_jumprelu_q_io_int8 \
+		MAX_TOKENS=200000000 \
+		ARCHITECTURE=product_key_expert_jumprelu \
+		K=32 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=56 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[13].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=1 \
+		IO_QUANT_MODE=qat_io_int8 \
+		IO_QUANT_BITS=8 \
+		IO_QUANT_GRANULARITY=per_token \
+		IO_QUANT_CLIP_MODE=absmax \
+		IO_LOSS_MODE=dual_target \
+		IO_LOSS_DEPLOY_WEIGHT=0.25 \
+		bash scripts/autoresearch_test.sh
+
