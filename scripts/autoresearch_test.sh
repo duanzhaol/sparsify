@@ -27,6 +27,12 @@ K="${K:-128}"
 HOOKPOINTS="${HOOKPOINTS:-layers.[3].self_attn.q_proj}"
 OPTIMIZER="${OPTIMIZER:-signum}"
 USE_HADAMARD="${USE_HADAMARD:-0}"
+IO_QUANT_MODE="${IO_QUANT_MODE:-off}"
+IO_QUANT_BITS="${IO_QUANT_BITS:-8}"
+IO_QUANT_GRANULARITY="${IO_QUANT_GRANULARITY:-per_token}"
+IO_QUANT_CLIP_MODE="${IO_QUANT_CLIP_MODE:-absmax}"
+IO_LOSS_MODE="${IO_LOSS_MODE:-dual_target}"
+IO_LOSS_DEPLOY_WEIGHT="${IO_LOSS_DEPLOY_WEIGHT:-0.25}"
 
 # 优化器与有效 batch 配置。
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -214,6 +220,12 @@ cmd=(
   --wandb_log_frequency "${WANDB_LOG_FREQUENCY}"
   --max_tokens "${MAX_TOKENS}"
   --elbow_threshold_path "${ELBOW_THRESHOLD_PATH}"
+  --io_quant_mode "${IO_QUANT_MODE}"
+  --io_quant_bits "${IO_QUANT_BITS}"
+  --io_quant_granularity "${IO_QUANT_GRANULARITY}"
+  --io_quant_clip_mode "${IO_QUANT_CLIP_MODE}"
+  --io_loss_mode "${IO_LOSS_MODE}"
+  --io_loss_deploy_weight "${IO_LOSS_DEPLOY_WEIGHT}"
 )
 
 if [[ "${USE_HADAMARD}" == "1" ]]; then

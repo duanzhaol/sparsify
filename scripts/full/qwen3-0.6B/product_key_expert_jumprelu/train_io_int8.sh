@@ -1,0 +1,27 @@
+WANDB_PROJECT=qwen3-0.6B-product_key_expert_jumprelu-qproj-io-int8 \
+		SAVE_DIR=checkpoints/product_key_expert_jumprelu_qproj_io_int8 \
+		RUN_NAME=product_key_expert_jumprelu_q_io_int8 \
+		MAX_TOKENS=100000000 \
+		ARCHITECTURE=product_key_expert_jumprelu \
+		K=32 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=512 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=56 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[0-13].self_attn.q_proj' \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=1 \
+		IO_QUANT_MODE=qat_io_int8 \
+		IO_QUANT_BITS=8 \
+		IO_QUANT_GRANULARITY=per_token \
+		IO_QUANT_CLIP_MODE=absmax \
+		IO_LOSS_MODE=dual_target \
+		IO_LOSS_DEPLOY_WEIGHT=0.25 \
+		bash scripts/autoresearch_test.sh
