@@ -87,12 +87,8 @@ def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
         raise ValueError("compute_fvu_scalar requires at least 2 dimensions (tokens + hidden)")
     target_flat = _flatten_except_last(target_fp)
     recon_flat = _flatten_except_last(recon_fp)
-    if target_flat.shape[0] < 2:
-        raise ValueError("compute_fvu_scalar requires at least 2 tokens per batch")
     mean = target_flat.mean(dim=0, keepdim=True)
-    variance = (target_flat - mean).pow(2).sum()
-    if variance.item() == 0:
-        raise ValueError("compute_fvu_scalar requires a non-zero target variance (zero variance target detected)")
+    variance = (target_flat - mean).pow(2).sum().clamp_min(1e-12)
     mse = (target_flat - recon_flat).pow(2).sum()
     return mse / variance
 

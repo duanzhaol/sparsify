@@ -68,18 +68,21 @@ def test_compute_fvu_scalar_rejects_vector():
         compute_fvu_scalar(vector, recon)
 
 
-def test_compute_fvu_scalar_rejects_zero_variance_target():
+def test_compute_fvu_scalar_zero_variance_target_returns_finite_scalar():
     target = torch.ones((2, 3), dtype=torch.float32)
-    recon = torch.zeros_like(target)
-    with pytest.raises(ValueError, match="zero variance"):
-        compute_fvu_scalar(target, recon)
+    recon = target.clone()
+    fvu = compute_fvu_scalar(target, recon)
+    assert fvu.ndim == 0
+    assert bool(torch.isfinite(fvu))
+    assert float(fvu) == pytest.approx(0.0, abs=1e-8)
 
 
-def test_compute_fvu_scalar_rejects_singleton_token_batch():
+def test_compute_fvu_scalar_singleton_token_batch_returns_finite_scalar():
     target = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
     recon = torch.tensor([[1.1, 2.1]], dtype=torch.float32)
-    with pytest.raises(ValueError, match="at least 2 tokens"):
-        compute_fvu_scalar(target, recon)
+    fvu = compute_fvu_scalar(target, recon)
+    assert fvu.ndim == 0
+    assert bool(torch.isfinite(fvu))
 
 
 def test_fake_quantize_activation_rejects_invalid_bits():
