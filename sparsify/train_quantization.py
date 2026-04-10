@@ -32,10 +32,16 @@ def fake_quantize_activation_per_token(
     x: Tensor,
     num_bits: int = 8,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Per-token symmetric fake quantization returning qdq, scales, and clip-rate."""
+    """Per-token symmetric fake quantization returning qdq, scales, and clip-rate.
+
+    Clip-rate reports the fraction of elements that would exceed the clamp boundary
+    before rounding/clamping, which stays at 0 for ordinary finite inputs under
+    the per-token absmax scale and helps keep the metric honest for future modes.
+    """
 
     qmax = _symmetric_qmax(num_bits)
     x_fp = x.to(torch.float32)
+    original_dtype = x.dtype
     absmax = x_fp.abs().amax(dim=-1, keepdim=True)
     reported_scales = torch.where(absmax > 0, absmax / qmax, torch.zeros_like(absmax))
     safe_scales = torch.where(reported_scales > 0, reported_scales, torch.ones_like(reported_scales))
@@ -43,11 +49,10 @@ def fake_quantize_activation_per_token(
     clipped = normalized.clamp(-qmax, qmax)
     rounded = clipped.round()
     qdq_fp = rounded * safe_scales
-    # Clip-rate tracks boundary saturation: fraction of entries hitting ±qmax after clamp/round.
-    # Under per-token absmax scaling this reflects true near-quantization saturation rather than noisy clipping.
-    saturation_mask = rounded.abs() == qmax
-    clip_rate = saturation_mask.float().mean()
+    pre_clamp = normalized
+    clip_rate = (pre_clamp.abs() > qmax).float().mean()
     qdq = x_fp + (qdq_fp - x_fp).detach()
+    qdq = qdq.to(original_dtype)
     return qdq, reported_scales, clip_rate
 
 
@@ -74,8 +79,12 @@ def compute_fvu_scalar(target: Tensor, recon: Tensor) -> Tensor:
         raise ValueError("compute_fvu_scalar requires at least 2 dimensions (tokens + hidden)")
     target_flat = _flatten_except_last(target_fp)
     recon_flat = _flatten_except_last(recon_fp)
+    if target_flat.shape[0] < 2:
+        raise ValueError("compute_fvu_scalar requires at least 2 tokens per batch")
     mean = target_flat.mean(dim=0, keepdim=True)
-    variance = (target_flat - mean).pow(2).sum().clamp_min(1e-12)
+    variance = (target_flat - mean).pow(2).sum()
+    if variance.item() == 0:
+        raise ValueError("compute_fvu_scalar requires a non-zero target variance (zero variance target detected)")
     mse = (target_flat - recon_flat).pow(2).sum()
     return mse / variance
 

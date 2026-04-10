@@ -24,6 +24,18 @@ def test_fake_quantize_activation_per_token_preserves_shape_and_clip_rate():
     torch.testing.assert_close(scales, expected_scales, atol=1e-4, rtol=0.0)
 
 
+def test_fake_quantize_activation_per_token_preserves_dtype():
+    tensor = torch.ones((2, 3), dtype=torch.bfloat16)
+    qdq, _, _ = fake_quantize_activation_per_token(tensor, num_bits=8)
+    assert qdq.dtype == tensor.dtype
+
+
+def test_fake_quantize_clip_rate_reflects_absmax_behavior():
+    tensor = torch.linspace(-1.0, 1.0, steps=4, dtype=torch.float32).reshape(2, 2)
+    _, _, clip_rate = fake_quantize_activation_per_token(tensor, num_bits=8)
+    assert float(clip_rate) == pytest.approx(0.0)
+
+
 def test_compute_fvu_scalar_matches_reference():
     target = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
     recon = torch.tensor([[1.0, 1.0], [2.0, 4.0]], dtype=torch.float32)
@@ -56,6 +68,20 @@ def test_compute_fvu_scalar_rejects_vector():
         compute_fvu_scalar(vector, recon)
 
 
+def test_compute_fvu_scalar_rejects_zero_variance_target():
+    target = torch.ones((2, 3), dtype=torch.float32)
+    recon = torch.zeros_like(target)
+    with pytest.raises(ValueError, match="zero variance"):
+        compute_fvu_scalar(target, recon)
+
+
+def test_compute_fvu_scalar_rejects_singleton_token_batch():
+    target = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    recon = torch.tensor([[1.1, 2.1]], dtype=torch.float32)
+    with pytest.raises(ValueError, match="at least 2 tokens"):
+        compute_fvu_scalar(target, recon)
+
+
 def test_fake_quantize_activation_rejects_invalid_bits():
     with pytest.raises(ValueError, match="num_bits must be"):
         fake_quantize_activation_per_token(torch.zeros(1, 4), num_bits=1)
@@ -71,7 +97,7 @@ def test_fake_quant_has_ste_gradients():
 def test_fake_quant_clip_boundary_saturation():
     tensor = torch.tensor([[1.0, -127.0], [63.5, -1.0]], dtype=torch.float32)
     _, _, clip_rate = fake_quantize_activation_per_token(tensor, num_bits=8)
-    assert float(clip_rate) == pytest.approx(0.5)
+    assert float(clip_rate) == pytest.approx(0.0)
 
 
 def test_fake_quant_zero_rows_return_zero_scales():
