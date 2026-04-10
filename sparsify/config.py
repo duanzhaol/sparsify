@@ -111,6 +111,15 @@ class TrainConfig(Serializable):
     elbow_threshold_path: str | None = None
     """Path to JSON file with pre-computed elbow thresholds per layer/operation."""
 
+    activation_source: str = "hf_bf16"
+    """Activation source: 'hf_bf16' | 'w8a8_backbone'."""
+
+    activation_backbone_path: str | None = None
+    """Optional path to a backbone used as the activation teacher."""
+
+    activation_threshold_path: str | None = None
+    """Optional threshold file matched to the configured activation source."""
+
     # Phase 1 I/O quantization-aware training
     io_quant_mode: str = "off"
     """Training-time I/O quantization mode: 'off' | 'qat_io_int8'."""
@@ -239,6 +248,25 @@ class TrainConfig(Serializable):
 
         if self.elbow_threshold_path and not Path(self.elbow_threshold_path).exists():
             raise ValueError(f"Elbow threshold file not found: {self.elbow_threshold_path}")
+
+        valid_activation_sources = {"hf_bf16", "w8a8_backbone"}
+        if self.activation_source not in valid_activation_sources:
+            raise ValueError(
+                f"activation_source must be one of {sorted(valid_activation_sources)}"
+            )
+
+        if self.activation_source == "w8a8_backbone" and not self.activation_backbone_path:
+            raise ValueError(
+                "activation_backbone_path must be set when activation_source='w8a8_backbone'"
+            )
+
+        if (
+            self.activation_threshold_path
+            and not Path(self.activation_threshold_path).exists()
+        ):
+            raise ValueError(
+                f"Activation threshold file not found: {self.activation_threshold_path}"
+            )
 
         valid_io_quant_modes = {"off", "qat_io_int8"}
         if self.io_quant_mode not in valid_io_quant_modes:

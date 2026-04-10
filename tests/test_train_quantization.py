@@ -264,3 +264,24 @@ def test_train_config_rejects_invalid_io_loss_mode():
 def test_train_config_rejects_negative_io_loss_deploy_weight():
     with pytest.raises(ValueError, match="io_loss_deploy_weight"):
         TrainConfig(sae=SparseCoderConfig(), io_loss_deploy_weight=-0.1)
+
+
+def test_train_config_accepts_w8a8_activation_source():
+    cfg = TrainConfig(
+        sae=SparseCoderConfig(),
+        activation_source="w8a8_backbone",
+        activation_backbone_path="/tmp/qwen3-w8a8",
+    )
+
+    assert cfg.activation_source == "w8a8_backbone"
+    assert cfg.activation_backbone_path == "/tmp/qwen3-w8a8"
+
+
+def test_train_config_rejects_unknown_activation_source():
+    with pytest.raises(ValueError, match="activation_source"):
+        TrainConfig(sae=SparseCoderConfig(), activation_source="bad_source")
+
+
+def test_train_config_requires_backbone_path_for_w8a8_source():
+    with pytest.raises(ValueError, match="activation_backbone_path"):
+        TrainConfig(sae=SparseCoderConfig(), activation_source="w8a8_backbone")
