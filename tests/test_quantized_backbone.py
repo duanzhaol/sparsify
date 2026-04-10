@@ -13,7 +13,7 @@ from sparsify.quantized_backbone import (
 
 def test_build_torchao_int8_quantization_config_uses_expected_quant_type():
     cfg = build_torchao_int8_quantization_config()
-    assert cfg.quant_type == "int8_dynamic_activation_int8_weight"
+    assert "Int8DynamicActivationInt8WeightConfig" in str(cfg.quant_type)
 
 
 def test_validate_requested_hookpoints_rejects_missing_entries():
@@ -69,8 +69,8 @@ def test_load_torchao_w8a8_model_passes_quantization_config():
 
     assert model == "fake-model"
     assert captured["model_name_or_path"] == "Qwen/Qwen3-0.6B"
-    assert captured["kwargs"]["quantization_config"].quant_type == (
-        "int8_dynamic_activation_int8_weight"
+    assert "Int8DynamicActivationInt8WeightConfig" in str(
+        captured["kwargs"]["quantization_config"].quant_type
     )
 
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from torchao.quantization import Int8DynamicActivationInt8WeightConfig
 from transformers import AutoModel, TorchAoConfig
 
 
 def build_torchao_int8_quantization_config() -> TorchAoConfig:
-    return TorchAoConfig("int8_dynamic_activation_int8_weight")
+    return TorchAoConfig(Int8DynamicActivationInt8WeightConfig())
 
 
 def select_activation_model_path(
