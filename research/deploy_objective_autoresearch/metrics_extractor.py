@@ -88,7 +88,7 @@ def _latest_value(records: list[dict[str, Any]], keys: list[str]) -> float | Non
     return None
 
 
-def _best_objective(cost_ratio: float | None, exceed: float | None) -> float | None:
+def _objective(cost_ratio: float | None, exceed: float | None) -> float | None:
     if cost_ratio is None or exceed is None:
         return None
     return cost_ratio + exceed
@@ -192,14 +192,16 @@ def extract_trial_snapshot(
     best_exceed = _best_value(records, exceed_keys)
     latest_fvu = _latest_value(records, fvu_keys)
     best_fvu = _best_value(records, fvu_keys)
-    best_objective = _best_objective(total_cost_ratio, best_exceed)
+    # The deployment objective tracks the best observed exceed seen so far for
+    # this trial, matching the user-facing metric definition.
+    best_objective = _objective(total_cost_ratio, best_exceed)
 
     prev_records = [
         row for row in records if int(row.get("total_tokens") or 0) <= window_start_tokens
     ]
     prev_best_exceed = _best_value(prev_records, exceed_keys)
     prev_best_fvu = _best_value(prev_records, fvu_keys)
-    prev_best_objective = _best_objective(total_cost_ratio, prev_best_exceed)
+    prev_best_objective = _objective(total_cost_ratio, prev_best_exceed)
 
     checkpoint_count = 0
     if checkpoint_interval_tokens > 0:

@@ -4,7 +4,7 @@ from pathlib import Path
 from research.deploy_objective_autoresearch.metrics_extractor import extract_trial_snapshot
 
 
-def test_extract_trial_snapshot_uses_best_exceed_not_latest(tmp_path: Path):
+def test_extract_trial_snapshot_uses_best_exceed_for_objective(tmp_path: Path):
     log_path = tmp_path / "train.log"
     log_path.write_text("[cost][k=80] total_ratio=0.081543x\n")
     metrics_path = tmp_path / "metrics.jsonl"
@@ -46,6 +46,7 @@ def test_extract_trial_snapshot_uses_best_exceed_not_latest(tmp_path: Path):
     assert snapshot.best_objective == 0.279543
     assert snapshot.tokens_seen == 45_000_000
     assert snapshot.delta_best_exceed == 0.0
+    assert snapshot.delta_best_objective == 0.0
 
 
 def test_extract_trial_snapshot_accepts_bracketed_hookpoint_prefix(tmp_path: Path):
@@ -126,3 +127,4 @@ def test_extract_trial_snapshot_uses_summary_tokens_when_metrics_lag(tmp_path: P
     assert snapshot.checkpoint_count == 1
     assert snapshot.latest_step == 458
     assert snapshot.best_objective == 0.5806134953670502
+    assert snapshot.delta_best_objective == 0.0
