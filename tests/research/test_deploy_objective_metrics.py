@@ -80,3 +80,49 @@ def test_extract_trial_snapshot_accepts_bracketed_hookpoint_prefix(tmp_path: Pat
     assert snapshot.latest_exceed_alpha_0_50 == 0.198
     assert snapshot.best_exceed_alpha_0_50 == 0.198
     assert snapshot.best_objective == 0.279543
+
+
+def test_extract_trial_snapshot_uses_summary_tokens_when_metrics_lag(tmp_path: Path):
+    log_path = tmp_path / "train.log"
+    log_path.write_text("[cost][k=80] total_ratio=0.081543x\n")
+    metrics_path = tmp_path / "metrics.jsonl"
+    rows = [
+        {
+            "type": "step",
+            "step": 439,
+            "total_tokens": 14_385_152,
+            "layers.17.self_attn.q_proj/exceed_alpha_0.50": 0.49907049536705017,
+            "layers.17.self_attn.q_proj/fvu": 0.44677263498306274,
+        },
+        {
+            "type": "step",
+            "step": 449,
+            "total_tokens": 14_712_832,
+            "layers.17.self_attn.q_proj/exceed_alpha_0.50": 0.5008922815322876,
+            "layers.17.self_attn.q_proj/fvu": 0.4535769820213318,
+        },
+    ]
+    metrics_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (tmp_path / "summary.json").write_text(
+        json.dumps(
+            {
+                "total_steps": 458,
+                "total_tokens": 15_011_840,
+                "final_fvu": {"layers.17.self_attn.q_proj": 0.0056},
+                "best_fvu": {"layers.17.self_attn.q_proj": 0.44677263498306274},
+            }
+        )
+    )
+
+    snapshot = extract_trial_snapshot(
+        log_path=log_path,
+        metrics_path=metrics_path,
+        hook_metric_prefix="layers.[17].self_attn.q_proj",
+        checkpoint_interval_tokens=15_000_000,
+        window_start_tokens=14_712_832,
+    )
+
+    assert snapshot.tokens_seen == 15_011_840
+    assert snapshot.checkpoint_count == 1
+    assert snapshot.latest_step == 458
+    assert snapshot.best_objective == 0.5806134953670502

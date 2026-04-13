@@ -139,8 +139,6 @@ def _repair_trial_metrics_from_artifacts(
 def _repair_trials_from_artifacts(store: StateStore, cfg: SearchConfig) -> bool:
     changed = False
     for trial in store.list_trials():
-        if trial.best_objective is not None and trial.metrics_path and trial.checkpoint_root:
-            continue
         changed = _repair_trial_metrics_from_artifacts(store, cfg, trial) or changed
     return changed
 

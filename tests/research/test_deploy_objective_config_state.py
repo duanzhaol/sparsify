@@ -184,6 +184,60 @@ def test_metric_command_backfills_missing_objective_from_trial_artifacts(
     assert repaired_trial.best_objective == 0.279543
 
 
+def test_metric_command_repairs_progress_even_when_objective_exists(
+    tmp_path: Path,
+    capsys,
+):
+    cfg = SearchConfig.default(run_root=tmp_path)
+    store = StateStore.bootstrap(cfg)
+    trial = store.create_trial(cfg, cfg.baseline_params())
+    trial.status = "continue_scheduled"
+    trial.best_objective = 0.279543
+    trial.best_exceed_alpha_0_50 = 0.198
+    trial.total_cost_ratio = 0.081543
+    trial.tokens_seen = 14_712_832
+    trial.checkpoint_decisions = 0
+
+    ckpt_dir = tmp_path / "trial_ckpt"
+    ckpt_dir.mkdir()
+    log_path = tmp_path / "train.log"
+    log_path.write_text("[cost][k=80] total_ratio=0.081543x\n")
+    metrics_path = ckpt_dir / "metrics.jsonl"
+    rows = [
+        {
+            "type": "step",
+            "step": 449,
+            "total_tokens": 14_712_832,
+            "layers.17.self_attn.q_proj/exceed_alpha_0.50": 0.198,
+            "layers.17.self_attn.q_proj/fvu": 0.305,
+        },
+    ]
+    metrics_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (ckpt_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "total_steps": 458,
+                "total_tokens": 15_011_840,
+                "final_fvu": {"layers.17.self_attn.q_proj": 0.300},
+                "best_fvu": {"layers.17.self_attn.q_proj": 0.305},
+            }
+        )
+    )
+    trial.log_path = str(log_path)
+    trial.metrics_path = str(metrics_path)
+    trial.checkpoint_root = str(ckpt_dir)
+    store.save_trial(trial)
+
+    exit_code = main(["metric", "--run-root", str(tmp_path)])
+    captured = capsys.readouterr()
+    repaired_trial = store.load_trial(trial.trial_id)
+
+    assert exit_code == 0
+    assert captured.out.strip() == "0.279543000000"
+    assert repaired_trial.tokens_seen == 15_011_840
+    assert repaired_trial.checkpoint_decisions == 1
+
+
 def test_pending_spawn_params_are_consumed_when_creating_next_trial(tmp_path: Path):
     cfg = SearchConfig.default(run_root=tmp_path)
     store = StateStore.bootstrap(cfg)

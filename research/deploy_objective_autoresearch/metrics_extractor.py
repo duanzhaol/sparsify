@@ -100,6 +100,38 @@ def _improvement(previous: float | None, current: float | None) -> float | None:
     return previous - current
 
 
+def _fallback_checkpoint_progress(metrics_path: Path) -> tuple[int | None, int | None]:
+    summary_path = metrics_path.parent / "summary.json"
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text())
+        except json.JSONDecodeError:
+            summary = {}
+        total_tokens = summary.get("total_tokens")
+        total_steps = summary.get("total_steps")
+        return (
+            int(total_tokens) if total_tokens is not None else None,
+            int(total_steps) if total_steps is not None else None,
+        )
+
+    state_path = metrics_path.parent / "state.pt"
+    if state_path.exists():
+        try:
+            import torch
+
+            state = torch.load(state_path, map_location="cpu")
+        except Exception:
+            state = {}
+        if isinstance(state, dict):
+            total_tokens = state.get("total_tokens")
+            global_step = state.get("global_step")
+            return (
+                int(total_tokens) if total_tokens is not None else None,
+                int(global_step) if global_step is not None else None,
+            )
+    return None, None
+
+
 def extract_trial_snapshot(
     log_path: Path,
     metrics_path: Path,
@@ -149,6 +181,13 @@ def extract_trial_snapshot(
     latest = records[-1]
     tokens_seen = int(latest.get("total_tokens") or 0)
     latest_step = latest.get("step")
+    fallback_tokens, fallback_step = _fallback_checkpoint_progress(metrics_path)
+    if fallback_tokens is not None and fallback_tokens > tokens_seen:
+        tokens_seen = fallback_tokens
+    if fallback_step is not None and (
+        latest_step is None or int(fallback_step) > int(latest_step)
+    ):
+        latest_step = fallback_step
     latest_exceed = _latest_value(records, exceed_keys)
     best_exceed = _best_value(records, exceed_keys)
     latest_fvu = _latest_value(records, fvu_keys)
