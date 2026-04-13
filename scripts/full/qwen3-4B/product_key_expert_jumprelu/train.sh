@@ -1,17 +1,18 @@
 NPROC_PER_NODE=2 \
+		MODEL_PATH=$HOME/models/Qwen3-4B \
 		WANDB_PROJECT=qwen3-4B-product_key_expert_jumprelu-qproj \
 		SAVE_DIR=checkpoints/qwen3-4B/product_key_expert_jumprelu_qproj \
 		RUN_NAME=product_key_expert_jumprelu_q \
 		MAX_TOKENS=100000000 \
 		ARCHITECTURE=product_key_expert_jumprelu \
-		K=32 \
+		K=80 \
 		EXPANSION_FACTOR=1 \
-		NUM_EXPERTS=512 \
+		NUM_EXPERTS=326 \
 		ACTIVE_EXPERTS=2 \
-		LATENTS_PER_EXPERT=56 \
+		LATENTS_PER_EXPERT=96 \
 		OPTIMIZER=adam \
 		LR=8e-4 \
-		HOOKPOINTS='layers.[0-17].self_attn.q_proj' \
+		HOOKPOINTS='layers.[17].self_attn.q_proj' \
 		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3-4B/thresholds_q.json \
 		BATCH_SIZE=1 \
 		GRAD_ACC_STEPS=8 \
@@ -23,6 +24,7 @@ NPROC_PER_NODE=2 \
 		bash scripts/autoresearch_test.sh
 
 NPROC_PER_NODE=2 \
+		MODEL_PATH=$HOME/models/Qwen3-4B \
 		WANDB_PROJECT=qwen3-4B-product_key_expert_jumprelu-qproj \
 		SAVE_DIR=checkpoints/qwen3-4B/product_key_expert_jumprelu_qproj \
 		RUN_NAME=product_key_expert_jumprelu_q \
@@ -47,6 +49,7 @@ NPROC_PER_NODE=2 \
 		bash scripts/autoresearch_test.sh
 
 NPROC_PER_NODE=2 \
+		MODEL_PATH=$HOME/models/Qwen3-4B \
 		WANDB_PROJECT=qwen3-4B-product_key_expert_jumprelu-upproj \
 		SAVE_DIR=checkpoints/qwen3-4B/product_key_expert_jumprelu_upproj \
 		RUN_NAME=product_key_expert_jumprelu_up \
@@ -71,6 +74,7 @@ NPROC_PER_NODE=2 \
 		bash scripts/autoresearch_test.sh
 
 NPROC_PER_NODE=2 \
+		MODEL_PATH=$HOME/models/Qwen3-4B \
 		WANDB_PROJECT=qwen3-4B-product_key_expert_jumprelu-upproj \
 		SAVE_DIR=checkpoints/qwen3-4B/product_key_expert_jumprelu_upproj \
 		RUN_NAME=product_key_expert_jumprelu_up \

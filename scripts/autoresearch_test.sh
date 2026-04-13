@@ -83,6 +83,8 @@ if [[ "${PRINT_COST_BREAKDOWN}" == "1" ]]; then
   ARCHITECTURE="${ARCHITECTURE}" \
   K="${K}" \
   EXPANSION_FACTOR="${EXPANSION_FACTOR}" \
+  MODEL_PATH="${MODEL_PATH}" \
+  ELBOW_THRESHOLD_PATH="${ELBOW_THRESHOLD_PATH}" \
   HOOKPOINTS="${HOOKPOINTS}" \
   TRUNK_RANK="${TRUNK_RANK}" \
   NUM_CODES="${NUM_CODES}" \
@@ -106,6 +108,8 @@ try:
     from sparsify.sparse_coder import _get_sae_class
 
     cfg = {
+        "MODEL_PATH": os.environ.get("MODEL_PATH", ""),
+        "ELBOW_THRESHOLD_PATH": os.environ.get("ELBOW_THRESHOLD_PATH", ""),
         "HOOKPOINTS": os.environ.get("HOOKPOINTS", ""),
         "TRUNK_RANK": os.environ.get("TRUNK_RANK", ""),
         "NUM_CODES": os.environ.get("NUM_CODES", ""),
