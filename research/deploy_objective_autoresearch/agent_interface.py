@@ -73,7 +73,7 @@ def build_agent_context(
             "model_path": cfg.model_path,
             "hookpoints": cfg.hookpoints,
             "architecture": cfg.architecture,
-            "objective": "total_cost_ratio + best_exceed_alpha_0.50",
+            "objective": "total_cost_ratio + latest_exceed_alpha_0.50",
             "checkpoint_interval_tokens": cfg.checkpoint_interval_tokens,
         },
         "current_trial": trial_summary(current_trial),

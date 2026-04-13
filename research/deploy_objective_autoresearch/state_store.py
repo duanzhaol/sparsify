@@ -180,6 +180,7 @@ class StateStore:
                     "trial_id": trial.trial_id,
                     "status": trial.status,
                     "best_objective": trial.best_objective,
+                    "latest_exceed_alpha_0.50": trial.latest_exceed_alpha_0_50,
                     "best_exceed_alpha_0.50": trial.best_exceed_alpha_0_50,
                     "total_cost_ratio": trial.total_cost_ratio,
                     "best_fvu": trial.best_fvu,

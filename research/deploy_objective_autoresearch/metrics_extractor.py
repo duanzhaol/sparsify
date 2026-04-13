@@ -192,16 +192,17 @@ def extract_trial_snapshot(
     best_exceed = _best_value(records, exceed_keys)
     latest_fvu = _latest_value(records, fvu_keys)
     best_fvu = _best_value(records, fvu_keys)
-    # The deployment objective tracks the best observed exceed seen so far for
-    # this trial, matching the user-facing metric definition.
-    best_objective = _objective(total_cost_ratio, best_exceed)
+    # The deployment objective is defined on the latest checkpoint quality,
+    # not the historical best exceed reached earlier in training.
+    best_objective = _objective(total_cost_ratio, latest_exceed)
 
     prev_records = [
         row for row in records if int(row.get("total_tokens") or 0) <= window_start_tokens
     ]
     prev_best_exceed = _best_value(prev_records, exceed_keys)
     prev_best_fvu = _best_value(prev_records, fvu_keys)
-    prev_best_objective = _objective(total_cost_ratio, prev_best_exceed)
+    prev_latest_exceed = _latest_value(prev_records, exceed_keys)
+    prev_best_objective = _objective(total_cost_ratio, prev_latest_exceed)
 
     checkpoint_count = 0
     if checkpoint_interval_tokens > 0:

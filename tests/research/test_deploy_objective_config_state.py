@@ -184,7 +184,7 @@ def test_metric_command_backfills_missing_objective_from_trial_artifacts(
     assert repaired_trial.best_objective == 0.279543
 
 
-def test_metric_command_repairs_objective_using_best_exceed(
+def test_metric_command_repairs_objective_using_latest_exceed(
     tmp_path: Path,
     capsys,
 ):
@@ -222,10 +222,10 @@ def test_metric_command_repairs_objective_using_best_exceed(
     repaired_trial = store.load_trial(trial.trial_id)
 
     assert exit_code == 0
-    assert captured.out.strip() == "0.279543000000"
+    assert captured.out.strip() == "0.286543000000"
     assert repaired_trial.best_exceed_alpha_0_50 == 0.198
     assert repaired_trial.latest_exceed_alpha_0_50 == 0.205
-    assert repaired_trial.best_objective == 0.279543
+    assert repaired_trial.best_objective == 0.286543
 
 
 def test_metric_command_repairs_progress_even_when_objective_exists(

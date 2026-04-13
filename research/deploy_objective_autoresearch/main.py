@@ -155,10 +155,10 @@ def _current_metric_payload(store: StateStore) -> dict[str, Any]:
     metric_source = "missing"
     if incumbent is not None and incumbent.best_objective is not None:
         metric = incumbent.best_objective
-        metric_source = "incumbent_best_objective"
+        metric_source = "incumbent_objective"
     elif active_trial is not None and active_trial.best_objective is not None:
         metric = active_trial.best_objective
-        metric_source = "active_trial_best_objective"
+        metric_source = "active_trial_objective"
     return {
         "metric": metric,
         "metric_source": metric_source,
