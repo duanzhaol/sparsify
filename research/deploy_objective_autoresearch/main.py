@@ -14,10 +14,11 @@ from .agent_interface import (
     write_agent_context,
 )
 from .config import DEFAULT_RUN_ROOT, SearchConfig
+from .metrics_extractor import extract_trial_snapshot
 from .proposal_policy import normalize_candidate_params, propose_next_params
 from .scheduler import evaluate_checkpoint
 from .state_store import StateStore, TrialRecord
-from .trial_runner import run_trial_segment, update_trial_from_result
+from .trial_runner import latest_checkpoint_dir, run_trial_segment, update_trial_from_result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,8 +80,77 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _repair_trial_metrics_from_artifacts(
+    store: StateStore,
+    cfg: SearchConfig,
+    trial: TrialRecord,
+) -> bool:
+    log_path = Path(trial.log_path)
+    if not log_path.exists():
+        return False
+
+    checkpoint_root = (
+        Path(trial.checkpoint_root)
+        if trial.checkpoint_root
+        else latest_checkpoint_dir(Path(trial.save_dir), trial.trial_id)
+    )
+    metrics_path = Path(trial.metrics_path) if trial.metrics_path else None
+    if (metrics_path is None or not metrics_path.exists()) and checkpoint_root is not None:
+        candidate_metrics = checkpoint_root / "metrics.jsonl"
+        if candidate_metrics.exists():
+            metrics_path = candidate_metrics
+    if metrics_path is None or not metrics_path.exists():
+        return False
+
+    snapshot = extract_trial_snapshot(
+        log_path=log_path,
+        metrics_path=metrics_path,
+        hook_metric_prefix=cfg.hookpoints,
+        checkpoint_interval_tokens=cfg.checkpoint_interval_tokens,
+        window_start_tokens=0,
+    )
+    changed = False
+
+    for field_name, value in (
+        ("checkpoint_root", str(checkpoint_root) if checkpoint_root else None),
+        ("metrics_path", str(metrics_path)),
+        ("tokens_seen", snapshot.tokens_seen),
+        ("checkpoint_decisions", snapshot.checkpoint_count),
+        ("total_cost_ratio", snapshot.total_cost_ratio),
+        ("latest_exceed_alpha_0_50", snapshot.latest_exceed_alpha_0_50),
+        ("best_exceed_alpha_0_50", snapshot.best_exceed_alpha_0_50),
+        ("latest_fvu", snapshot.latest_fvu),
+        ("best_fvu", snapshot.best_fvu),
+        ("best_objective", snapshot.best_objective),
+        ("delta_best_exceed", snapshot.delta_best_exceed),
+        ("delta_best_fvu", snapshot.delta_best_fvu),
+        ("delta_best_objective", snapshot.delta_best_objective),
+        ("invalid_reason", snapshot.invalid_reason),
+    ):
+        if getattr(trial, field_name) != value:
+            setattr(trial, field_name, value)
+            changed = True
+
+    if changed:
+        store.save_trial(trial)
+    return changed
+
+
+def _repair_trials_from_artifacts(store: StateStore, cfg: SearchConfig) -> bool:
+    changed = False
+    for trial in store.list_trials():
+        if trial.best_objective is not None and trial.metrics_path and trial.checkpoint_root:
+            continue
+        changed = _repair_trial_metrics_from_artifacts(store, cfg, trial) or changed
+    return changed
+
+
 def _current_metric_payload(store: StateStore) -> dict[str, Any]:
-    leaderboard = store.refresh_leaderboard()
+    cfg = store.load_config()
+    if _repair_trials_from_artifacts(store, cfg):
+        leaderboard = store.refresh_leaderboard()
+    else:
+        leaderboard = store.refresh_leaderboard()
     incumbent = store.incumbent_trial()
     active_trial = store.get_active_trial() or store.latest_unfinished_trial()
     metric = None
@@ -198,6 +268,7 @@ def command_bootstrap(args: argparse.Namespace) -> int:
 
 def command_status(args: argparse.Namespace) -> int:
     store, cfg = _store_for_run_root(args.run_root)
+    _repair_trials_from_artifacts(store, cfg)
     leaderboard = store.refresh_leaderboard()
     _emit(
         {

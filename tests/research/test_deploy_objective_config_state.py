@@ -141,6 +141,49 @@ def test_metric_command_can_bootstrap_if_missing(
     assert captured.out.strip() == "0.271000000000"
 
 
+def test_metric_command_backfills_missing_objective_from_trial_artifacts(
+    tmp_path: Path,
+    capsys,
+):
+    cfg = SearchConfig.default(run_root=tmp_path)
+    store = StateStore.bootstrap(cfg)
+    trial = store.create_trial(cfg, cfg.baseline_params())
+    trial.status = "checkpoint_ready"
+
+    log_path = tmp_path / "train.log"
+    log_path.write_text("[cost][k=80] total_ratio=0.081543x\n")
+    metrics_path = tmp_path / "metrics.jsonl"
+    rows = [
+        {
+            "type": "step",
+            "step": 1,
+            "total_tokens": 15_000_000,
+            "layers.17.self_attn.q_proj/exceed_alpha_0.50": 0.210,
+            "layers.17.self_attn.q_proj/fvu": 0.320,
+        },
+        {
+            "type": "step",
+            "step": 2,
+            "total_tokens": 30_000_000,
+            "layers.17.self_attn.q_proj/exceed_alpha_0.50": 0.198,
+            "layers.17.self_attn.q_proj/fvu": 0.305,
+        },
+    ]
+    metrics_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    trial.log_path = str(log_path)
+    trial.metrics_path = str(metrics_path)
+    store.save_trial(trial)
+
+    exit_code = main(["metric", "--run-root", str(tmp_path)])
+    captured = capsys.readouterr()
+    repaired_trial = store.load_trial(trial.trial_id)
+
+    assert exit_code == 0
+    assert captured.out.strip() == "0.279543000000"
+    assert repaired_trial.best_exceed_alpha_0_50 == 0.198
+    assert repaired_trial.best_objective == 0.279543
+
+
 def test_pending_spawn_params_are_consumed_when_creating_next_trial(tmp_path: Path):
     cfg = SearchConfig.default(run_root=tmp_path)
     store = StateStore.bootstrap(cfg)

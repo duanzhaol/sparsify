@@ -8,6 +8,7 @@ from typing import Any
 
 
 _COST_RE = re.compile(r"total_ratio=([0-9]+(?:\.[0-9]+)?)x")
+_BRACKETED_INDEX_RE = re.compile(r"\.\[(\d+)\]")
 
 
 @dataclass(slots=True)
@@ -59,17 +60,31 @@ def extract_total_cost_ratio(log_path: Path) -> float | None:
     return float(matches[-1])
 
 
-def _best_value(records: list[dict[str, Any]], key: str) -> float | None:
-    values = [float(row[key]) for row in records if key in row]
+def _metric_key_variants(hook_metric_prefix: str, metric_name: str) -> list[str]:
+    prefixes = [hook_metric_prefix]
+    normalized_prefix = _BRACKETED_INDEX_RE.sub(r".\1", hook_metric_prefix)
+    if normalized_prefix not in prefixes:
+        prefixes.append(normalized_prefix)
+    return [f"{prefix}/{metric_name}" for prefix in prefixes]
+
+
+def _best_value(records: list[dict[str, Any]], keys: list[str]) -> float | None:
+    values: list[float] = []
+    for row in records:
+        for key in keys:
+            if key in row:
+                values.append(float(row[key]))
+                break
     if not values:
         return None
     return min(values)
 
 
-def _latest_value(records: list[dict[str, Any]], key: str) -> float | None:
+def _latest_value(records: list[dict[str, Any]], keys: list[str]) -> float | None:
     for row in reversed(records):
-        if key in row:
-            return float(row[key])
+        for key in keys:
+            if key in row:
+                return float(row[key])
     return None
 
 
@@ -111,8 +126,8 @@ def extract_trial_snapshot(
             invalid_reason="metrics_missing",
         )
 
-    exceed_key = f"{hook_metric_prefix}/exceed_alpha_0.50"
-    fvu_key = f"{hook_metric_prefix}/fvu"
+    exceed_keys = _metric_key_variants(hook_metric_prefix, "exceed_alpha_0.50")
+    fvu_keys = _metric_key_variants(hook_metric_prefix, "fvu")
     records = read_step_records(metrics_path)
     if not records:
         return TrialSnapshot(
@@ -134,17 +149,17 @@ def extract_trial_snapshot(
     latest = records[-1]
     tokens_seen = int(latest.get("total_tokens") or 0)
     latest_step = latest.get("step")
-    latest_exceed = _latest_value(records, exceed_key)
-    best_exceed = _best_value(records, exceed_key)
-    latest_fvu = _latest_value(records, fvu_key)
-    best_fvu = _best_value(records, fvu_key)
+    latest_exceed = _latest_value(records, exceed_keys)
+    best_exceed = _best_value(records, exceed_keys)
+    latest_fvu = _latest_value(records, fvu_keys)
+    best_fvu = _best_value(records, fvu_keys)
     best_objective = _best_objective(total_cost_ratio, best_exceed)
 
     prev_records = [
         row for row in records if int(row.get("total_tokens") or 0) <= window_start_tokens
     ]
-    prev_best_exceed = _best_value(prev_records, exceed_key)
-    prev_best_fvu = _best_value(prev_records, fvu_key)
+    prev_best_exceed = _best_value(prev_records, exceed_keys)
+    prev_best_fvu = _best_value(prev_records, fvu_keys)
     prev_best_objective = _best_objective(total_cost_ratio, prev_best_exceed)
 
     checkpoint_count = 0
