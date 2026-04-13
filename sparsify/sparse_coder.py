@@ -16,6 +16,11 @@ from torch import Tensor, nn
 from .config import SparseCoderConfig
 from .device import device_autocast
 from .fused_encoder import EncoderOutput, fused_encoder
+from .train_quantization import (
+    fake_quantized_decoder_path,
+    fake_quantized_expert_einsum,
+    fake_quantized_linear,
+)
 from .utils import decoder_impl
 
 
@@ -77,6 +82,8 @@ class SparseCoder(nn.Module):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+        self._quantization_mode = "off"
+        self._quantization_num_bits = 8
         self._training_tokens = 0
         self._last_regularization_loss: Tensor | None = None
         self._last_monitoring_metrics: dict[str, float] = {}
@@ -368,6 +375,17 @@ class SparseCoder(nn.Module):
 
     def current_training_tokens(self) -> int:
         return int(getattr(self, "_training_tokens", 0))
+
+    def set_quantization_mode(self, mode: str, num_bits: int = 8) -> None:
+        valid_modes = {"off", "qat_io_int8", "qat_full_w8a8"}
+        if mode not in valid_modes:
+            raise ValueError(
+                f"Unsupported quantization mode '{mode}', expected one of {sorted(valid_modes)}"
+            )
+        if num_bits < 2:
+            raise ValueError("num_bits must be >= 2")
+        self._quantization_mode = mode
+        self._quantization_num_bits = int(num_bits)
 
     def _set_regularization_loss(self, loss: Tensor | None) -> None:
         self._last_regularization_loss = loss
@@ -783,6 +801,8 @@ class BucketedTopKSparseCoder(SparseCoder):
             self.W_dec = None
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
+        self._quantization_mode = "off"
+        self._quantization_num_bits = 8
 
     def _encoder_linear_layers(self):
         return [("low_encoder", self.low_encoder), ("high_encoder", self.high_encoder)]
@@ -1793,12 +1813,47 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
     def threshold(self) -> Tensor:
         return F.softplus(self.log_threshold)
 
-    def _expert_logits_from_flat(self, flat_x: Tensor) -> Tensor:
-        left_logits = self.left_router(flat_x)
-        right_logits = self.right_router(flat_x)
+    def _full_qat_enabled(self) -> bool:
+        return getattr(self, "_quantization_mode", "off") == "qat_full_w8a8"
+
+    def _expert_logits_from_flat(
+        self, flat_x: Tensor
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        if self._full_qat_enabled():
+            left_logits, left_stats = fake_quantized_linear(
+                flat_x,
+                self.left_router.weight,
+                self.left_router.bias,
+                num_bits=self._quantization_num_bits,
+            )
+            right_logits, right_stats = fake_quantized_linear(
+                flat_x,
+                self.right_router.weight,
+                self.right_router.bias,
+                num_bits=self._quantization_num_bits,
+            )
+            qat_metrics = {
+                "qat_router_left_act_scale_mean": left_stats["act_scale_mean"],
+                "qat_router_left_weight_scale_mean": left_stats["weight_scale_mean"],
+                "qat_router_right_act_scale_mean": right_stats["act_scale_mean"],
+                "qat_router_right_weight_scale_mean": right_stats["weight_scale_mean"],
+            }
+            qat_metrics["qat_router_act_scale_mean"] = 0.5 * (
+                qat_metrics["qat_router_left_act_scale_mean"]
+                + qat_metrics["qat_router_right_act_scale_mean"]
+            )
+            qat_metrics["qat_router_weight_scale_mean"] = 0.5 * (
+                qat_metrics["qat_router_left_weight_scale_mean"]
+                + qat_metrics["qat_router_right_weight_scale_mean"]
+            )
+        else:
+            left_logits = self.left_router(flat_x)
+            right_logits = self.right_router(flat_x)
+            qat_metrics = {}
         return (
             left_logits[:, self.pair_left_index]
-            + right_logits[:, self.pair_right_index]
+            + right_logits[:, self.pair_right_index],
+            qat_metrics,
         )
 
     def _select_expert_route(
@@ -1818,16 +1873,29 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         flat_x: Tensor,
         selected_expert_idx: Tensor,
         selected_probs: Tensor,
-    ) -> Tensor:
+    ) -> tuple[Tensor, dict[str, Tensor]]:
         selected_weight = self.expert_encoders[selected_expert_idx.long()]
         selected_bias = self.expert_encoder_bias[selected_expert_idx.long()]
         selected_threshold = self.threshold[selected_expert_idx.long()]
-        pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight) + selected_bias
+        if self._full_qat_enabled():
+            pre_acts, encoder_stats = fake_quantized_expert_einsum(
+                flat_x,
+                selected_weight,
+                num_bits=self._quantization_num_bits,
+            )
+            qat_metrics = {
+                "qat_encoder_act_scale_mean": encoder_stats["act_scale_mean"],
+                "qat_encoder_weight_scale_mean": encoder_stats["weight_scale_mean"],
+            }
+        else:
+            pre_acts = torch.einsum("bd,bald->bal", flat_x, selected_weight)
+            qat_metrics = {}
+        pre_acts = pre_acts + selected_bias
         positive = F.relu(pre_acts)
         gate = torch.sigmoid(
             (positive - selected_threshold) / self.cfg.jumprelu_bandwidth
         )
-        return positive * gate * selected_probs.unsqueeze(-1)
+        return positive * gate * selected_probs.unsqueeze(-1), qat_metrics
 
     def _revival_probe_candidates(
         self,
@@ -1875,7 +1943,7 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
 
         probe_probs = expert_logits.new_zeros((flat_x.shape[0], 1))
         probe_probs[valid_rows, 0] = 1.0
-        probe_acts = self._expert_candidate_acts(
+        probe_acts, _ = self._expert_candidate_acts(
             flat_x,
             probe_expert_idx,
             probe_probs,
@@ -1898,20 +1966,42 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
             )
         ]
 
-    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> Tensor:
+    def _decode_sparse(self, acts: Tensor, indices: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
         assert self.W_dec is not None, "Decoder weight was not initialized."
-        return decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+        if self._full_qat_enabled():
+            out, decoder_stats = fake_quantized_decoder_path(
+                acts,
+                indices,
+                self.W_dec,
+                num_bits=self._quantization_num_bits,
+            )
+            qat_metrics = {
+                "qat_decoder_act_scale_mean": decoder_stats["decoder_act_scale_mean"],
+                "qat_decoder_weight_scale_mean": decoder_stats[
+                    "decoder_weight_scale_mean"
+                ],
+            }
+        else:
+            out = decoder_impl(indices, acts.to(self.dtype), self.W_dec.mT)
+            qat_metrics = {}
+        return out, qat_metrics
+
+    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
+        sparse_out, decoder_qat_metrics = self._decode_sparse(top_acts, top_indices)
+        if self._full_qat_enabled() and decoder_qat_metrics:
+            self._set_monitoring_metrics(decoder_qat_metrics)
+        return sparse_out + self.b_dec
 
     def encode(self, x: Tensor) -> EncoderOutput:
         x = x - self.b_dec
         original_shape = x.shape[:-1]
         flat_x = x.reshape(-1, self.d_in)
 
-        expert_logits = self._expert_logits_from_flat(flat_x)
+        expert_logits, _ = self._expert_logits_from_flat(flat_x)
         selected_expert_idx, selected_probs = self._select_expert_route(
             expert_logits
         )
-        acts = self._expert_candidate_acts(
+        acts, _ = self._expert_candidate_acts(
             flat_x,
             selected_expert_idx,
             selected_probs,
@@ -1940,9 +2030,9 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         original_shape = x_centered.shape[:-1]
         flat_x = x_centered.reshape(-1, self.d_in)
 
-        expert_logits = self._expert_logits_from_flat(flat_x)
+        expert_logits, router_qat_metrics = self._expert_logits_from_flat(flat_x)
         selected_expert_idx, selected_probs = self._select_expert_route(expert_logits)
-        candidate_acts = self._expert_candidate_acts(
+        candidate_acts, encoder_qat_metrics = self._expert_candidate_acts(
             flat_x,
             selected_expert_idx,
             selected_probs,
@@ -1959,7 +2049,7 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
         target_shape = (*original_shape, self.cfg.k)
         top_acts = top_acts.reshape(target_shape)
         top_indices = top_indices.reshape(target_shape)
-        sparse_out = self._decode_sparse(top_acts, top_indices)
+        sparse_out, decoder_qat_metrics = self._decode_sparse(top_acts, top_indices)
         sae_out = sparse_out + self.b_dec
 
         if y is None:
@@ -1996,7 +2086,8 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
                 candidate_pairs,
                 k_aux,
             )
-            e_hat = self._decode_sparse(auxk_acts, auxk_indices) + self.b_dec
+            e_hat_sparse, _ = self._decode_sparse(auxk_acts, auxk_indices)
+            e_hat = e_hat_sparse + self.b_dec
             auxk_loss = (e_hat - e.detach()).pow(2).sum()
             auxk_loss = scale * auxk_loss / total_variance
         else:
@@ -2004,6 +2095,14 @@ class ProductKeyExpertJumpReLUSparseCoder(SparseCoder):
 
         l2_loss = e.pow(2).sum()
         fvu = l2_loss / total_variance
+        if self._full_qat_enabled():
+            self._set_monitoring_metrics(
+                {
+                    **router_qat_metrics,
+                    **encoder_qat_metrics,
+                    **decoder_qat_metrics,
+                }
+            )
 
         return ForwardOutput(
             sae_out,

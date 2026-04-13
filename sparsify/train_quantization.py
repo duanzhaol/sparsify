@@ -168,3 +168,88 @@ def select_main_loss(
     if io_loss_mode == "dual_target":
         return io_metrics.main_loss
     raise ValueError(f"Unsupported io_loss_mode: {io_loss_mode}")
+
+
+def fake_quantize_weight_per_output_channel(
+    weight: Tensor,
+    num_bits: int = 8,
+) -> tuple[Tensor, Tensor]:
+    qmax = _symmetric_qmax(num_bits)
+    original_dtype = weight.dtype
+    weight_fp = weight.to(torch.float32)
+    absmax = weight_fp.abs().amax(dim=-1, keepdim=True)
+    reported_scales = torch.where(absmax > 0, absmax / qmax, torch.zeros_like(absmax))
+    safe_scales = torch.where(
+        reported_scales > 0,
+        reported_scales,
+        torch.ones_like(reported_scales),
+    )
+    normalized = weight_fp / safe_scales
+    clipped = normalized.clamp(-qmax, qmax)
+    rounded = clipped.round()
+    qdq_fp = rounded * safe_scales
+    qdq = weight_fp + (qdq_fp - weight_fp).detach()
+    return qdq.to(original_dtype), reported_scales
+
+
+def fake_quantized_linear(
+    x: Tensor,
+    weight: Tensor,
+    bias: Tensor | None = None,
+    num_bits: int = 8,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    x_qdq, x_scales, x_clip_rate = fake_quantize_activation_per_token(x, num_bits)
+    weight_qdq, weight_scales = fake_quantize_weight_per_output_channel(weight, num_bits)
+    out = x_qdq @ weight_qdq.transpose(0, 1)
+    if bias is not None:
+        out = out + bias
+    stats = {
+        "act_scale_mean": _positive_scale_mean(x_scales),
+        "input_clip_rate": x_clip_rate,
+        "weight_scale_mean": _positive_scale_mean(weight_scales),
+    }
+    return out, stats
+
+
+def fake_quantized_expert_einsum(
+    x: Tensor,
+    weight: Tensor,
+    num_bits: int = 8,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    if weight.ndim == 2:
+        return fake_quantized_linear(x, weight, None, num_bits)
+    if x.ndim != 2 or weight.ndim != 4:
+        raise ValueError(
+            "fake_quantized_expert_einsum expects x=[batch,d_in] and "
+            "weight=[batch,active_experts,latents_per_expert,d_in]"
+        )
+
+    x_qdq, x_scales, x_clip_rate = fake_quantize_activation_per_token(x, num_bits)
+    weight_qdq, weight_scales = fake_quantize_weight_per_output_channel(weight, num_bits)
+    out = (x_qdq[:, None, None, :] * weight_qdq).sum(dim=-1)
+    stats = {
+        "act_scale_mean": _positive_scale_mean(x_scales),
+        "input_clip_rate": x_clip_rate,
+        "weight_scale_mean": _positive_scale_mean(weight_scales),
+    }
+    return out, stats
+
+
+def fake_quantized_decoder_path(
+    top_acts: Tensor,
+    top_indices: Tensor,
+    W_dec: Tensor,
+    num_bits: int = 8,
+) -> tuple[Tensor, dict[str, Tensor]]:
+    top_acts_qdq, top_scales, top_clip_rate = fake_quantize_activation_per_token(
+        top_acts, num_bits
+    )
+    weight_qdq, weight_scales = fake_quantize_weight_per_output_channel(W_dec, num_bits)
+    gathered_weight = weight_qdq[top_indices.long()]
+    out = (top_acts_qdq.unsqueeze(-1) * gathered_weight).sum(dim=-2)
+    stats = {
+        "decoder_act_scale_mean": _positive_scale_mean(top_scales),
+        "decoder_input_clip_rate": top_clip_rate,
+        "decoder_weight_scale_mean": _positive_scale_mean(weight_scales),
+    }
+    return out, stats

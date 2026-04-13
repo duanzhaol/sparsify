@@ -4,11 +4,16 @@ import torch
 import pytest
 
 from sparsify.config import SparseCoderConfig, TrainConfig
+from sparsify.trainer import _io_quant_pipeline_enabled
 from sparsify.train_quantization import (
     IOQuantMetrics,
     compute_exceed_ratio,
     compute_fvu_scalar,
     fake_quantize_activation_per_token,
+    fake_quantize_weight_per_output_channel,
+    fake_quantized_decoder_path,
+    fake_quantized_expert_einsum,
+    fake_quantized_linear,
     select_main_loss,
     summarize_io_quant_batch,
 )
@@ -266,6 +271,22 @@ def test_train_config_rejects_negative_io_loss_deploy_weight():
         TrainConfig(sae=SparseCoderConfig(), io_loss_deploy_weight=-0.1)
 
 
+def test_train_config_accepts_full_w8a8_qat_mode():
+    cfg = TrainConfig(
+        sae=SparseCoderConfig(),
+        io_quant_mode="qat_full_w8a8",
+        io_quant_bits=8,
+    )
+
+    assert cfg.io_quant_mode == "qat_full_w8a8"
+
+
+def test_trainer_io_quant_pipeline_includes_full_w8a8_mode():
+    assert _io_quant_pipeline_enabled("qat_io_int8")
+    assert _io_quant_pipeline_enabled("qat_full_w8a8")
+    assert not _io_quant_pipeline_enabled("none")
+
+
 def test_train_config_accepts_w8a8_activation_source():
     cfg = TrainConfig(
         sae=SparseCoderConfig(),
@@ -301,3 +322,40 @@ def test_train_config_requires_backbone_path_for_w8a8_source():
 def test_train_config_requires_backbone_path_for_smoothquant_source():
     with pytest.raises(ValueError, match="activation_backbone_path"):
         TrainConfig(sae=SparseCoderConfig(), activation_source="smoothquant_w8a8_backbone")
+
+
+def test_fake_quantize_weight_per_output_channel_returns_expected_shapes():
+    weight = torch.tensor([[1.0, -2.0], [0.5, -0.5]], dtype=torch.float32)
+    qdq, scales = fake_quantize_weight_per_output_channel(weight, num_bits=8)
+
+    assert qdq.shape == weight.shape
+    assert scales.shape == (2, 1)
+
+
+def test_fake_quantized_linear_matches_dense_shape():
+    x = torch.randn(3, 4)
+    weight = torch.randn(5, 4)
+    bias = torch.randn(5)
+    out, stats = fake_quantized_linear(x, weight, bias, num_bits=8)
+
+    assert out.shape == (3, 5)
+    assert "weight_scale_mean" in stats
+
+
+def test_fake_quantized_expert_einsum_supports_selected_expert_weight_shape():
+    x = torch.randn(2, 4)
+    weight = torch.randn(2, 3, 5, 4)
+    out, stats = fake_quantized_expert_einsum(x, weight, num_bits=8)
+
+    assert out.shape == (2, 3, 5)
+    assert "weight_scale_mean" in stats
+
+
+def test_fake_quantized_decoder_path_uses_sparse_indices():
+    top_acts = torch.randn(2, 2)
+    top_indices = torch.tensor([[0, 3], [2, 1]])
+    W_dec = torch.randn(5, 4)
+    out, stats = fake_quantized_decoder_path(top_acts, top_indices, W_dec, num_bits=8)
+
+    assert out.shape == (2, 4)
+    assert "decoder_weight_scale_mean" in stats

@@ -275,7 +275,7 @@ class TrainConfig(Serializable):
                 f"Activation threshold file not found: {self.activation_threshold_path}"
             )
 
-        valid_io_quant_modes = {"off", "qat_io_int8"}
+        valid_io_quant_modes = {"off", "qat_io_int8", "qat_full_w8a8"}
         if self.io_quant_mode not in valid_io_quant_modes:
             raise ValueError(f"io_quant_mode must be one of {sorted(valid_io_quant_modes)}")
 

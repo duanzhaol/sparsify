@@ -43,6 +43,18 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _io_quant_pipeline_enabled(io_quant_mode: str) -> bool:
+    return io_quant_mode in {"qat_io_int8", "qat_full_w8a8"}
+
+
+def _to_monitoring_scalar(metric_value: float | Tensor) -> float:
+    if isinstance(metric_value, Tensor):
+        if metric_value.numel() != 1:
+            metric_value = metric_value.mean()
+        return float(metric_value.detach().item())
+    return float(metric_value)
+
+
 class Trainer(CheckpointMixin):
     @staticmethod
     def _split_sae_key(sae_key: str) -> tuple[str, str | None, list[str]]:
@@ -532,14 +544,14 @@ class Trainer(CheckpointMixin):
                 self.cfg.use_hadamard
                 and name in self.hadamard_rotations
                 and name in self.elbow_thresholds
-                and self.cfg.io_quant_mode != "qat_io_int8"
+                and not _io_quant_pipeline_enabled(self.cfg.io_quant_mode)
             ):
                 original_target_for_exceed = self.hadamard_rotations[
                     name
                 ].unrotate(acts)
 
             acts_fp = acts
-            if self.cfg.io_quant_mode == "qat_io_int8":
+            if _io_quant_pipeline_enabled(self.cfg.io_quant_mode):
                 acts_in, _, _ = fake_quantize_activation_per_token(
                     acts_fp, num_bits=self.cfg.io_quant_bits
                 )
@@ -571,6 +583,11 @@ class Trainer(CheckpointMixin):
                 )
                 with sync_context:
                     raw.set_training_tokens(self.total_tokens)
+                    if hasattr(raw, "set_quantization_mode"):
+                        raw.set_quantization_mode(
+                            self.cfg.io_quant_mode,
+                            num_bits=self.cfg.io_quant_bits,
+                        )
                     out = wrapped(
                         x=acts_in,
                         dead_mask=(
@@ -596,11 +613,11 @@ class Trainer(CheckpointMixin):
                     monitoring_metrics = raw.pop_monitoring_metrics()
                     for metric_name, metric_value in monitoring_metrics.items():
                         avg_monitoring[sae_key][metric_name] += (
-                            metric_value / denom
+                            _to_monitoring_scalar(metric_value) / denom
                         )
                     router_regularization_loss = raw.pop_regularization_loss()
                     io_metrics = None
-                    if self.cfg.io_quant_mode == "qat_io_int8":
+                    if _io_quant_pipeline_enabled(self.cfg.io_quant_mode):
                         io_metrics = summarize_io_quant_batch(
                             target_fp=acts_fp,
                             recon_fp=out.sae_out,
