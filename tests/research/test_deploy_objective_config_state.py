@@ -303,3 +303,34 @@ def test_pending_spawn_params_are_consumed_when_creating_next_trial(tmp_path: Pa
     assert trial.params["K"] == 96
     assert trial.params["NUM_EXPERTS"] == 384
     assert "pending_spawn_params" not in state
+
+
+def test_next_trial_creation_uses_recent_stopped_trial_for_cheaper_first_search(
+    tmp_path: Path,
+):
+    cfg = SearchConfig.default(run_root=tmp_path)
+    store = StateStore.bootstrap(cfg)
+
+    incumbent = store.create_trial(cfg, cfg.baseline_params())
+    incumbent.best_objective = 0.5736412420444489
+    incumbent.total_cost_ratio = 0.081543
+    incumbent.status = "stopped"
+    store.save_trial(incumbent)
+    store.set_active_trial(None, status="idle")
+
+    expensive_trial = store.create_trial(
+        cfg,
+        {**cfg.baseline_params(), "K": 88},
+    )
+    expensive_trial.best_objective = 0.5783373272132873
+    expensive_trial.total_cost_ratio = 0.08597
+    expensive_trial.status = "stopped"
+    store.save_trial(expensive_trial)
+    store.set_active_trial(None, status="idle")
+
+    store.refresh_leaderboard()
+
+    trial = deploy_main._maybe_create_next_trial(store, cfg)
+
+    assert trial is not None
+    assert trial.params["K"] == 72

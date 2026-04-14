@@ -169,16 +169,25 @@ def _current_metric_payload(store: StateStore) -> dict[str, Any]:
     }
 
 
+def _latest_trial(store: StateStore) -> TrialRecord | None:
+    trials = store.list_trials()
+    if not trials:
+        return None
+    return trials[-1]
+
+
 def _dry_run_preview(store: StateStore, cfg: SearchConfig) -> dict[str, Any]:
     state = store.load_state()
     active_trial = store.get_active_trial() or store.latest_unfinished_trial()
     incumbent = store.incumbent_trial()
+    current_trial = _latest_trial(store)
     attempted = store.attempted_signatures()
     if active_trial is None:
         next_params = propose_next_params(
             cfg,
             attempted_signatures=attempted,
             incumbent_trial=incumbent,
+            current_trial=current_trial,
         )
         next_trial_index = int(state.get("next_trial_index") or 1)
         return {
@@ -186,6 +195,7 @@ def _dry_run_preview(store: StateStore, cfg: SearchConfig) -> dict[str, Any]:
             "would_create_trial_id": f"trial_{next_trial_index:04d}",
             "would_use_params": normalize_candidate_params(next_params, cfg),
             "active_trial": None,
+            "current_trial": _trial_payload(current_trial),
             "incumbent_trial": _trial_payload(incumbent),
         }
     return {
@@ -207,10 +217,12 @@ def _maybe_create_next_trial(store: StateStore, cfg: SearchConfig) -> TrialRecor
         return store.create_trial(cfg, params)
     attempted = store.attempted_signatures()
     incumbent = store.incumbent_trial()
+    current_trial = _latest_trial(store)
     params = propose_next_params(
         cfg,
         attempted_signatures=attempted,
         incumbent_trial=incumbent,
+        current_trial=current_trial,
     )
     params = normalize_candidate_params(params, cfg)
     return store.create_trial(cfg, params)
