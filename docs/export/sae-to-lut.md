@@ -8,11 +8,16 @@
 
 在当前仓库中，这一步是从 SAE 训练结果到 LUTurbo 推理产物的关键衔接点。
 
-当前主线的导出器是 `scripts/export/export_product_key_expert_jumprelu_lut.py`，面向 `product_key_expert_jumprelu` 架构。旧的 `convert_sae_to_lut.py` 已移除。
+当前主线导出器包括：
+
+- `scripts/export/export_product_key_expert_jumprelu_lut.py`：面向 `product_key_expert_jumprelu`
+- `scripts/export/export_expert_jumprelu_lut.py`：面向 `expert_jumprelu`
+
+旧的 `convert_sae_to_lut.py` 已移除。
 
 ## 导出步骤的输入
 
-`scripts/export/export_product_key_expert_jumprelu_lut.py` 会组合两类核心输入：
+这些导出脚本都会组合两类核心输入：
 
 - 训练好的基础模型
 - 一个包含 `qproj` / `upproj` 运行的检查点根目录
@@ -26,11 +31,20 @@
 
 ## 导出脚本从 SAE 检查点读取的内容
 
-每个单层检查点会读取：
+对于 `product_key_expert_jumprelu`，每个单层检查点会读取：
 
 - `left_router.weight` / `left_router.bias`
 - `right_router.weight` / `right_router.bias`
 - `pair_left_index` / `pair_right_index`
+- `expert_encoders`
+- `expert_encoder_bias`
+- `log_threshold`
+- `W_dec` / `b_dec`
+- `cfg.json`
+
+对于 `expert_jumprelu`，每个单层检查点会读取：
+
+- `router.weight` / `router.bias`
 - `expert_encoders`
 - `expert_encoder_bias`
 - `log_threshold`
@@ -86,6 +100,6 @@
 ## 需要记住的当前限制
 
 - 当前导出约定属于仓库内部约定，不应视为对外冻结标准
-- 当前脚本仅覆盖 `product_key_expert_jumprelu` 架构
+- 当前导出器按架构拆分：`product_key_expert_jumprelu` 与 `expert_jumprelu` 各自使用独立脚本
 - 当前脚本默认按 `layers.*.self_attn.q_proj` 与 `layers.*.mlp.up_proj` 自动查找检查点
 - 如果检查点配置不兼容，merge 会被拒绝
