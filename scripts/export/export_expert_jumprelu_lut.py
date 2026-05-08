@@ -32,13 +32,33 @@ PROJECTION_SPECS = {
     "qkv": {
         "operator_name": "self_attn.qkv_proj",
         "checkpoint_suffix": "self_attn.q_proj",
-        "target_modules": ["q_proj", "k_proj", "v_proj"],
+        "target_modules": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        ],
         "output_name": "layers.{layer_idx}.self_attn.qkv_proj",
+    },
+    "q_gatekv": {
+        "operator_name": "self_attn.q_gatekv_proj",
+        "checkpoint_suffix": "self_attn.q_proj",
+        "target_modules": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+        ],
+        "output_name": "layers.{layer_idx}.self_attn.q_gatekv_proj",
+    },
+    "gdn_qkvz": {
+        "operator_name": "linear_attn.qkvz_proj",
+        "checkpoint_suffix": "linear_attn.in_proj_qkv",
+        "target_modules": ["linear_attn.in_proj_qkv", "linear_attn.in_proj_z"],
+        "output_name": "layers.{layer_idx}.linear_attn.qkvz_proj",
     },
     "gate_up": {
         "operator_name": "mlp.gate_up_proj",
         "checkpoint_suffix": "mlp.up_proj",
-        "target_modules": ["gate_proj", "up_proj"],
+        "target_modules": ["mlp.gate_proj", "mlp.up_proj"],
         "output_name": "layers.{layer_idx}.mlp.gate_up_proj",
     },
 }
@@ -142,7 +162,9 @@ def discover_projection_layer_sources(
         layer_idx = int(match.group(1))
 
         current = chosen.get(layer_idx)
-        if current is None or _priority_for_layer_dir(layer_dir) >= _priority_for_layer_dir(current):
+        if current is None or _priority_for_layer_dir(
+            layer_dir
+        ) >= _priority_for_layer_dir(current):
             chosen[layer_idx] = layer_dir
 
     return dict(sorted(chosen.items()))
@@ -176,6 +198,37 @@ def resolve_layer_indices(
     resolved = sorted(available_layers)
     if not resolved:
         raise ValueError("No shared layers found for the selected operators.")
+    return resolved
+
+
+def resolve_operator_layer_indices(
+    projection_sources: dict[str, dict[int, Path]],
+    *,
+    layers: list[int] | None,
+) -> dict[str, list[int]]:
+    if layers is None:
+        resolved = {
+            operator_key: sorted(sources)
+            for operator_key, sources in projection_sources.items()
+        }
+    else:
+        requested_layers = sorted(set(layers))
+        resolved = {
+            operator_key: [
+                layer_idx
+                for layer_idx in requested_layers
+                if layer_idx in sources
+            ]
+            for operator_key, sources in projection_sources.items()
+        }
+
+    empty = [
+        operator_key
+        for operator_key, layer_ids in resolved.items()
+        if not layer_ids
+    ]
+    if empty:
+        raise ValueError(f"No layers found for selected operators: {empty}")
     return resolved
 
 
@@ -275,6 +328,8 @@ def load_expert_checkpoint(checkpoint_dir: Path) -> dict[str, Any]:
 
 
 def _module_path(layer_idx: int, module_name: str) -> str:
+    if "." in module_name:
+        return f"model.layers.{layer_idx}.{module_name}"
     prefix = "self_attn" if module_name in ATTENTION_MODULES else "mlp"
     return f"model.layers.{layer_idx}.{prefix}.{module_name}"
 
@@ -442,12 +497,13 @@ def build_metadata(
     layer_info: dict[str, Any],
     compensation_ratio: float,
     dtype_name: str,
+    operators: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "version": "2.0",
         "architecture": "expert_jumprelu",
         "runtime_target": "gpu_decode_only",
-        "operators": ["self_attn.qkv_proj", "mlp.gate_up_proj"],
+        "operators": list(operators or ["self_attn.qkv_proj", "mlp.gate_up_proj"]),
         "dtype": dtype_name,
         "compensation": {
             "mode": "ratio",
@@ -557,18 +613,21 @@ def main() -> int:
 
     checkpoint_root = Path(args.checkpoint_dir)
     output_dir = Path(args.output_dir)
-    qproj_sources = discover_projection_layer_sources(checkpoint_root, "qkv")
-    upproj_sources = discover_projection_layer_sources(checkpoint_root, "gate_up")
-    layer_indices = resolve_layer_indices(
-        qproj_sources,
-        upproj_sources,
-        layers=parse_layer_range(args.layers) if args.layers else None,
-        operators=args.operators,
+    requested_layers = parse_layer_range(args.layers) if args.layers else None
+    projection_sources = {
+        operator_key: discover_projection_layer_sources(checkpoint_root, operator_key)
+        for operator_key in args.operators
+    }
+    operator_layers = resolve_operator_layer_indices(
+        projection_sources,
+        layers=requested_layers,
     )
-    if "qkv" in args.operators:
-        _validate_projection_sources("qkv", qproj_sources, layers=layer_indices)
-    if "gate_up" in args.operators:
-        _validate_projection_sources("gate_up", upproj_sources, layers=layer_indices)
+    for operator_key, layer_indices in operator_layers.items():
+        _validate_projection_sources(
+            operator_key,
+            projection_sources[operator_key],
+            layers=layer_indices,
+        )
     target_dtype = _dtype_from_name(args.dtype)
     batch_size = None if args.batch_size == 0 else args.batch_size
 
@@ -576,6 +635,20 @@ def main() -> int:
     model = _load_model(args.model_path)
 
     if args.merge_output_dir:
+        unsupported = set(args.operators) - {"qkv", "gate_up"}
+        if unsupported:
+            raise ValueError(
+                "--merge-output-dir currently supports only qkv/gate_up "
+                f"operators, got {sorted(unsupported)}"
+            )
+        qproj_sources = projection_sources.get("qkv", {})
+        upproj_sources = projection_sources.get("gate_up", {})
+        layer_indices = resolve_layer_indices(
+            qproj_sources,
+            upproj_sources,
+            layers=requested_layers,
+            operators=args.operators,
+        )
         materialize_merge_view(
             q_sources=qproj_sources,
             up_sources=upproj_sources,
@@ -584,14 +657,10 @@ def main() -> int:
             operators=args.operators,
         )
 
-    projection_sources = {
-        "qkv": qproj_sources,
-        "gate_up": upproj_sources,
-    }
     layer_info: dict[str, Any] = {}
 
-    for layer_idx in layer_indices:
-        for operator_key in args.operators:
+    for operator_key in args.operators:
+        for layer_idx in operator_layers[operator_key]:
             spec = PROJECTION_SPECS[operator_key]
             checkpoint_dir = projection_sources[operator_key][layer_idx]
 
@@ -616,6 +685,7 @@ def main() -> int:
         layer_info=layer_info,
         compensation_ratio=args.compensation_ratio,
         dtype_name=args.dtype,
+        operators=[PROJECTION_SPECS[key]["operator_name"] for key in args.operators],
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = output_dir / "metadata.json"

@@ -1,0 +1,25 @@
+NPROC_PER_NODE=4 \
+		MODEL_PATH=$HOME/models/Qwen3.5-4B \
+		DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
+		WANDB_PROJECT=qwen3.5-4B-expert_jumprelu-q-gatekv \
+		SAVE_DIR=checkpoints/qwen3.5-4B/expert_jumprelu_q_gatekv \
+		RUN_NAME=expert_jumprelu_q_gatekv \
+		MAX_TOKENS=100000000 \
+		ARCHITECTURE=expert_jumprelu \
+		K=64 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=64 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=128 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='layers.[3,7,11,15,19,23,27,31].self_attn.q_proj' \
+		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3.5-4B/thresholds_q_gatekv.json \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=4 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=1 \
+		bash scripts/autoresearch_test.sh

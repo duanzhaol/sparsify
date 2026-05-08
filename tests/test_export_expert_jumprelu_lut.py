@@ -231,6 +231,100 @@ def test_export_projection_layer_writes_complete_runtime_bundle(tmp_path: Path):
         )
 
 
+def test_export_projection_layer_supports_qwen3_5_gdn_qkvz_bundle(tmp_path: Path):
+    exporter = _load_exporter()
+    checkpoint_dir = tmp_path / "layers.0.linear_attn.in_proj_qkv"
+    source_tensors = _write_expert_checkpoint(checkpoint_dir)
+    output_dir = tmp_path / "lut"
+
+    modules = {
+        "model.layers.0.linear_attn.in_proj_qkv": _make_linear(
+            torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.0, 0.0]]),
+            None,
+        ),
+        "model.layers.0.linear_attn.in_proj_z": _make_linear(
+            torch.tensor(
+                [
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            torch.tensor([0.1, -0.2, 0.3]),
+        ),
+    }
+    model = FakeModel(modules)
+
+    layer_info = exporter.export_projection_layer(
+        model=model,
+        checkpoint_dir=checkpoint_dir,
+        output_dir=output_dir,
+        layer_idx=0,
+        operator_name="linear_attn.qkvz_proj",
+        output_name="layers.0.linear_attn.qkvz_proj",
+        target_modules=["linear_attn.in_proj_qkv", "linear_attn.in_proj_z"],
+        target_dtype=torch.float32,
+        device="cpu",
+        batch_size=None,
+    )
+
+    fused_weight = torch.cat(
+        [
+            modules["model.layers.0.linear_attn.in_proj_qkv"].weight.detach(),
+            modules["model.layers.0.linear_attn.in_proj_z"].weight.detach(),
+        ],
+        dim=0,
+    )
+    output_path = output_dir / "layers.0.linear_attn.qkvz_proj.lut.safetensors"
+
+    assert output_path.exists()
+    assert layer_info["input_dim"] == 4
+    assert layer_info["output_dim"] == 5
+    assert layer_info["operator"] == "linear_attn.qkvz_proj"
+
+    with safe_open(str(output_path), framework="pt", device="cpu") as f:
+        assert torch.allclose(
+            f.get_tensor("precomputed_products"),
+            source_tensors["W_dec"] @ fused_weight.T,
+        )
+
+
+def test_projection_specs_include_qwen3_5_operators():
+    exporter = _load_exporter()
+
+    assert exporter.PROJECTION_SPECS["gdn_qkvz"]["checkpoint_suffix"] == (
+        "linear_attn.in_proj_qkv"
+    )
+    assert exporter.PROJECTION_SPECS["q_gatekv"]["target_modules"] == [
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+    ]
+    assert exporter.PROJECTION_SPECS["gate_up"]["target_modules"] == [
+        "mlp.gate_proj",
+        "mlp.up_proj",
+    ]
+
+
+def test_resolve_operator_layer_indices_keeps_disjoint_qwen3_5_layers():
+    exporter = _load_exporter()
+
+    resolved = exporter.resolve_operator_layer_indices(
+        {
+            "gdn_qkvz": {0: Path("gdn0"), 1: Path("gdn1")},
+            "q_gatekv": {3: Path("attn3")},
+            "gate_up": {0: Path("up0"), 1: Path("up1"), 3: Path("up3")},
+        },
+        layers=None,
+    )
+
+    assert resolved == {
+        "gdn_qkvz": [0, 1],
+        "q_gatekv": [3],
+        "gate_up": [0, 1, 3],
+    }
+
+
 def test_build_metadata_uses_required_expert_schema():
     exporter = _load_exporter()
     layer_info = {
