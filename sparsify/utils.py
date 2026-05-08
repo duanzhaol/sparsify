@@ -19,7 +19,7 @@ def assert_type(typ: Type[T], obj: Any) -> T:
 
 def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
     """Get the list of layers to train SAEs on."""
-    N = assert_type(int, model.config.num_hidden_layers)
+    N = _get_num_hidden_layers(model.config)
     candidates = [
         (name, mod)
         for (name, mod) in model.base_model.named_modules()
@@ -28,6 +28,22 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
     assert len(candidates) == 1, "Could not find the list of layers."
 
     return candidates[0]
+
+
+def _get_num_hidden_layers(config: Any) -> int:
+    value = getattr(config, "num_hidden_layers", None)
+    if isinstance(value, int):
+        return value
+
+    text_config = getattr(config, "text_config", None)
+    value = getattr(text_config, "num_hidden_layers", None)
+    if isinstance(value, int):
+        return value
+
+    raise TypeError(
+        "Expected config.num_hidden_layers or "
+        "config.text_config.num_hidden_layers"
+    )
 
 
 @torch.inference_mode()
@@ -90,17 +106,19 @@ def get_max_layer_index(hookpoints: list[str], layers_name: str) -> int | None:
         Maximum layer index if found, None otherwise
     """
     max_idx = -1
-    base_name = layers_name.split('.')[0]  # Handle "layers" or "model.layers"
+    layer_parts = layers_name.split(".")
 
     for hookpoint in hookpoints:
-        parts = hookpoint.split('.')
-        # Check format: "layers.N.component" where N is integer
-        if len(parts) >= 2 and parts[0] == base_name:
+        parts = hookpoint.split(".")
+        for start in range(0, len(parts) - len(layer_parts)):
+            if parts[start : start + len(layer_parts)] != layer_parts:
+                continue
             try:
-                layer_idx = int(parts[1])
+                layer_idx = int(parts[start + len(layer_parts)])
                 max_idx = max(max_idx, layer_idx)
             except ValueError:
-                continue  # Skip non-numeric indices
+                continue
+            break
 
     return max_idx if max_idx >= 0 else None
 

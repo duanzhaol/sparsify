@@ -12,7 +12,13 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
-from transformers import AutoModel, AutoTokenizer, PreTrainedModel
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+)
 
 from .checkpoint import load_sae_checkpoint
 from .data import MemmapDataset, chunk_and_tokenize
@@ -172,6 +178,38 @@ def _is_local_artifact(path: str) -> bool:
     return os.path.exists(path)
 
 
+def model_path_uses_qwen3_5_text_loader(
+    model_name_or_path: str,
+    *,
+    revision: str | None = None,
+    token: str | None = None,
+) -> bool:
+    """Return whether a model path should load Qwen3.5 as its text CausalLM.
+
+    Qwen3.5 checkpoints in this workspace are conditional-generation checkpoints
+    with a multimodal outer model. For SAE activation training we only need the
+    text stack, and AutoModelForCausalLM exposes that stack with the same
+    ``layers.*`` hook paths used by the rest of the training pipeline.
+    """
+    config_path = Path(model_name_or_path) / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, "r") as f:
+                return json.load(f).get("model_type") == "qwen3_5"
+        except (OSError, json.JSONDecodeError):
+            return False
+
+    try:
+        cfg = AutoConfig.from_pretrained(
+            model_name_or_path,
+            revision=revision,
+            token=token,
+        )
+    except Exception:
+        return False
+    return getattr(cfg, "model_type", None) == "qwen3_5"
+
+
 @dataclass
 class RunConfig(TrainConfig):
     model: str = field(
@@ -249,7 +287,16 @@ def load_artifacts(
             token=args.hf_token,
         )
     else:
-        model = AutoModel.from_pretrained(
+        model_cls = (
+            AutoModelForCausalLM
+            if model_path_uses_qwen3_5_text_loader(
+                model_name_or_path,
+                revision=args.revision,
+                token=args.hf_token,
+            )
+            else AutoModel
+        )
+        model = model_cls.from_pretrained(
             model_name_or_path,
             device_map={"": get_device_string(rank)},
             revision=args.revision,

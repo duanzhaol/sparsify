@@ -22,6 +22,10 @@ QWEN3_4B_V_PROJ_ACTUAL_PROFILE_ID = "qwen3_4b_v_proj_actual_v1"
 QWEN3_4B_O_PROJ_ACTUAL_PROFILE_ID = "qwen3_4b_o_proj_actual_v1"
 QWEN3_4B_UP_PROJ_ACTUAL_PROFILE_ID = "qwen3_4b_up_proj_actual_v1"
 
+QWEN3_5_4B_GDN_QKVZ_PROFILE_ID = "qwen3_5_4b_gdn_qkvz_fused_proxy_v1"
+QWEN3_5_4B_Q_GATEKV_PROFILE_ID = "qwen3_5_4b_q_gatekv_fused_proxy_v1"
+QWEN3_5_4B_GATE_UP_PROFILE_ID = "qwen3_5_4b_gate_up_fused_proxy_v1"
+
 
 @dataclass(frozen=True)
 class TargetProfile:
@@ -147,6 +151,45 @@ _QWEN3_4B_UP_PROJ_PROFILE = TargetProfile(
     ),
 )
 
+_QWEN3_5_4B_GDN_QKVZ_PROFILE = TargetProfile(
+    profile_id=QWEN3_5_4B_GDN_QKVZ_PROFILE_ID,
+    training_hookpoint="layers.[0].linear_attn.in_proj_qkv",
+    d_in=2560,
+    n_output=12288,
+    elbow_threshold_path="thresholds/Qwen3.5-4B/thresholds_gdn_qkvz.json",
+    cost_model_label=(
+        "train on Gated DeltaNet input activations; cost proxy uses fused "
+        "in_proj_qkv/in_proj_z deployment matrix 2560x12288 and counts deploy "
+        "libraries as d_in+n_output"
+    ),
+)
+
+_QWEN3_5_4B_Q_GATEKV_PROFILE = TargetProfile(
+    profile_id=QWEN3_5_4B_Q_GATEKV_PROFILE_ID,
+    training_hookpoint="layers.[3].self_attn.q_proj",
+    d_in=2560,
+    n_output=10240,
+    elbow_threshold_path="thresholds/Qwen3.5-4B/thresholds_q_gatekv.json",
+    cost_model_label=(
+        "train on full-attention input activations; cost proxy uses fused "
+        "q/gate/k/v deployment matrix 2560x10240 and counts deploy libraries "
+        "as d_in+n_output"
+    ),
+)
+
+_QWEN3_5_4B_GATE_UP_PROFILE = TargetProfile(
+    profile_id=QWEN3_5_4B_GATE_UP_PROFILE_ID,
+    training_hookpoint="layers.[0].mlp.up_proj",
+    d_in=2560,
+    n_output=18432,
+    elbow_threshold_path="thresholds/Qwen3.5-4B/thresholds_gate_up.json",
+    cost_model_label=(
+        "train on MLP input activations; cost proxy uses fused gate/up "
+        "deployment matrix 2560x18432 and counts deploy libraries as "
+        "d_in+n_output"
+    ),
+)
+
 
 def default_target_profile() -> TargetProfile:
     return DEFAULT_TARGET_PROFILE
@@ -164,6 +207,26 @@ def resolve_target_profile(config: dict[str, Any] | None = None) -> TargetProfil
         or DEFAULT_TARGET_PROFILE.training_hookpoint
     )
     default_elbow = _default_elbow_threshold_path(cfg)
+
+    if _is_qwen3_5_config(cfg):
+        if hookpoint.endswith(".linear_attn.in_proj_qkv"):
+            return _copy_profile(
+                _QWEN3_5_4B_GDN_QKVZ_PROFILE,
+                hookpoint,
+                default_elbow,
+            )
+        if hookpoint.endswith(".self_attn.q_proj"):
+            return _copy_profile(
+                _QWEN3_5_4B_Q_GATEKV_PROFILE,
+                hookpoint,
+                default_elbow,
+            )
+        if hookpoint.endswith(".mlp.up_proj"):
+            return _copy_profile(
+                _QWEN3_5_4B_GATE_UP_PROFILE,
+                hookpoint,
+                default_elbow,
+            )
 
     if _is_qwen3_4b_config(cfg):
         if hookpoint.endswith(".self_attn.q_proj"):
@@ -298,3 +361,13 @@ def _is_qwen3_4b_config(config: dict[str, Any]) -> bool:
     if model_path in (None, ""):
         return False
     return "qwen3-4b" in str(model_path).lower()
+
+
+def _is_qwen3_5_config(config: dict[str, Any]) -> bool:
+    model_path = config.get("model_path")
+    if model_path in (None, ""):
+        model_path = config.get("MODEL_PATH")
+    if model_path in (None, ""):
+        return False
+    normalized = str(model_path).lower().replace("_", ".")
+    return "qwen3.5-4b" in normalized or "qwen3-5-4b" in normalized
