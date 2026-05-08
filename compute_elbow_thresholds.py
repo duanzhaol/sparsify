@@ -361,6 +361,107 @@ class ActivationCollector:
         return dict(self.activations)
 
 
+def load_threshold_dataset(args, tokenizer):
+    print(f"📊 Loading dataset: {args.dataset}")
+
+    dataset = None
+    dataset_type = None
+
+    # Strategy 1: Try memmap dataset (sparsify format)
+    try:
+        dataset = MemmapDataset(args.dataset, ctx_len=args.ctx_len, max_examples=None)
+        dataset_type = "memmap"
+        print(f"   ✅ Using memmap dataset: {len(dataset)} examples (ctx_len={args.ctx_len})")
+    except (FileNotFoundError, ValueError, OSError, TypeError):
+        print(f"   ℹ️  Not a memmap dataset, trying HuggingFace...")
+
+    # Strategy 2: Try HuggingFace dataset or save_to_disk directory.
+    if dataset is None:
+        from datasets import load_dataset, load_from_disk
+
+        try:
+            # Estimate how many examples we need
+            # Assuming avg sequence length ~= ctx_len
+            estimated_examples = max(
+                int(args.num_tokens / args.ctx_len * 2),  # 2x buffer for safety
+                1000  # minimum 1k examples
+            )
+            print(f"   ℹ️  Estimated examples needed: {estimated_examples:,} (for {args.num_tokens:,} tokens)")
+
+            # Load dataset with limit (use streaming if dataset is large)
+            print(f"   🔄 Loading HuggingFace dataset (streaming mode)...")
+            try:
+                hf_dataset = load_dataset(args.dataset, split="train", streaming=True)
+            except ValueError as e:
+                if "load_from_disk" not in str(e) and "save_to_disk" not in str(e):
+                    raise
+
+                print(f"   🔄 Loading HuggingFace save_to_disk dataset...")
+                dataset = load_from_disk(args.dataset)
+                if "input_ids" not in dataset.column_names:
+                    raise ValueError(
+                        "Saved dataset is not tokenized: missing input_ids column"
+                    )
+                dataset_type = "hf_tokenized"
+                print(f"   ✅ Loaded tokenized dataset from disk: {len(dataset):,} examples")
+                return dataset, dataset_type
+
+            # Take only what we need
+            hf_dataset = hf_dataset.take(estimated_examples)
+            print(f"   ✅ Will process ~{estimated_examples:,} examples")
+
+            # Check if already tokenized (sample first element)
+            first_example = next(iter(hf_dataset))
+            if "input_ids" in first_example:
+                print(f"   ✅ Dataset already tokenized")
+                dataset = hf_dataset
+                dataset_type = "hf_tokenized"
+            else:
+                if tokenizer is None:
+                    raise ValueError("Tokenizer is required for raw text datasets")
+
+                # Need to tokenize (tokenizer already loaded above)
+                print(f"   ℹ️  Dataset not tokenized, tokenizing...")
+
+                # Detect text column
+                text_column = None
+                for col in ["text", "content", "document", "article"]:
+                    if col in first_example:
+                        text_column = col
+                        break
+
+                if text_column is None:
+                    raise ValueError(
+                        f"Could not find text column in dataset. "
+                        f"Available columns: {list(first_example.keys())}"
+                    )
+
+                print(f"   ✅ Found text column: '{text_column}'")
+
+                def tokenize_function(examples):
+                    return tokenizer(
+                        examples[text_column],
+                        truncation=True,
+                        max_length=args.ctx_len,
+                        return_tensors=None,
+                    )
+
+                print(f"   🔄 Tokenizing ~{estimated_examples:,} examples...")
+                dataset = hf_dataset.map(
+                    tokenize_function,
+                    batched=True,
+                    remove_columns=list(first_example.keys()),
+                )
+                dataset_type = "hf_raw"
+                print(f"   ✅ Tokenization complete")
+
+        except Exception as e:
+            print(f"   ❌ Failed to load dataset: {e}")
+            raise
+
+    return dataset, dataset_type
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compute elbow thresholds for model activations")
     parser.add_argument("model", type=str, help="Model name or path")
@@ -416,86 +517,7 @@ def main():
 
     print(f"   Found {len(special_token_ids)} special token IDs: {sorted(special_token_ids)}")
 
-    print(f"📊 Loading dataset: {args.dataset}")
-
-    # Try different dataset loading strategies
-    dataset = None
-    dataset_type = None
-
-    # Strategy 1: Try memmap dataset (sparsify format)
-    try:
-        dataset = MemmapDataset(args.dataset, ctx_len=args.ctx_len, max_examples=None)
-        dataset_type = "memmap"
-        print(f"   ✅ Using memmap dataset: {len(dataset)} examples (ctx_len={args.ctx_len})")
-    except (FileNotFoundError, ValueError, OSError, TypeError) as e:
-        print(f"   ℹ️  Not a memmap dataset, trying HuggingFace...")
-
-    # Strategy 2: Try HuggingFace dataset
-    if dataset is None:
-        from datasets import load_dataset
-
-        try:
-            # Estimate how many examples we need
-            # Assuming avg sequence length ~= ctx_len
-            estimated_examples = max(
-                int(args.num_tokens / args.ctx_len * 2),  # 2x buffer for safety
-                1000  # minimum 1k examples
-            )
-            print(f"   ℹ️  Estimated examples needed: {estimated_examples:,} (for {args.num_tokens:,} tokens)")
-
-            # Load dataset with limit (use streaming if dataset is large)
-            print(f"   🔄 Loading HuggingFace dataset (streaming mode)...")
-            hf_dataset = load_dataset(args.dataset, split="train", streaming=True)
-
-            # Take only what we need
-            hf_dataset = hf_dataset.take(estimated_examples)
-            print(f"   ✅ Will process ~{estimated_examples:,} examples")
-
-            # Check if already tokenized (sample first element)
-            first_example = next(iter(hf_dataset))
-            if "input_ids" in first_example:
-                print(f"   ✅ Dataset already tokenized")
-                dataset = hf_dataset
-                dataset_type = "hf_tokenized"
-            else:
-                # Need to tokenize (tokenizer already loaded above)
-                print(f"   ℹ️  Dataset not tokenized, tokenizing...")
-
-                # Detect text column
-                text_column = None
-                for col in ["text", "content", "document", "article"]:
-                    if col in first_example:
-                        text_column = col
-                        break
-
-                if text_column is None:
-                    raise ValueError(
-                        f"Could not find text column in dataset. "
-                        f"Available columns: {list(first_example.keys())}"
-                    )
-
-                print(f"   ✅ Found text column: '{text_column}'")
-
-                def tokenize_function(examples):
-                    return tokenizer(
-                        examples[text_column],
-                        truncation=True,
-                        max_length=args.ctx_len,
-                        return_tensors=None,
-                    )
-
-                print(f"   🔄 Tokenizing ~{estimated_examples:,} examples...")
-                dataset = hf_dataset.map(
-                    tokenize_function,
-                    batched=True,
-                    remove_columns=list(first_example.keys()),
-                )
-                dataset_type = "hf_raw"
-                print(f"   ✅ Tokenization complete")
-
-        except Exception as e:
-            print(f"   ❌ Failed to load dataset: {e}")
-            raise
+    dataset, dataset_type = load_threshold_dataset(args, tokenizer)
 
     # Create dataloader
     from torch.utils.data import DataLoader
