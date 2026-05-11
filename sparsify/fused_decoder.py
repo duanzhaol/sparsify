@@ -22,6 +22,45 @@ import torch.nn.functional as F
 
 
 _MATMUL_THRESHOLD = 256 * 1024 * 1024  # 256 MB
+_FALLBACK_BACKWARD_CHUNK_BYTES = 256 * 1024 * 1024
+
+
+def _fallback_backward_chunk_width(
+    N: int,
+    k: int,
+    d_in: int,
+    element_size: int,
+) -> int:
+    """Choose a k-chunk width that bounds temporary [N, chunk, d_in] tensors."""
+    bytes_per_k = max(1, N * d_in * max(1, element_size))
+    return max(1, min(k, _FALLBACK_BACKWARD_CHUNK_BYTES // bytes_per_k))
+
+
+def _fallback_grad_acts(top_indices, grad_output, W_T, chunk_width: int):
+    grad_acts = torch.empty(
+        top_indices.shape,
+        dtype=grad_output.dtype,
+        device=grad_output.device,
+    )
+    for start in range(0, top_indices.shape[1], chunk_width):
+        end = min(start + chunk_width, top_indices.shape[1])
+        chunk_indices = top_indices[:, start:end].long()
+        selected = W_T[chunk_indices].type_as(grad_output)
+        grad_acts[:, start:end] = (selected * grad_output.unsqueeze(1)).sum(dim=-1)
+    return grad_acts
+
+
+def _fallback_grad_weight(top_indices, top_acts, grad_output, W_T, chunk_width: int):
+    grad_W_T = torch.zeros_like(W_T)
+    for start in range(0, top_indices.shape[1], chunk_width):
+        end = min(start + chunk_width, top_indices.shape[1])
+        chunk_indices = top_indices[:, start:end].reshape(-1).long()
+        chunk_acts = top_acts[:, start:end].to(grad_output.dtype)
+        contrib = (chunk_acts.unsqueeze(-1) * grad_output.unsqueeze(1)).reshape(
+            -1, W_T.shape[-1]
+        )
+        grad_W_T.index_add_(0, chunk_indices, contrib.type_as(W_T))
+    return grad_W_T
 
 
 class FusedDecoder(torch.autograd.Function):
@@ -60,6 +99,12 @@ class FusedDecoder(torch.autograd.Function):
         d_in = W_T.shape[-1]
         M = W_T.shape[0]
         use_matmul = M * N * grad_output.element_size() <= _MATMUL_THRESHOLD
+        chunk_width = _fallback_backward_chunk_width(
+            N,
+            k,
+            d_in,
+            max(grad_output.element_size(), W_T.element_size(), top_acts.element_size()),
+        )
 
         # --- Grad w.r.t. top_acts ---
         if ctx.needs_input_grad[1]:
@@ -67,11 +112,12 @@ class FusedDecoder(torch.autograd.Function):
                 full_scores = grad_output @ W_T.type_as(grad_output).t()
                 grad_acts = full_scores.gather(1, top_indices.long())
             else:
-                selected = W_T[top_indices].type_as(grad_output)
-                grad_acts = torch.bmm(
-                    grad_output.unsqueeze(1),
-                    selected.transpose(1, 2)
-                ).squeeze(1)
+                grad_acts = _fallback_grad_acts(
+                    top_indices,
+                    grad_output,
+                    W_T,
+                    chunk_width,
+                )
 
         # --- Grad w.r.t. W_T ---
         if ctx.needs_input_grad[2]:
@@ -80,12 +126,13 @@ class FusedDecoder(torch.autograd.Function):
                 S.scatter_add_(0, top_indices.t().long(), top_acts.t().to(grad_output.dtype))
                 grad_W_T = (S @ grad_output).type_as(W_T)
             else:
-                grad_W_T = torch.zeros_like(W_T)
-                flat_idx = top_indices.reshape(-1)
-                acts_flat = top_acts.reshape(-1, 1)
-                grad_exp = grad_output.unsqueeze(1).expand(N, k, d_in).reshape(-1, d_in)
-                contrib = (acts_flat * grad_exp).type_as(W_T)
-                grad_W_T.index_add_(0, flat_idx, contrib)
+                grad_W_T = _fallback_grad_weight(
+                    top_indices,
+                    top_acts,
+                    grad_output,
+                    W_T,
+                    chunk_width,
+                )
 
         return None, grad_acts, grad_W_T
 

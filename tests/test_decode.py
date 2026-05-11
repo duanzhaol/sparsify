@@ -55,6 +55,56 @@ def test_fused_decode_gradient():
     torch.testing.assert_close(acts_fused.grad, acts_naive.grad, atol=1e-5, rtol=1e-5)
 
 
+def test_fused_decode_fallback_backward_avoids_full_nkd_expand(monkeypatch):
+    """Fallback backward should not materialize [N, k, d_in] grad tensors."""
+    import sparsify.fused_decoder as fused_decoder
+
+    N, M, d_in, k = 4, 32, 8, 5
+    indices = torch.randint(0, M, (N, k))
+    W_dec = torch.randn(d_in, M, requires_grad=True)
+    acts = torch.randn(N, k, requires_grad=True)
+
+    monkeypatch.setattr(fused_decoder, "_MATMUL_THRESHOLD", 0)
+    original_expand = torch.Tensor.expand
+
+    def guarded_expand(self, *sizes):
+        normalized = sizes[0] if len(sizes) == 1 and isinstance(sizes[0], tuple) else sizes
+        if tuple(self.shape) == (N, 1, d_in) and tuple(normalized) == (N, k, d_in):
+            raise AssertionError("fallback decoder backward expanded full [N, k, d_in]")
+        return original_expand(self, *sizes)
+
+    monkeypatch.setattr(torch.Tensor, "expand", guarded_expand)
+
+    out = fused_decode(indices, acts, W_dec)
+    out.square().sum().backward()
+
+    assert W_dec.grad is not None
+    assert acts.grad is not None
+
+
+def test_fused_decode_fallback_gradient_matches_naive(monkeypatch):
+    """Forced fallback backward should match the naive dense reference."""
+    import sparsify.fused_decoder as fused_decoder
+
+    N, M, d_in, k = 6, 40, 10, 7
+    indices = torch.randint(0, M, (N, k))
+    W_naive = torch.randn(d_in, M, requires_grad=True)
+    acts_naive = torch.randn(N, k, requires_grad=True)
+
+    out_naive = _naive_decode(indices, acts_naive, W_naive)
+    out_naive.square().sum().backward()
+
+    monkeypatch.setattr(fused_decoder, "_MATMUL_THRESHOLD", 0)
+    W_fused = W_naive.detach().clone().requires_grad_(True)
+    acts_fused = acts_naive.detach().clone().requires_grad_(True)
+    out_fused = fused_decode(indices, acts_fused, W_fused)
+    out_fused.square().sum().backward()
+
+    torch.testing.assert_close(out_fused, out_naive, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(W_fused.grad, W_naive.grad, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(acts_fused.grad, acts_naive.grad, atol=1e-5, rtol=1e-5)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fused_decode_bf16_autocast():
     """Verify fused_decode works under bf16 autocast (mixed dtype backward)."""
