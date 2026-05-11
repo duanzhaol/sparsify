@@ -4,15 +4,16 @@
 
 ## 目标
 
-Qwen3.5-4B 的三个 SAE 训练目标都是模块输入 hidden state，而不是 projection 输出。
+Qwen3.5-4B 的 SAE 训练目标都是模块输入 hidden state，而不是 projection 输出。
 
 | 目标 | 训练 hookpoint | 层 | SAE 输入 | 部署侧融合矩阵 |
 | --- | --- | --- | --- | --- |
 | GDN qkvz | `layers.X.linear_attn.in_proj_qkv` | `0-2,4-6,8-10,12-14,16-18,20-22,24-26,28-30` | layernorm 后进入 Gated DeltaNet projection 前的 `x ∈ R^2560` | `in_proj_qkv + in_proj_z`, `2560 -> 12288` |
 | q_gatekv | `layers.X.self_attn.q_proj` | `3,7,11,15,19,23,27,31` | attention layernorm 后的 `x ∈ R^2560` | `q_proj + k_proj + v_proj`, 其中 `q_proj` 含 query/gate, `2560 -> 10240` |
 | gate_up | `layers.X.mlp.up_proj` | `0-31` | MLP layernorm 后的 `x ∈ R^2560` | `gate_proj + up_proj`, `2560 -> 18432` |
+| lm_head | `lm_head` | final | final RMSNorm 后进入 vocab projection 前的 `h ∈ R^2560` | `lm_head.weight`, `2560 -> 248320` |
 
-Trainer 的 forward hook 使用模块输入，所以虽然 hookpoint 名字是 `in_proj_qkv`、`q_proj`、`up_proj`，实际训练目标都是进入这些线性层之前的 hidden state。
+Trainer 的 forward hook 使用模块输入，所以虽然前三类 hookpoint 名字是 `in_proj_qkv`、`q_proj`、`up_proj`，实际训练目标都是进入这些线性层之前的 hidden state。`lm_head` 使用 forward pre-hook 捕获输入并提前停止 forward，避免训练时真的计算完整 vocab logits。
 
 ## 已修改内容
 
@@ -22,19 +23,24 @@ Trainer 的 forward hook 使用模块输入，所以虽然 hookpoint 名字是 `
 - `sparsify/utils.py`
   - 支持从 `config.text_config.num_hidden_layers` 读取层数。
   - 支持嵌套 layer 名称的最大层号解析。
+  - 支持同时解析 `model.base_model` 内部 hookpoint 和顶层 hookpoint，例如 `lm_head`。
+- `sparsify/trainer.py`
+  - 支持 `lm_head` pre-hook 训练 final hidden state。
 - `research/AutoResearch/target_profile.py`
-  - 增加 Qwen3.5-4B 的 `gdn_qkvz`、`q_gatekv`、`gate_up` 三个 target profile。
+  - 增加 Qwen3.5-4B 的 `gdn_qkvz`、`q_gatekv`、`gate_up`、`lm_head` target profile。
 - `compute_elbow_thresholds.py`
   - 保留原有 Kneedle elbow 算法。
   - 增加对 `Dataset.save_to_disk()` 输出目录的 `load_from_disk` 兼容。
+  - 支持 `lm_head` pre-hook 阈值采样，避免执行完整 vocab projection。
 - `scripts/export/export_expert_jumprelu_lut.py`
   - 增加 `gdn_qkvz`、`q_gatekv`、`gate_up` projection specs。
   - 支持 Qwen3.5 这种不同 operator 覆盖不同层集合的导出。
 - `scripts/full/qwen3.5-4B/expert_jumprelu/`
-  - 增加三类训练脚本：
+  - 增加训练脚本：
     - `gdn_qkvz.sh`
     - `q_gatekv.sh`
     - `gate_up.sh`
+    - `lm_head.sh`
 
 ## 数据预处理
 
@@ -127,6 +133,19 @@ python compute_elbow_thresholds.py /root/models/Qwen3.5-4B \
   --max_percentile 0.95
 ```
 
+### lm_head
+
+```bash
+python compute_elbow_thresholds.py /root/models/Qwen3.5-4B \
+  --dataset /root/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
+  --hookpoints lm_head \
+  --num_tokens 100000 \
+  --batch_size 1 \
+  --ctx_len 2048 \
+  --output thresholds/Qwen3.5-4B/thresholds_lm_head.json \
+  --max_percentile 0.95
+```
+
 ### 检查 thresholds
 
 ```bash
@@ -146,6 +165,7 @@ expected = {
     "thresholds/Qwen3.5-4B/thresholds_gate_up.json": {
         f"layer_{i}/mlp_up_proj" for i in range(32)
     },
+    "thresholds/Qwen3.5-4B/thresholds_lm_head.json": {"lm_head"},
 }
 
 for path, exp in expected.items():
@@ -166,6 +186,7 @@ PY
 thresholds_gdn_qkvz.json: expected 24, actual 24, missing 0, extra 0, bad 0
 thresholds_q_gatekv.json: expected 8, actual 8, missing 0, extra 0, bad 0
 thresholds_gate_up.json: expected 32, actual 32, missing 0, extra 0, bad 0
+thresholds_lm_head.json: expected 1, actual 1, missing 0, extra 0, bad 0
 ```
 
 当前 Qwen3.5-4B elbow value 统计：
@@ -174,11 +195,12 @@ thresholds_gate_up.json: expected 32, actual 32, missing 0, extra 0, bad 0
 GDN qkvz input: n=24, min=0.4082, median=0.8125, mean=0.8860, max=1.1797
 q_gatekv input: n=8, min=0.7227, median=0.8613, mean=0.8789, max=1.0781
 gate_up input: n=32, min=0.2715, median=0.7324, mean=0.7983, max=1.1641
+lm_head input: n=1, value=2.7344
 ```
 
 ## 训练
 
-三类训练脚本都使用：
+前三类训练脚本都使用：
 
 - `MODEL_PATH=$HOME/models/Qwen3.5-4B`
 - `DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048`
@@ -189,7 +211,7 @@ gate_up input: n=32, min=0.2715, median=0.7324, mean=0.7983, max=1.1641
 - `LATENTS_PER_EXPERT=128`
 - `OPTIMIZER=adam`
 - `LR=8e-4`
-- `NPROC_PER_NODE=4`
+- `NPROC_PER_NODE=2`
 - `MAX_TOKENS=100000000`
 
 启动命令：
@@ -206,15 +228,29 @@ bash scripts/full/qwen3.5-4B/expert_jumprelu/q_gatekv.sh
 bash scripts/full/qwen3.5-4B/expert_jumprelu/gate_up.sh
 ```
 
+`lm_head` 当前脚本是单独的 decode logits SAE 配置，默认更大：
+
+- `K=256`
+- `NUM_EXPERTS=64`
+- `ACTIVE_EXPERTS=2`
+- `LATENTS_PER_EXPERT=256`
+
+启动命令：
+
+```bash
+bash scripts/full/qwen3.5-4B/expert_jumprelu/lm_head.sh
+```
+
 输出目录：
 
 ```text
 checkpoints/qwen3.5-4B/expert_jumprelu_gdn_qkvz
 checkpoints/qwen3.5-4B/expert_jumprelu_q_gatekv
 checkpoints/qwen3.5-4B/expert_jumprelu_gate_up
+checkpoints/qwen3.5-4B/expert_jumprelu_lm_head
 ```
 
-`gdn_qkvz.sh` 和 `gate_up.sh` 分两段层跑；`q_gatekv.sh` 覆盖 8 个 full attention 层。
+`gdn_qkvz.sh` 覆盖 24 个 GDN 层；`q_gatekv.sh` 覆盖 8 个 full attention 层；`gate_up.sh` 分两段层跑。
 
 ## 导出
 
@@ -261,6 +297,8 @@ python scripts/export/export_expert_jumprelu_lut.py \
   --batch-size 1024
 ```
 
+当前 exporter 已覆盖 `gdn_qkvz`、`q_gatekv`、`gate_up` 三类 layer 内算子。`lm_head` SAE 的训练和 threshold 已支持；如果要把 logits SAE 导出为 LUT，还需要给 exporter 增加 `lm_head.weight` 的 projection spec 和输出格式。
+
 ## 常见问题
 
 ### `preprocess_dataset.py` 报 required arguments
@@ -303,5 +341,6 @@ pytest tests/test_compute_elbow_thresholds.py -q
 python -m py_compile compute_elbow_thresholds.py
 bash -n scripts/full/qwen3.5-4B/expert_jumprelu/gdn_qkvz.sh \
   scripts/full/qwen3.5-4B/expert_jumprelu/q_gatekv.sh \
-  scripts/full/qwen3.5-4B/expert_jumprelu/gate_up.sh
+  scripts/full/qwen3.5-4B/expert_jumprelu/gate_up.sh \
+  scripts/full/qwen3.5-4B/expert_jumprelu/lm_head.sh
 ```
