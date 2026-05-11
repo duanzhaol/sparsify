@@ -25,6 +25,7 @@ QWEN3_4B_UP_PROJ_ACTUAL_PROFILE_ID = "qwen3_4b_up_proj_actual_v1"
 QWEN3_5_4B_GDN_QKVZ_PROFILE_ID = "qwen3_5_4b_gdn_qkvz_fused_proxy_v1"
 QWEN3_5_4B_Q_GATEKV_PROFILE_ID = "qwen3_5_4b_q_gatekv_fused_proxy_v1"
 QWEN3_5_4B_GATE_UP_PROFILE_ID = "qwen3_5_4b_gate_up_fused_proxy_v1"
+QWEN3_5_4B_LM_HEAD_PROFILE_ID = "qwen3_5_4b_lm_head_proxy_v1"
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,19 @@ _QWEN3_5_4B_GATE_UP_PROFILE = TargetProfile(
     ),
 )
 
+_QWEN3_5_4B_LM_HEAD_PROFILE = TargetProfile(
+    profile_id=QWEN3_5_4B_LM_HEAD_PROFILE_ID,
+    training_hookpoint="lm_head",
+    d_in=2560,
+    n_output=248320,
+    elbow_threshold_path="thresholds/Qwen3.5-4B/thresholds_lm_head.json",
+    cost_model_label=(
+        "train on final hidden states before lm_head; cost proxy uses "
+        "vocab projection matrix 2560x248320 and counts deploy libraries "
+        "as d_in+n_output"
+    ),
+)
+
 
 def default_target_profile() -> TargetProfile:
     return DEFAULT_TARGET_PROFILE
@@ -209,6 +223,12 @@ def resolve_target_profile(config: dict[str, Any] | None = None) -> TargetProfil
     default_elbow = _default_elbow_threshold_path(cfg)
 
     if _is_qwen3_5_config(cfg):
+        if hookpoint == "lm_head" or hookpoint.endswith(".lm_head"):
+            return _copy_profile(
+                _QWEN3_5_4B_LM_HEAD_PROFILE,
+                hookpoint,
+                default_elbow,
+            )
         if hookpoint.endswith(".linear_attn.in_proj_qkv"):
             return _copy_profile(
                 _QWEN3_5_4B_GDN_QKVZ_PROFILE,

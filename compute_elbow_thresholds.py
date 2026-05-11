@@ -24,7 +24,11 @@ import matplotlib
 
 from sparsify.data import MemmapDataset
 from sparsify.trainer import expand_range_pattern
-from sparsify.utils import get_layer_list
+from sparsify.utils import (
+    StopForwardException,
+    get_hookpoint_submodule,
+    iter_hookpoint_modules,
+)
 from fnmatch import fnmatchcase
 from natsort import natsorted
 import ml_dtypes
@@ -236,11 +240,28 @@ class ActivationCollector:
 
         return hook
 
+    def _make_lm_head_pre_hook(self, name: str):
+        """Create a pre-hook that captures lm_head input and skips vocab logits."""
+        def hook(module, input):
+            self._make_hook(name)(module, input, None)
+            raise StopForwardException()
+
+        return hook
+
+    @staticmethod
+    def _is_lm_head_hookpoint(name: str) -> bool:
+        return name == "lm_head" or name.endswith(".lm_head")
+
     def register_hooks(self):
         """注册所有hooks"""
         for name in self.hookpoints:
-            module = self.base_model.get_submodule(name)  # 使用base_model
-            handle = module.register_forward_hook(self._make_hook(name))
+            module = get_hookpoint_submodule(self.model, name)
+            if self._is_lm_head_hookpoint(name):
+                handle = module.register_forward_pre_hook(
+                    self._make_lm_head_pre_hook(name)
+                )
+            else:
+                handle = module.register_forward_hook(self._make_hook(name))
             self.handles.append(handle)
 
     def remove_hooks(self):
@@ -269,7 +290,10 @@ class ActivationCollector:
                     batch_size, seq_len = input_ids.shape
 
                     # 运行前向传播（触发所有hooks）
-                    self.model(input_ids)
+                    try:
+                        self.model(input_ids)
+                    except StopForwardException:
+                        pass
 
                     # 保存attention mask和input_ids
                     if attention_mask is not None:
@@ -592,7 +616,7 @@ def main():
 
     # 匹配实际的module names
     matched_hookpoints = []
-    for name, _ in model.base_model.named_modules():  # 使用 base_model，和trainer.py一致
+    for name, _ in iter_hookpoint_modules(model):
         if any(fnmatchcase(name, pat) for pat in expanded_patterns):
             matched_hookpoints.append(name)
 

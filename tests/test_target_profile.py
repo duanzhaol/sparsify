@@ -82,3 +82,15 @@ def test_resolve_qwen3_5_4b_gate_up_profile_from_model_path():
     assert profile.d_in == 2560
     assert profile.n_output == 18432
     assert profile.elbow_threshold_path == "thresholds/Qwen3.5-4B/thresholds_gate_up.json"
+
+
+def test_resolve_qwen3_5_4b_lm_head_profile_from_model_path():
+    profile = resolve_target_profile({
+        "MODEL_PATH": "/root/models/Qwen3.5-4B",
+        "HOOKPOINTS": "lm_head",
+    })
+
+    assert profile.training_hookpoint == "lm_head"
+    assert profile.d_in == 2560
+    assert profile.n_output == 248320
+    assert profile.elbow_threshold_path == "thresholds/Qwen3.5-4B/thresholds_lm_head.json"

@@ -36,8 +36,11 @@ from .tiled_sparse_coder import TiledSparseCoder
 from .utils import (
     get_layer_list,
     get_max_layer_index,
+    get_hookpoint_submodule,
+    iter_hookpoint_modules,
     partial_forward_to_layer,
     resolve_widths,
+    StopForwardException,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,7 +108,7 @@ class Trainer(CheckpointMixin):
 
             # Replace wildcard patterns with actual module names
             raw_hookpoints = []
-            for name, _ in model.base_model.named_modules():
+            for name, _ in iter_hookpoint_modules(model):
                 if any(fnmatchcase(name, pat) for pat in expanded_patterns):
                     raw_hookpoints.append(name)
 
@@ -493,7 +496,7 @@ class Trainer(CheckpointMixin):
             return dict(result)
 
         name_to_module = {
-            name: self.model.base_model.get_submodule(name)
+            name: get_hookpoint_submodule(self.model, name)
             for name in self.cfg.hookpoints
         }
         maybe_wrapped: dict[str, DDP | SparseCoder | TiledSparseCoder] = {}
@@ -504,6 +507,9 @@ class Trainer(CheckpointMixin):
         for sae_key in self.saes:
             hook = sae_key.partition("/")[0]
             hook_to_sae_keys[hook].append(sae_key)
+
+        def _is_lm_head_hookpoint(name: str) -> bool:
+            return name == "lm_head" or name.endswith(".lm_head")
 
         def _hook_impl(module: nn.Module, inputs, outputs):
             nonlocal total_forward_time, total_metrics_time, timing_step_count
@@ -774,14 +780,20 @@ class Trainer(CheckpointMixin):
 
                     loss.div(acc_steps).backward()
 
+        def _lm_head_pre_hook_impl(module: nn.Module, inputs):
+            _hook_impl(module, inputs, None)
+            raise StopForwardException()
+
         # Prevent dynamo from tracing the hook body when torch.compile is used
         # on transformer layers. Without this, DDP's autograd hooks don't fire
         # properly inside dynamo resume functions.
         if self.cfg.compile_model:
             import torch._dynamo as _dynamo
             hook = _dynamo.disable(_hook_impl)
+            lm_head_pre_hook = _dynamo.disable(_lm_head_pre_hook_impl)
         else:
             hook = _hook_impl
+            lm_head_pre_hook = _lm_head_pre_hook_impl
 
         # Compile individual transformer layers to fuse elementwise kernels
         if self.cfg.compile_model:
@@ -831,17 +843,28 @@ class Trainer(CheckpointMixin):
                 forward_time_start = time.perf_counter()
 
             # Forward pass on the model to capture activations via hooks
+            has_lm_head_hook = any(
+                _is_lm_head_hookpoint(name)
+                for name in name_to_module
+            )
             handles = [
-                mod.register_forward_hook(hook)
-                for mod in name_to_module.values()
+                (
+                    mod.register_forward_pre_hook(lm_head_pre_hook)
+                    if _is_lm_head_hookpoint(name)
+                    else mod.register_forward_hook(hook)
+                )
+                for name, mod in name_to_module.items()
             ]
             try:
-                if self._max_layer_for_fvu is not None:
+                if self._max_layer_for_fvu is not None and not has_lm_head_hook:
                     partial_forward_to_layer(
                         self.model, x, self._max_layer_for_fvu
                     )
                 else:
-                    self.model(x)
+                    try:
+                        self.model(x)
+                    except StopForwardException:
+                        pass
 
                 # End timing (only when logging, single sync resolves all)
                 if should_time and device.type in ("cuda", "npu"):

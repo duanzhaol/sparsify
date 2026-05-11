@@ -30,6 +30,44 @@ def get_layer_list(model: PreTrainedModel) -> tuple[str, nn.ModuleList]:
     return candidates[0]
 
 
+def iter_hookpoint_modules(model: PreTrainedModel):
+    """Yield hookable module names.
+
+    Existing training hookpoints are named relative to ``model.base_model``
+    (for example ``layers.0.mlp.up_proj``). Some useful targets, such as
+    ``lm_head``, live on the top-level causal LM wrapper instead. Yield the
+    base-model names first for backwards compatibility, then top-level modules
+    that are not already represented by the base model.
+    """
+    yielded: set[int] = set()
+    base_model = getattr(model, "base_model", None)
+    if isinstance(base_model, nn.Module):
+        for name, module in base_model.named_modules():
+            yielded.add(id(module))
+            yield name, module
+
+    if isinstance(model, nn.Module):
+        for name, module in model.named_modules():
+            if id(module) in yielded:
+                continue
+            yield name, module
+
+
+def get_hookpoint_submodule(model: PreTrainedModel, name: str) -> nn.Module:
+    """Resolve a hookpoint name against base-model or top-level modules."""
+    base_model = getattr(model, "base_model", None)
+    if isinstance(base_model, nn.Module):
+        try:
+            return base_model.get_submodule(name)
+        except AttributeError:
+            pass
+
+    if isinstance(model, nn.Module):
+        return model.get_submodule(name)
+
+    raise AttributeError(f"Cannot resolve hookpoint module {name!r}")
+
+
 def _get_num_hidden_layers(config: Any) -> int:
     value = getattr(config, "num_hidden_layers", None)
     if isinstance(value, int):
@@ -61,9 +99,7 @@ def resolve_widths(
         dim: Which dimension to extract (default: -1)
         hook_mode: "input" to measure input dimensions, "output" to measure output dimensions
     """
-    module_to_name = {
-        model.base_model.get_submodule(name): name for name in module_names
-    }
+    module_to_name = {get_hookpoint_submodule(model, name): name for name in module_names}
     shapes: dict[str, int] = {}
 
     def hook(module, input, output):
