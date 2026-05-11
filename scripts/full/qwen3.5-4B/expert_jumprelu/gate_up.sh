@@ -1,4 +1,4 @@
-NPROC_PER_NODE=4 \
+NPROC_PER_NODE=2 \
 		MODEL_PATH=$HOME/models/Qwen3.5-4B \
 		DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
 		WANDB_PROJECT=qwen3.5-4B-expert_jumprelu-gate-up \
@@ -15,16 +15,16 @@ NPROC_PER_NODE=4 \
 		LR=8e-4 \
 		HOOKPOINTS='layers.[0-15].mlp.up_proj' \
 		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3.5-4B/thresholds_gate_up.json \
-		BATCH_SIZE=1 \
+		BATCH_SIZE=2 \
 		GRAD_ACC_STEPS=4 \
 		MICRO_ACC_STEPS=1 \
 		AUXK_ALPHA=0.03125 \
 		DEAD_FEATURE_THRESHOLD=10000000 \
 		USE_HADAMARD=0 \
-		COMPILE_MODEL=1 \
+		COMPILE_MODEL=0 \
 		bash scripts/autoresearch_test.sh
 
-NPROC_PER_NODE=4 \
+NPROC_PER_NODE=2 \
 		MODEL_PATH=$HOME/models/Qwen3.5-4B \
 		DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
 		WANDB_PROJECT=qwen3.5-4B-expert_jumprelu-gate-up \
@@ -41,7 +41,7 @@ NPROC_PER_NODE=4 \
 		LR=8e-4 \
 		HOOKPOINTS='layers.[16-31].mlp.up_proj' \
 		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3.5-4B/thresholds_gate_up.json \
-		BATCH_SIZE=1 \
+		BATCH_SIZE=2 \
 		GRAD_ACC_STEPS=4 \
 		MICRO_ACC_STEPS=1 \
 		AUXK_ALPHA=0.03125 \

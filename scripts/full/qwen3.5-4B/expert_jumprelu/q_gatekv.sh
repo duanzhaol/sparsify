@@ -1,4 +1,4 @@
-NPROC_PER_NODE=4 \
+NPROC_PER_NODE=2 \
 		MODEL_PATH=$HOME/models/Qwen3.5-4B \
 		DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
 		WANDB_PROJECT=qwen3.5-4B-expert_jumprelu-q-gatekv \
@@ -16,7 +16,7 @@ NPROC_PER_NODE=4 \
 		HOOKPOINTS='layers.[3,7,11,15,19,23,27,31].self_attn.q_proj' \
 		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3.5-4B/thresholds_q_gatekv.json \
 		BATCH_SIZE=1 \
-		GRAD_ACC_STEPS=4 \
+		GRAD_ACC_STEPS=8 \
 		MICRO_ACC_STEPS=1 \
 		AUXK_ALPHA=0.03125 \
 		DEAD_FEATURE_THRESHOLD=10000000 \
