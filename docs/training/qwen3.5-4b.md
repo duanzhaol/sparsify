@@ -35,6 +35,8 @@ Trainer 的 forward hook 使用模块输入，所以虽然前三类 hookpoint �
 - `scripts/export/export_expert_jumprelu_lut.py`
   - 增加 `gdn_qkvz`、`q_gatekv`、`gate_up` projection specs。
   - 支持 Qwen3.5 这种不同 operator 覆盖不同层集合的导出。
+- `scripts/export/export_dense_jumprelu_lm_head_lut.py`
+  - 支持 dense `jumprelu` 的 `lm_head` SAE 导出为 logits LUT。
 - `scripts/full/qwen3.5-4B/expert_jumprelu/`
   - 增加训练脚本：
     - `gdn_qkvz.sh`
@@ -297,7 +299,32 @@ python scripts/export/export_expert_jumprelu_lut.py \
   --batch-size 1024
 ```
 
-当前 exporter 已覆盖 `gdn_qkvz`、`q_gatekv`、`gate_up` 三类 layer 内算子。`lm_head` SAE 的训练和 threshold 已支持；如果要把 logits SAE 导出为 LUT，还需要给 exporter 增加 `lm_head.weight` 的 projection spec 和输出格式。
+### dense jumprelu lm_head
+
+dense `jumprelu` 的 `lm_head` SAE 使用专门的 exporter。输入可以是 run 目录，也可以直接传 `best/lm_head` 或 `lm_head` checkpoint 目录；如果 run 目录下存在 `best/lm_head`，脚本会优先使用它。
+
+示例：
+
+```bash
+python scripts/export/export_dense_jumprelu_lm_head_lut.py \
+  /root/models/Qwen3.5-4B \
+  checkpoints/qwen3.5-4B/dense_jumprelu_lm_head/dense_jumprelu_lm_head_ef8_k256_dp2_bs2_ga4_ef2_k192_20260511_162405 \
+  --output-dir exports/qwen3.5-4B/dense_jumprelu_lm_head_ef2_k192 \
+  --dtype bfloat16 \
+  --device cuda:0 \
+  --batch-size 128
+```
+
+输出：
+
+```text
+exports/qwen3.5-4B/dense_jumprelu_lm_head_ef2_k192/lm_head.lut.safetensors
+exports/qwen3.5-4B/dense_jumprelu_lm_head_ef2_k192/metadata.json
+```
+
+bundle 包含 dense encoder、JumpReLU threshold、SAE decoder、`W_dec @ lm_head.weight.T`、`b_dec @ lm_head.weight.T`，以及 compensation 用的 `lm_head.weight.T`。
+
+`expert_jumprelu` 的 `lm_head` checkpoint 和 dense `jumprelu` 格式不同，不要用这个 dense exporter 导出 expert checkpoint。
 
 ## 常见问题
 
@@ -343,4 +370,6 @@ bash -n scripts/full/qwen3.5-4B/expert_jumprelu/gdn_qkvz.sh \
   scripts/full/qwen3.5-4B/expert_jumprelu/q_gatekv.sh \
   scripts/full/qwen3.5-4B/expert_jumprelu/gate_up.sh \
   scripts/full/qwen3.5-4B/expert_jumprelu/lm_head.sh
+pytest tests/test_export_dense_jumprelu_lm_head_lut.py -q
+python -m py_compile scripts/export/export_dense_jumprelu_lm_head_lut.py
 ```
