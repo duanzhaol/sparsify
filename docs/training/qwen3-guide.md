@@ -4,6 +4,8 @@
 
 Qwen3.5-4B 的 GDN、full attention 和 MLP 三类 fused projection 训练流程见 `docs/training/qwen3.5-4b.md`。
 
+Qwen3.5-9B 的结构确认、threshold 命令和保守版训练脚本见 `docs/training/qwen3.5-9b.md`。
+
 ## LUTurbo 场景推荐的 hookpoint
 
 当前实现默认在模块输入上训练 SAE。对于 LUTurbo 相关实验，应优先关注后续要用 LUT 近似的线性投影输入。
