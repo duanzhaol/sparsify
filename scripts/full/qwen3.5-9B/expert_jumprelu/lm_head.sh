@@ -1,0 +1,25 @@
+NPROC_PER_NODE=2 \
+		MODEL_PATH=$HOME/models/Qwen3.5-9B \
+		DATASET_PATH=$HOME/fineweb-edu/sample/10BT-tokenized-qwen3.5-2048 \
+		WANDB_PROJECT=qwen3.5-9B-expert_jumprelu-lm-head \
+		SAVE_DIR=checkpoints/qwen3.5-9B/expert_jumprelu_lm_head \
+		RUN_NAME=expert_jumprelu_lm_head \
+		MAX_TOKENS=${MAX_TOKENS:-100000000} \
+		ARCHITECTURE=expert_jumprelu \
+		K=256 \
+		EXPANSION_FACTOR=1 \
+		NUM_EXPERTS=64 \
+		ACTIVE_EXPERTS=2 \
+		LATENTS_PER_EXPERT=256 \
+		OPTIMIZER=adam \
+		LR=8e-4 \
+		HOOKPOINTS='lm_head' \
+		ELBOW_THRESHOLD_PATH=$HOME/sparsify-ascend/thresholds/Qwen3.5-9B/thresholds_lm_head.json \
+		BATCH_SIZE=1 \
+		GRAD_ACC_STEPS=8 \
+		MICRO_ACC_STEPS=1 \
+		AUXK_ALPHA=0.03125 \
+		DEAD_FEATURE_THRESHOLD=10000000 \
+		USE_HADAMARD=0 \
+		COMPILE_MODEL=0 \
+		bash scripts/autoresearch_test.sh
